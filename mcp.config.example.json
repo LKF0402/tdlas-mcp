@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "tdlas": {
+      "command": "python",
+      "args": ["D:/path/to/tdlas-mcp/tools/tdlas_mcp.py"],
+      "type": "stdio",
+      "timeout": 60000,
+      "disabled": false
+    }
+  }
+}
