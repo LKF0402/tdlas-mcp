@@ -1079,8 +1079,8 @@ def use_cjk_font(matplotlib):
 
 
 def plot_wms_instrument(r, out_png):
-    """WMS 仪器链路图（单扫描周期，2–5 层横轴统一为波数）：
-    驱动电压 → DAS(αL) → 1f → 2f → **归一化 2f（自动选 2f/1f 或 2f/I0）**。"""
+    """TDLAS 仪器链路默认图（2×3 六子图，统一格式）：
+    ① 波长调制 → ② PD 原始信号(DAS 无调制) → DAS αL+理论 → ③ 1f → ④ 2f → ⑤ 归一化 2f。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -1107,70 +1107,69 @@ def plot_wms_instrument(r, out_png):
             pad = 0.08 * (hi - lo) or 1e-12
             a_.set_ylim(lo - pad, hi + pad)
 
-    fig, ax = plt.subplots(5, 1, figsize=(9.5, 13))
+    fig, ax = plt.subplots(2, 3, figsize=(15, 9))
+    ax = ax.ravel()
 
-    # ① 驱动电压：扫描三角波 + 高频正弦调制（呈"带状"）
-    ax[0].plot(r["t_cyc"] * 1e3, r["v_drive_cyc"], lw=0.6)
-    ax[0].set_ylabel("drive V (V)")
-    ax[0].set_xlabel("time (ms)")
-    ax[0].set_title(f"WMS — {m['species']} @ {m['wn_center']:.3f} cm$^{{-1}}$   "
-                    f"x={m['x']:g}, L={m['L_cm']:g} cm, fscan={m['fscan_Hz']:g} Hz, "
-                    f"fm={m['mod_freq_Hz'] / 1e3:g} kHz, m={m['mod_coeff_m']:.2f}, "
-                    f"edge={m['edge']}")
+    # ① 驱动电压：三角波 + 正弦调制
+    ax[0].plot(r["t_cyc"] * 1e3, r["v_drive_cyc"], lw=0.6, color="0.2")
+    ax[0].set_ylabel("驱动电压 (V)")
+    ax[0].set_xlabel("时间 (ms)")
+    ax[0].set_title(f"① 波长调制 V(t)   fm={m['mod_freq_Hz'] / 1e3:g} kHz, "
+                    f"fscan={m['fscan_Hz']:g} Hz")
 
-    # ② DAS（不带调制的直接吸收）：把 PD 信号的调制平均掉后提取吸光度
-    seg(ax[1], r["das_cyc"], "C0", "DAS 吸光度（PD 信号提取）")
-    seg(ax[1], r["alphaL_cyc"], "0.55", "理论 αL（HITRAN 对照）", lw=1.0)
-    ax[1].axhline(0.0, color="k", lw=0.5, alpha=0.4)
-    axb = ax[1].twinx()
-    axb.plot(nu, r["v_das_cyc"], color="0.7", lw=0.7, alpha=0.85,
-             label="PD 信号（已平均掉调制, V）")
-    axb.set_ylabel("PD (V)", color="0.45")
-    ax[1].set_ylabel(r"$\alpha L$")
-    ax[1].legend(loc="upper right", fontsize=8)
-    axb.legend(loc="lower right", fontsize=8)
-    ax[1].set_xlabel(r"wavenumber (cm$^{-1}$)")
+    # ②a PD 原始信号（无调制 DAS 链路，直接吸收）
+    seg(ax[1], r["v_das_cyc"], "C0", "PD 原始信号")
+    ax[1].set_ylabel("PD 信号 (V)")
+    ax[1].set_xlabel(r"波数 (cm$^{-1}$)")
+    ax[1].set_title("② 直接吸收 DAS（无调制）")
 
-    # ③ 1f：灰底标出非吸收区（1f 的参考区，也是 2f/1f 失效的暴露区）
-    seg(ax[2], r["S1f_cyc"], "C1", "1f")
-    if off.any():
-        ax[2].axvspan(nu[off].min(), nu[off].max(), color="0.85", alpha=0.45,
-                      label="非吸收区（理想 1f 应平稳）")
-    ax[2].set_ylabel("1f (V)")
-    ax[2].set_xlabel(r"wavenumber (cm$^{-1}$)")
-    ax[2].legend(loc="upper right", fontsize=8)
+    # ②b DAS αL + HITRAN 理论对照
+    seg(ax[2], r["das_cyc"], "C0", "DAS αL（-ln 提取）")
+    seg(ax[2], r["alphaL_cyc"], "C2", "HITRAN 理论 αL", lw=1.0)
+    ax[2].axhline(0.0, color="k", lw=0.5, alpha=0.4)
+    ax[2].set_ylabel(r"$\alpha L$")
+    ax[2].set_xlabel(r"波数 (cm$^{-1}$)")
+    ax[2].set_title("DAS 吸光度 vs 数据库理论值")
 
-    # ④ 2f
-    seg(ax[3], r["S2f_cyc"], "C3", "2f")
-    ax[3].axhline(0.0, color="k", lw=0.5, alpha=0.4)
-    ax[3].set_ylabel("2f (V)")
-    ax[3].set_xlabel(r"wavenumber (cm$^{-1}$)")
-    ax[3].legend(loc="upper right", fontsize=8)
+    # ③ 1f（单独，幅值独立）
+    seg(ax[3], r["S1f_cyc"], "C1", "1f")
+    ax[3].set_ylabel("1f (V)")
+    ax[3].set_xlabel(r"波数 (cm$^{-1}$)")
+    ax[3].set_title("③ 一阶谐波 1f")
 
-    # ⑤ 归一化 2f：灰虚线=2f/1f 对照，实线=自动选定并采用的方法
-    if ok:
-        seg(ax[4], r["S2f_norm_cyc"], "C2", "★采用：2f/1f（1f 有效）", 1.6)
-    else:
-        seg(ax[4], r["S2f_norm_cyc"], "C2",
-            f"★采用：2f/I0，I0={m['I0_pd_V']:.3g} V（PD 非吸收区均值）", 1.6)
-        ax[4].plot([], [], "--", color="0.55", lw=1, label="2f/1f ★已失效，未采用")
+    # ④ 2f（单独，幅值独立）
+    seg(ax[4], r["S2f_cyc"], "C3", "2f")
     ax[4].axhline(0.0, color="k", lw=0.5, alpha=0.4)
-    ax[4].set_ylabel("normalized 2f (a.u.)")
-    ax[4].set_xlabel(r"wavenumber (cm$^{-1}$)")
-    ax[4].legend(loc="upper right", fontsize=8)
+    ax[4].set_ylabel("2f (V)")
+    ax[4].set_xlabel(r"波数 (cm$^{-1}$)")
+    ax[4].set_title("④ 二阶谐波 2f")
 
-    # 标出被剔除的转折点区（半透明红带）——这些区域的 2f 不可信
+    # ⑤ 归一化 2f（标注方法）
+    if ok:
+        seg(ax[5], r["S2f_norm_cyc"], "C2", "2f/1f", 1.6)
+    else:
+        seg(ax[5], r["S2f_norm_cyc"], "C2",
+            f"2f/I0（I0={m['I0_pd_V']:.3g} V）", 1.6)
+    ax[5].axhline(0.0, color="k", lw=0.5, alpha=0.4)
+    ax[5].set_ylabel("归一化 2f (a.u.)")
+    ax[5].set_xlabel(r"波数 (cm$^{-1}$)")
+    ax[5].set_title(f"⑤ 归一化：{m['norm_method']}")
+
+    # 剔除区（三角波转折点）标红
     nd = int(m.get("n_trim", 0))
     if 0 < nd < r["n_per"]:
-        for seg in (nu[:nd], nu[-nd:]):
-            if seg.size:
+        for s_ in (nu[:nd], nu[-nd:]):
+            if s_.size:
                 for a_ in ax[1:]:
-                    a_.axvspan(min(seg.min(), seg.max()), max(seg.min(), seg.max()),
-                               color="red", alpha=0.08)
+                    a_.axvspan(min(s_.min(), s_.max()), max(s_.min(), s_.max()),
+                               color="red", alpha=0.06)
 
     for a_ in ax:
         a_.grid(alpha=0.3)
-    fig.suptitle(f"归一化方法：{m['norm_method']}", y=1.004, fontsize=10)
+        a_.legend(loc="upper right", fontsize=7)
+    fig.suptitle(f"TDLAS 仪器链路 — {m['species']} @ {m['wn_center']:.3f} cm$^{{-1}}$   "
+                 f"x={m['x']:g}, L={m['L_cm']:g} cm, m={m['mod_coeff_m']:.2f}   "
+                 f"归一化 = {m['norm_method']}", fontsize=11)
     fig.tight_layout()
     fig.savefig(out_png, dpi=150)
     return out_png
