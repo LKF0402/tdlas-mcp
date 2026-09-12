@@ -172,7 +172,7 @@ AI_INTERACTION_GUIDE = {
          "pass": "结论完整、可复现、附校验结论"},
     ],
     "image_layout": {
-        "布局": "2 行 × 3 列，共 6 子图，固定顺序（左→右、上→下）：",
+        "布局": "3 行 × 2 列，共 6 子图，固定顺序（左→右、上→下）：",
         "subplots": [
             "① 波长调制 V(t)（三角波+正弦调制，横轴时间）",
             "② PD 原始信号（无调制 DAS 链路，横轴波数，左轴 V）",
@@ -203,8 +203,11 @@ AI_INTERACTION_GUIDE = {
                           "这只是'波形形态'问题，不代表 DAS 更强。",
     },
     "edge_definition": "edge 指**驱动电压**方向（daq_triangle 前半=电压上升、后半=电压下降）；"
-                       "因 dν/dI<0，电压上升沿对应波数下降、下降沿对应波数上升。"
-                       "工具内部已把所选方向反转为波数单调递增再输出，无需用户处理。",
+                       "因 dν/dI<0（真实 DFB 激光：电流↑→波长红移→波数↓），电压上升沿对应波数下降、"
+                       "下降沿对应波数上升。工具把所选方向反转为波数递增输出。",
+    "pd_baseline_slope": "PD 原始信号含光强斜坡（L-I 曲线），且 dν/dI<0 使'波数递增'对应'光强下降'，"
+                        "故默认 edge=rising 的 PD 基线呈**下降沿**——这是激光器真实特性，不是错误。"
+                        "如需光强上升沿，用 edge=falling；DAS 吸光度已除以 I0 消除斜坡，不受影响。",
     "das_baseline_method": {
         "仿真做法": "DAS 基线用**理想 I0**（无吸收光强）：I0 = p_laser × throughput × resp × gain，"
                     "直接用 -ln(v_das / I0) 得 αL。因为仿真里 I0 可精确算出，无需拟合。",
@@ -591,6 +594,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "image_layout": AI_INTERACTION_GUIDE["image_layout"],
                            "das_vs_wms": AI_INTERACTION_GUIDE["das_vs_wms"],
                            "edge_definition": AI_INTERACTION_GUIDE["edge_definition"],
+                           "pd_baseline_slope": AI_INTERACTION_GUIDE["pd_baseline_slope"],
                            "noise_and_interaction": AI_INTERACTION_GUIDE["noise_and_interaction"],
                            "condition_adaptation": AI_INTERACTION_GUIDE["condition_adaptation"],
                            "das_baseline_method": AI_INTERACTION_GUIDE["das_baseline_method"],

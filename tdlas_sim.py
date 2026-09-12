@@ -1079,7 +1079,7 @@ def use_cjk_font(matplotlib):
 
 
 def plot_wms_instrument(r, out_png):
-    """TDLAS 仪器链路默认图（2×3 六子图，统一格式）：
+    """TDLAS 仪器链路默认图（3×2 六子图，统一格式）：
     ① 波长调制 → ② PD 原始信号(DAS 无调制) → DAS αL+理论 → ③ 1f → ④ 2f → ⑤ 归一化 2f。"""
     import matplotlib
     matplotlib.use("Agg")
@@ -1107,7 +1107,7 @@ def plot_wms_instrument(r, out_png):
             pad = 0.08 * (hi - lo) or 1e-12
             a_.set_ylim(lo - pad, hi + pad)
 
-    fig, ax = plt.subplots(2, 3, figsize=(15, 9))
+    fig, ax = plt.subplots(3, 2, figsize=(11, 14))
     ax = ax.ravel()
 
     # ① 驱动电压：三角波 + 正弦调制
