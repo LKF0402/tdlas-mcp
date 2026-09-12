@@ -85,7 +85,8 @@ def get_alpha(species, wn_lo, wn_hi, T, P, x, step=5e-4, wingHW=20.0):
 def simulate(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
              a=0.10, i0=0.1671, i2=2.48e-3,
              psi1=1.9356 * np.pi, psi2=4.4138 * np.pi,
-             span=0.8, n_scan=401, n_mod=96, step=5e-4):
+             span=0.8, n_scan=401, n_mod=96, step=5e-4,
+             sigma_tau=0.0, seed=None):
     """扫描式 WMS 正向仿真。
 
     species/wn0   : 分子与目标线中心（cm^-1）
@@ -93,6 +94,7 @@ def simulate(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
     a             : 调制深度（cm^-1）
     i0,i2,psi1,psi2: 激光强度调制参数（AM 幅度与 IM-FM 相位差）
     span/n_scan/n_mod: 扫描半宽 cm^-1 / 扫描点数 / 每点调制周期采样数
+    sigma_tau/seed: 等效透过率噪声标准差（>0 时注入）与随机种子
 
     返回：nu, alpha, tau, wn_scan, S1f, S2f, S4f, S2f1f, meta
     """
@@ -116,10 +118,13 @@ def simulate(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
     if R1f_bg <= 1e-15:
         R1f_bg = 1.0                                # 纯 FM（无 AM）时 1f 基线为零，退回不归一化
 
+    rng = np.random.default_rng(seed) if sigma_tau > 0 else None
     S1f = np.zeros_like(wn_scan); S2f = np.zeros_like(wn_scan)
     S4f = np.zeros_like(wn_scan); S2f1f = np.zeros_like(wn_scan)
     for j, wn_j in enumerate(wn_scan):
         tau = np.exp(-np.interp(wn_j + a * np.cos(phase), nu, alpha) * L)
+        if rng is not None:                 # 等效透过率噪声（RIN/散粒/探测器/电路 综合）
+            tau = tau + rng.normal(0.0, sigma_tau, tau.shape)
         X1f, Y1f, X2f, Y2f, X4f, Y4f = wms_calibration_free(t_mod, tau, i0, psi1, i2, psi2)
         R1f = np.hypot(X1f, Y1f)
         S1f[j] = R1f
@@ -171,6 +176,12 @@ def selftest():
         print(f"  反演闭环：真值 {x_true:g} → 反演 {x_est:.4e}（差 {err * 100:.2f}%）")
         assert err < 0.05, f"反演误差 {err:.1%} 超过 5%"
 
+    # 5) 检测极限：给 τ 加等效噪声 σ_τ，统计反演波动 → NEC / LOD
+    dl = detection_limit(sigma_tau=1e-5, x_true=1e-3, n_trials=30)
+    print(f"  检测极限（σ_τ=1e-5, x=1e-3）：反演均值 {dl['mean']:.3e}，"
+          f"NEC = {dl['NEC']:.3e}，LOD(3σ) = {dl['LOD']:.3e}")
+    assert 0 < dl["LOD"] < 1e-2, f"LOD 不合理：{dl['LOD']}"
+
     print("  自测通过")
     return r
 
@@ -198,6 +209,31 @@ def invert_concentration(peak_2f1f, k):
     if k <= 0:
         raise ValueError(f"灵敏度 k 必须 > 0，收到 {k}")
     return float(peak_2f1f) / float(k)
+
+
+def detection_limit(species="H2O", wn0=7185.596, T=296.0, P=1.0, L=30.0, a=0.10,
+                    sigma_tau=1e-5, x_true=1e-3, n_trials=30, n_sigma=3.0,
+                    seed=0, **kw):
+    """检测极限 LOD（最小可测摩尔分数）—— 蒙特卡洛。
+
+    在透过率 τ 上叠加等效噪声 σ_τ（综合 RIN / 散粒 / 探测器 / 前置放大器噪声，
+    工程上由无吸收基线的实测噪声给出），跑完整 WMS 链路并免标定反演 n_trials 次；
+    取反演值的标准差为噪声等效浓度 NEC，LOD = n_sigma × NEC（默认 3σ）。
+
+    返回 dict：k, mean, NEC, LOD, n_trials, samples
+    """
+    if n_trials < 2:
+        raise ValueError("n_trials 至少 2 才能估计标准差")
+    k = sensitivity_2f1f(species, wn0, T, P, L, a, x_ref=x_true, **kw)
+    est = np.empty(int(n_trials), dtype=float)
+    for i in range(int(n_trials)):
+        r = simulate(species, wn0, T, P, x=x_true, L=L, a=a,
+                     sigma_tau=sigma_tau, seed=seed + i, **kw)
+        est[i] = invert_concentration(float(r["S2f1f"].max()), k)
+    nec = float(np.std(est, ddof=1))
+    return {"k": k, "x_true": x_true, "sigma_tau": sigma_tau,
+            "mean": float(est.mean()), "NEC": nec, "LOD": n_sigma * nec,
+            "n_trials": int(n_trials), "samples": est}
 
 
 # ══════════════════ 6. 绘图 ══════════════════
