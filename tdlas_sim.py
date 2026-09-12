@@ -475,8 +475,9 @@ PD_DEFAULTS = {
     "resp": 0.9,             # 响应度 A/W（InGaAs）
     "gain": 1e3,             # 跨阻增益 V/A（适配 mW 光功率与 ±10 V 量程）
     "bw": 1e6,               # 探测器 + 前放带宽 Hz
-    "rin": 1e-5,             # 相对强度噪声 /√Hz
-    "drift_frac": 0.0,       # 1/f 噪声近似：激光功率慢漂移幅度（相对光强）；>0 时 WMS 相对 DAS 占优
+    "rin": 1e-5,             # 相对强度噪声 /√Hz（白）
+    "drift_frac": 0.005,     # 1/f 噪声：激光功率慢漂移幅度（相对光强，默认开）
+    "flicker_frac": 0.01,    # 1/f 噪声：粉红噪声（频域 1/√f）幅度（相对光强，默认开）
 }
 # WMS 调制参数（正弦调制）。调制幅值默认自动优化：使调制系数 m = a/HWHM ≈ 2.2，
 # 这是 2f 谐波幅值最大、检测灵敏度最优的经典取值（Arndt 1965 / Reid & Labrie 1981）。
@@ -924,6 +925,15 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
                         f"建议 mod_amp_V≈{2.2 * hwhm / abs(cfg['eta_VI'] * cfg['dnu_dI']):.4g} V")
     warnings.append(f"调制深度 a={a_cm1:.4g} cm⁻¹（HWHM={hwhm:.4g} cm⁻¹, m={m_act:.2f}），"
                     f"调制电压 {mod_amp_V:.4g} V @ fm={fm / 1e3:g} kHz")
+    # ★ 噪声透明化：所有注入的噪声项必须逐一告知用户
+    _np = [f"散粒 {s_shot * cfg['gain'] * 1e3:.3g} mV",
+           f"热 {s_therm * cfg['gain'] * 1e3:.3g} mV",
+           f"RIN(白) {s_rin * cfg['gain'] * 1e3:.3g} mV"]
+    if drift_frac > 0:
+        _np.append(f"1/f 慢漂移 {drift_frac * 100:.2g}%")
+    if flicker_frac > 0:
+        _np.append(f"1/f 粉红噪声 {flicker_frac * 100:.2g}%")
+    warnings.append("已注入噪声（须告知用户）：" + " + ".join(_np))
     if n_keep > 0:
         warnings.append(f"已剔除扫描两端各 {float(cfg['trim_frac']) * 100:.0f}% 数据"
                         f"（三角波转折点导数不连续，其高频谐波会泄漏进 2f）")
@@ -947,6 +957,7 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
             "alpha_L_peak": aL_peak, "v_pd_mean": float(np.mean(v_pd)), "lsb_V": lsb,
             "n_sat": n_sat, "sigma_shot": s_shot * cfg["gain"],
             "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
+            "drift_frac": drift_frac, "flicker_frac": flicker_frac,
             "norm_method": norm_method, "onef_valid": onef_valid, "I0_pd_V": I0_pd,
             "offband_leak_1f": off_1f, "peak_2f_1f": pk_1f,
             "onef_min_over_median": onef_min / max(onef_med, 1e-30),

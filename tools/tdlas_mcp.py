@@ -72,6 +72,8 @@ PARAM_ACQ_GUIDE = {
     "m_opt": ("目标调制系数 m", "—", "2f 灵敏度最优的调制深度/线宽比，经典值 2.2"),
     "lockin_avg": ("锁相平均周期数", "—", "低通平均的调制周期数，保持 1（>1 会模糊线形且不降残留）"),
     "lockin_stages": ("锁相低通级联级数", "—", "矩形窗频响是 sinc，级联 2 级(sinc²)把残留 4.1%→1.5%"),
+    "drift_frac": ("1/f 慢漂移幅度", "相对光强", "激光功率慢漂移；DAS 受害、WMS 锁相抑制；默认 0.005"),
+    "flicker_frac": ("1/f 粉红噪声幅度", "相对光强", "频域 1/√f 噪声；默认 0.01"),
 }
 
 # ★ AI 主动指导协议：本 MCP 面向**实验新手**，AI 必须主动引导而非被动等参数。
@@ -150,6 +152,14 @@ AI_INTERACTION_GUIDE = {
     "edge_definition": "edge 指**驱动电压**方向（daq_triangle 前半=电压上升、后半=电压下降）；"
                        "因 dν/dI<0，电压上升沿对应波数下降、下降沿对应波数上升。"
                        "工具内部已把所选方向反转为波数单调递增再输出，无需用户处理。",
+    "noise_and_interaction": {
+        "默认噪声": "白噪声（散粒+热+RIN）恒定注入；1/f 噪声（drift_frac=0.005 慢漂移 + "
+                    "flicker_frac=0.01 粉红）**默认开**。这是 DAS 受害、WMS 占优的物理来源，不可省略。",
+        "透明化": "每次返回必须把 noise_breakdown_mV + noise_1f 原样告知用户，"
+                  "并说明哪些是白噪声、哪些是 1/f、各自可调。",
+        "多交互": "MCP 服务要**多与用户交互**，而非一次性吐结果：① 先确认工况（物种/波段/T/P/浓度/光程）；"
+                  "② 明确告知注入的噪声与默认值；③ 解读前确认归一化方法；④ 主动问是否需要调噪声/换孤立线。",
+    },
     "glossary": {
         "αL": "吸光度（吸收系数×光程），无量纲；≪1 才算弱吸收，DAS/2f 才与浓度成正比",
         "HWHM": "吸收线半高半宽（cm⁻¹），决定最优调制深度",
@@ -420,7 +430,8 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     return out
 
 
-_INSTR_KEYS_WMS = _INSTR_KEYS + ("mod_freq_Hz", "mod_amp_V", "m_opt", "lockin_avg", "lockin_stages")
+_INSTR_KEYS_WMS = _INSTR_KEYS + ("mod_freq_Hz", "mod_amp_V", "m_opt", "lockin_avg", "lockin_stages",
+                                 "drift_frac", "flicker_frac")
 
 
 def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
@@ -484,7 +495,11 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                        "v_pd_mean_V": m["v_pd_mean"], "saturated_points": m["n_sat"],
                        "noise_breakdown_mV": {"shot": m["sigma_shot"] * 1e3,
                                               "thermal": m["sigma_thermal"] * 1e3,
-                                              "rin": m["sigma_rin"] * 1e3},
+                                              "rin_white": m["sigma_rin"] * 1e3},
+                       "noise_1f": {"drift_frac": m["drift_frac"],
+                                    "flicker_frac": m["flicker_frac"]},
+                       "noise_disclosure": "已注入噪声（须告知用户）：散粒+热+RIN(白) 为白噪声；"
+                                           "drift_frac/flicker_frac 为 1/f 噪声（默认开，可关）。",
                        "n_lines_in_window": m["n_lines_in_window"], "table": m["table"]},
            "assumptions": assumed, "param_requests": requests,
            "needs_input": bool(requests),
@@ -494,8 +509,15 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "image_layout": AI_INTERACTION_GUIDE["image_layout"],
                            "das_vs_wms": AI_INTERACTION_GUIDE["das_vs_wms"],
                            "edge_definition": AI_INTERACTION_GUIDE["edge_definition"],
+                           "noise_and_interaction": AI_INTERACTION_GUIDE["noise_and_interaction"],
                            "next_step": "若 param_requests 非空：先向用户索取实测值或器件型号；"
-                                        "保留默认时须在结论中标注。"},
+                                        "保留默认时须在结论中标注。",
+                           "must_disclose": ["① 本次用了哪些噪声（白噪声散粒/热/RIN + 1/f 漂移/粉红，见 noise_disclosure）",
+                                             "② 哪些参数用了默认值",
+                                             "③ 归一化方法 normalization.method",
+                                             "④ 谱线是否孤立（n_lines_in_window）"],
+                           "interaction_rule": "MCP 必须**多与用户交互**：主动告知以上 must_disclose 四项，"
+                                               "并在解读结果前先向用户确认工况（物种/波段/T/P/浓度/光程）。"},
            "warnings": m["warnings"], "edge_note": EDGE_TECH_NOTE,
            "log": g.getvalue().splitlines()}
     if save_png:
@@ -663,7 +685,12 @@ TOOLS = [
                          "adc_bits": {"type": "integer"}, "v_range": {"type": "number"},
                          "throughput": {"type": "number"}, "resp": {"type": "number"},
                          "gain": {"type": "number"}, "bw": {"type": "number"},
-                         "rin": {"type": "number"}, "seed": {"type": "integer"},
+                         "rin": {"type": "number"},
+                         "drift_frac": {"type": "number",
+                                        "description": "1/f 慢漂移幅度，默认 0.005（可设 0 关）"},
+                         "flicker_frac": {"type": "number",
+                                          "description": "1/f 粉红噪声幅度，默认 0.01（可设 0 关）"},
+                         "seed": {"type": "integer"},
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                      "required": ["species", "wn_center"]}},
     {"name": "tdlas_guide",
