@@ -39,12 +39,13 @@
 | 免定标 WMS 模型 | ✅ 已实现 | 1f 归一化 + 背景扣除（弱场线性度 0.999） |
 | 浓度反演 | ✅ 已实现 | `sensitivity_2f1f()` / `invert_concentration()`，闭环误差 < 1% |
 | 检测极限（LOD） | ✅ 已实现 | `detection_limit()` 蒙特卡洛 → NEC / LOD |
+| DAS 时域链路 | ✅ 已实现 | `simulate_das_td()` 三角波扫描 → PD 原始信号 It(t) → 多项式基线拟合扣除 → 吸光度 |
 
 ## 快速开始
 
 ```bash
 python tdlas_sim.py                    # 全链路自测 + 出图
-python tdlas_sim.py --selftest         # 只跑自测（有线/2f形状/弱场线性/反演闭环/检测限/时域交叉验证）
+python tdlas_sim.py --selftest         # 只跑自测（7 项：有线/2f形状/弱场线性/反演闭环/检测限/时域交叉验证/DAS链路）
 python tools/tdlas_mcp.py --selftest   # MCP 服务器自检
 ```
 

@@ -188,6 +188,15 @@ def selftest():
     print(f"  交叉验证（时域锁相 vs 解析模型，2f 形状相关）: {corr:.4f}")
     assert corr > 0.9, f"时域锁相与解析模型不一致（corr={corr:.3f}）"
 
+    # 7) DAS 时域链路：三角波 → PD 原始信号 → 基线拟合扣除 → 吸光度应回到 αL
+    d = simulate_das_td(x=1e-3, baseline_slope=0.05, fit_order=3)
+    tp = float(d["alpha_L_true"].max())
+    dp = float(d["das"].max())
+    derr = abs(dp - tp) / tp
+    print(f"  DAS 链路（三角波、基线斜率 0.05、3 阶拟合）：吸光度峰 {dp:.4e} "
+          f"vs 真值 αL {tp:.4e}（差 {derr * 100:.2f}%）")
+    assert derr < 0.05, f"DAS 基线扣除误差 {derr:.1%} 超过 5%"
+
     print("  自测通过")
     return r
 
@@ -292,7 +301,103 @@ def simulate_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
                      "n_lines_in_window": info["n_lines_in_window"]}}
 
 
-# ══════════════════ 7. 绘图 ══════════════════
+# ══════════════════ 7. DAS 时域链路（三角波 → PD 信号 → 基线扣除）══════════════════
+
+def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
+                    span=0.8, fscan=100.0, fs=5e5, baseline_slope=0.05,
+                    sigma=0.0, seed=None, fit_order=3, fit_frac=0.3, step=5e-4):
+    """三角波扫描 DAS 时域仿真：PD 原始信号 → 多项式基线拟合/扣除 → DAS 信号。
+
+    与真实 DAS 实验一一对应：
+        ν(t) 三角波扫描 → I₀(t) 基线（光强随扫描斜坡）→ PD 原始信号 It(t)=I₀·τ
+        → 用两端"无吸收区"拟合多项式基线 → 扣除 → 吸光度 A = -ln(It/baseline) ≈ αL
+
+    span          : 扫描半宽 cm^-1（三角波覆盖 wn0±span）
+    fscan / fs    : 三角波频率 / 采样率 Hz（取一个完整周期）
+    baseline_slope: I₀ 相对扫描的基线斜率（模拟激光 P-I 变化；0 = 平坦）
+    sigma         : 等效透过率噪声（加到 PD 信号上）
+    fit_order     : 基线拟合多项式阶数
+    fit_frac      : 距中心多远处的点算"无吸收区"（占 span 的比例）
+
+    返回：t, wn, tri, I0, It, baseline, das, alpha, alpha_L_true, meta
+    """
+    if span <= 0:
+        raise ValueError(f"扫描半宽 span 必须 > 0，收到 {span}")
+    if fscan <= 0 or fs <= 0:
+        raise ValueError("fscan / fs 必须 > 0")
+    period = 1.0 / float(fscan)
+    n = int(round(float(fs) * period))
+    if n < 8:
+        raise ValueError(f"采样点太少（fs/fscan = {float(fs) * period:.1f}），请提高 fs 或降低 fscan")
+
+    t = np.linspace(0.0, period, n, endpoint=False)
+    phase = (t / period + 0.25) % 1.0                    # 三角波：值域 [-1, 1]
+    tri = 4.0 * np.abs(phase - 0.5) - 1.0
+    wn = float(wn0) + float(span) * tri
+    I0 = 1.0 + float(baseline_slope) * tri               # 无吸收时的光强基线（随扫描变化）
+
+    nu, alpha, info = get_alpha(species, wn0 - span - 0.2, wn0 + span + 0.2, T, P, x, step=step)
+    alpha_wn = np.interp(wn, nu, alpha)
+    It = I0 * np.exp(-alpha_wn * float(L))               # PD 原始信号
+
+    rng = np.random.default_rng(seed) if sigma > 0 else None
+    if rng is not None:
+        It = It + rng.normal(0.0, float(sigma), It.shape)
+
+    mask = np.abs(wn - float(wn0)) > float(span) * (1.0 - float(fit_frac))
+    wn_c = wn - float(wn0)                               # 中心化：改善多项式条件数（否则 RankWarning）
+    if int(mask.sum()) > int(fit_order) + 1:
+        coef = np.polyfit(wn_c[mask], It[mask], int(fit_order))
+        baseline = np.polyval(coef, wn_c)
+    else:                                                # 拟合点不足 → 退化为常数基线
+        baseline = np.full_like(It, float(np.mean(It[mask])))
+    das = -np.log(np.maximum(It, 1e-12) / np.maximum(baseline, 1e-12))
+
+    meta = {"species": str(species).upper(), "wn0": float(wn0), "T": float(T), "P": float(P),
+            "x": float(x), "L": float(L), "span": float(span), "fscan": float(fscan),
+            "fs": float(fs), "baseline_slope": float(baseline_slope), "sigma": float(sigma),
+            "fit_order": int(fit_order), "fit_frac": float(fit_frac),
+            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"]}
+    return {"t": t, "wn": wn, "tri": tri, "I0": I0, "It": It, "baseline": baseline,
+            "das": das, "alpha": alpha, "alpha_L_true": alpha_wn * float(L), "meta": meta}
+
+
+def plot_das_td(r, out_png):
+    """DAS 链路四层图：三角波波长 → 基线 I₀ → PD 原始信号 → 扣除后 DAS。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    m = r["meta"]
+    t_ms = r["t"] * 1e3
+    fig, ax = plt.subplots(4, 1, figsize=(9, 10))
+    ax[0].plot(t_ms, r["wn"])
+    ax[0].set_ylabel(r"$\nu$ (cm$^{-1}$)")
+    ax[0].set_xlabel("time (ms)")
+    ax[0].set_title(f"DAS chain — {m['species']} @ {m['wn0']:.3f} cm$^{{-1}}$   "
+                    f"T={m['T']:g} K, P={m['P']:g} atm, x={m['x']:g}, L={m['L']:g} cm, "
+                    f"slope={m['baseline_slope']:g}, fit={m['fit_order']} 阶")
+    ax[1].plot(t_ms, r["I0"])
+    ax[1].set_ylabel(r"$I_0$ (a.u.)")
+    ax[1].set_xlabel("time (ms)")
+    ax[2].plot(t_ms, r["It"], ".", ms=2, label=r"PD raw  $I_t(t)$")
+    ax[2].plot(t_ms, r["baseline"], "-", lw=1.2, label="fitted baseline")
+    ax[2].set_ylabel(r"$I_t$ (a.u.)")
+    ax[2].set_xlabel("time (ms)")
+    ax[2].legend()
+    ax[3].plot(r["wn"], r["das"], ".", ms=2, label="DAS (baseline-subtracted)")
+    ax[3].plot(r["wn"], r["alpha_L_true"], "-", lw=1, alpha=0.7, label=r"true $\alpha L$")
+    ax[3].set_ylabel("absorbance")
+    ax[3].set_xlabel(r"wavenumber (cm$^{-1}$)")
+    ax[3].legend()
+    for a_ in ax:
+        a_.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=150)
+    return out_png
+
+
+# ══════════════════ 8. 绘图 ══════════════════
 
 def plot(r, out_png):
     import matplotlib
@@ -328,7 +433,10 @@ def main():
     out_dir = Path(__file__).resolve().parent / "tmp"
     out_dir.mkdir(parents=True, exist_ok=True)
     png = plot(r, out_dir / "wms_demo.png")
-    print(f"  图已保存：{png}")
+    print(f"  WMS 图已保存：{png}")
+    d = simulate_das_td(x=1e-3)
+    png2 = plot_das_td(d, out_dir / "das_chain.png")
+    print(f"  DAS 链路图已保存：{png2}")
 
 
 if __name__ == "__main__":

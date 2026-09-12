@@ -32,6 +32,7 @@ description: TDLAS/WMS spectroscopic simulation MCP server. Use when the user me
 | 工具 | 说明 |
 |------|------|
 | `tdlas_simulate` | DAS + 免标定 WMS 正向仿真 → 1f/2f 谐波峰高、DAS 透过率、线表信息（可选出图） |
+| `tdlas_das_chain` | 三角波 DAS 全链路：PD 原始信号 → 多项式基线拟合扣除 → 吸光度（可出四层链路图） |
 | `tdlas_invert` | 免标定浓度反演：2f/1f 峰高 → 摩尔分数（仅弱吸收 αL ≪ 1） |
 | `tdlas_detection_limit` | 检测极限：等效透过率噪声 σ_τ → NEC / LOD（默认 3σ） |
 | `tdlas_selftest` | 全链路自检 |

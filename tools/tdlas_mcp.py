@@ -141,14 +141,56 @@ def t_detection_limit(species="H2O", wn0=7185.596, T=296.0, P=1.0, L=30.0,
             "sensitivity_k": float(dl["k"]), "log": g.getvalue().splitlines()}
 
 
+def t_das_chain(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=1e-3, L=30.0,
+                span=0.8, fscan=100.0, fs=5e5, baseline_slope=0.05,
+                sigma=0.0, seed=None, fit_order=3, fit_frac=0.3, save_png=False):
+    """三角波扫描 DAS 全链路：PD 原始信号 → 多项式基线拟合扣除 → DAS 吸光度信号。
+
+    对应真实 DAS 实验处理：三角波扫波长 → PD 测 It(t)=I₀·τ → 用两端无吸收区拟合基线
+    → 扣除 → A = -ln(It/baseline)。返回扣除后吸光度峰、真值 αL 与偏差百分比。
+    """
+    if not (species and str(species).strip()):
+        raise ValueError("species 不能为空")
+    if not 0.0 < float(x) <= 1.0:
+        raise ValueError(f"mole_frac 必须在 (0, 1]，收到 {x}")
+    if float(L) <= 0:
+        raise ValueError(f"光程 L 必须 > 0，收到 {L}")
+    if float(fscan) <= 0 or float(fs) <= 0:
+        raise ValueError("fscan / fs 必须 > 0")
+    with _quiet() as g:
+        r = ts.simulate_das_td(species, float(wn0), float(T), float(P), float(x), float(L),
+                               span=float(span), fscan=float(fscan), fs=float(fs),
+                               baseline_slope=float(baseline_slope), sigma=float(sigma),
+                               seed=seed, fit_order=int(fit_order), fit_frac=float(fit_frac))
+    tp = float(r["alpha_L_true"].max())
+    dp = float(r["das"].max())
+    out = {"species": str(species).upper(), "wn0_cm-1": float(wn0), "T_K": float(T),
+           "P_atm": float(P), "mole_frac": float(x), "path_cm": float(L),
+           "span_cm-1": float(span), "fscan_Hz": float(fscan), "fs_Hz": float(fs),
+           "baseline_slope": float(baseline_slope), "sigma_tau": float(sigma),
+           "fit_order": int(fit_order), "fit_frac": float(fit_frac),
+           "das_absorbance_peak": dp, "alpha_L_true_peak": tp,
+           "error_pct": (abs(dp - tp) / tp * 100.0) if tp > 0 else None,
+           "n_lines_in_window": r["meta"]["n_lines_in_window"],
+           "log": g.getvalue().splitlines()}
+    if save_png:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        png = OUT_DIR / f"das_chain_{str(species).upper()}_{float(wn0):g}cm-1_x{float(x):g}.png"
+        with _quiet():
+            ts.plot_das_td(r, png)
+        out["png"] = str(png)
+    return out
+
+
 def t_selftest():
-    """全链路自检（有线 / 2f 形状 / 弱场线性 / 反演闭环 / 检测限 / 时域交叉验证）。"""
+    """全链路自检（有线 / 2f 形状 / 弱场线性 / 反演闭环 / 检测限 / 时域交叉验证 / DAS 链路）。"""
     with _quiet() as g:
         ts.selftest()
     return {"ok": True, "log": g.getvalue().splitlines()}
 
 
 DISPATCH = {"tdlas_simulate": t_simulate,
+            "tdlas_das_chain": t_das_chain,
             "tdlas_invert": t_invert,
             "tdlas_detection_limit": t_detection_limit,
             "tdlas_selftest": t_selftest}
@@ -174,6 +216,25 @@ TOOLS = [
                          "sigma_tau": {"type": "number", "description": "等效透过率噪声，默认 0"},
                          "seed": {"type": "integer"},
                          "save_png": {"type": "boolean", "description": "是否出图，默认 False"}},
+                     "required": ["species", "wn0"]}},
+    {"name": "tdlas_das_chain",
+     "description": "三角波扫描 DAS 全链路仿真：生成 PD 原始信号 It(t) → 多项式基线拟合扣除 → DAS 吸光度信号。"
+                    "对应真实 DAS 实验处理流程，可用于演示基线拟合阶数对反演的影响。",
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "species": {"type": "string"}, "wn0": {"type": "number"},
+                         "T": {"type": "number"}, "P": {"type": "number"},
+                         "x": {"type": "number", "description": "摩尔分数，默认 1e-3"},
+                         "L": {"type": "number", "description": "光程 cm，默认 30"},
+                         "span": {"type": "number", "description": "扫描半宽 cm^-1，默认 0.8"},
+                         "fscan": {"type": "number", "description": "三角波频率 Hz，默认 100"},
+                         "fs": {"type": "number", "description": "采样率 Hz，默认 5e5"},
+                         "baseline_slope": {"type": "number", "description": "I0 基线斜率，默认 0.05"},
+                         "sigma": {"type": "number", "description": "等效透过率噪声，默认 0"},
+                         "seed": {"type": "integer"},
+                         "fit_order": {"type": "integer", "description": "基线多项式阶数，默认 3"},
+                         "fit_frac": {"type": "number", "description": "无吸收区占比，默认 0.3"},
+                         "save_png": {"type": "boolean", "description": "是否出四层链路图"}},
                      "required": ["species", "wn0"]}},
     {"name": "tdlas_invert",
      "description": "免标定浓度反演：给定测得的 WMS-2f/1f 峰高，返回摩尔分数（用仿真灵敏度 k，无需标气标定）。"
