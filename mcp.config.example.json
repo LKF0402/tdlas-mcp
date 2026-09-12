@@ -1,4 +1,11 @@
 {
+  "_comment": "tdlas-mcp 的 MCP 客户端配置示例。把本文件内容合并进你的 MCP 配置（如 MCP 的 mcp.json、Claude Desktop 的 claude_desktop_config.json）。",
+  "_usage": [
+    "1. 把 args 里的路径改成你本机 tdlas-mcp 的实际绝对路径（指向 tools/tdlas_mcp.py）",
+    "2. command 用 python 或 python.exe；若用虚拟环境，改成 venv 里的解释器路径",
+    "3. 首次运行会自动从 HITRAN 下载线表缓存到 Hitran_Data/（无需 API key）",
+    "4. 依赖：pip install -r requirements.txt（numpy / matplotlib / scipy / hitran-api）"
+  ],
   "mcpServers": {
     "tdlas": {
       "command": "python",
