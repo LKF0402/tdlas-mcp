@@ -476,6 +476,7 @@ PD_DEFAULTS = {
     "gain": 1e3,             # 跨阻增益 V/A（适配 mW 光功率与 ±10 V 量程）
     "bw": 1e6,               # 探测器 + 前放带宽 Hz
     "rin": 1e-5,             # 相对强度噪声 /√Hz
+    "drift_frac": 0.0,       # 1/f 噪声近似：激光功率慢漂移幅度（相对光强）；>0 时 WMS 相对 DAS 占优
 }
 # WMS 调制参数（正弦调制）。调制幅值默认自动优化：使调制系数 m = a/HWHM ≈ 2.2，
 # 这是 2f 谐波幅值最大、检测灵敏度最优的经典取值（Arndt 1965 / Reid & Labrie 1981）。
@@ -537,6 +538,20 @@ def voltage_to_laser(v, eta_VI=24.0, dnu_dI=-0.088, wn_ref=2964.7, i_ref=120.0,
     nu = float(wn_ref) + (i - float(i_ref)) * float(dnu_dI)
     p = np.maximum(float(eta_IP) * (i - float(i_th)), 0.0)   # 低于阈值电流无输出
     return i, nu, p
+
+
+def pink_noise(n, fs, rng, f_lo=1.0):
+    """生成 1/f（粉红）噪声序列：频域给白噪声加权 1/sqrt(f)，再逆变换。
+
+    真实 RIN / 激光低频漂移的功率谱近似 1/f，在 DC 附近最强、高频衰减。
+    DAS 直接测 DC 光强、受害于 1/f；WMS 把信号搬到 fm（如 30 kHz）则天然避开。
+    """
+    freqs = np.fft.rfftfreq(int(n), d=1.0 / float(fs))
+    freqs[0] = float(f_lo)
+    spec = (rng.standard_normal(len(freqs)) + 1j * rng.standard_normal(len(freqs)))
+    spec = spec / np.sqrt(freqs)
+    x = np.fft.irfft(spec, n=int(n))
+    return x / (np.std(x) + 1e-30)          # 归一化到单位标准差
 
 
 def noise_currents(i_mean_A, bw_Hz, gain_V_per_A, rin_per_sqrtHz, T=296.0):
@@ -780,6 +795,16 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
         v_drive, cfg["eta_VI"], cfg["dnu_dI"], cfg["wn_ref"], cfg["i_ref"],
         cfg["i_th"], cfg["eta_IP"])
 
+    # 1/f 噪声：慢漂移（正弦）+ 粉红噪声（1/f RIN）。WMS 锁相是高通、天然抑制；
+    # DAS 直接测 DC 光强、受害于它——这是 WMS 通常强于 DAS 的物理来源。
+    rng = np.random.default_rng(seed)
+    drift_frac = float(cfg.get("drift_frac", 0.0))
+    flicker_frac = float(cfg.get("flicker_frac", 0.0))
+    if drift_frac > 0:
+        p_laser = p_laser * (1.0 + drift_frac * np.sin(2 * np.pi * 1.0 * t + 0.3))
+    if flicker_frac > 0:
+        p_laser = p_laser * (1.0 + flicker_frac * pink_noise(len(t), fs, rng))
+
     # ③ 光路
     alpha = np.interp(nu_laser, nu_grid, alpha_pure) * float(x)
     tau = np.exp(-alpha * float(L_cm))
@@ -789,8 +814,7 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     i_pd = p_opt * 1e-3 * float(cfg["resp"])
     v_pd = i_pd * float(cfg["gain"])
 
-    # ⑤ 噪声
-    rng = np.random.default_rng(seed)
+    # ⑤ 噪声（白噪声：散粒 + 热 + RIN）
     s_shot, s_therm, s_rin = noise_currents(float(np.mean(i_pd)), cfg["bw"],
                                             cfg["gain"], cfg["rin"], T)
     s_total = float(np.sqrt(s_shot ** 2 + s_therm ** 2 + s_rin ** 2))
@@ -863,9 +887,18 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     #    走同一条链路重算一次 PD 信号，才是真正的 DAS。
     _, nu_das, p_das = voltage_to_laser(v_scan, cfg["eta_VI"], cfg["dnu_dI"],
                                         cfg["wn_ref"], cfg["i_ref"], cfg["i_th"], cfg["eta_IP"])
+    if drift_frac > 0:
+        p_das = p_das * (1.0 + drift_frac * np.sin(2 * np.pi * 1.0 * t + 0.3))
+    if flicker_frac > 0:
+        p_das = p_das * (1.0 + flicker_frac * pink_noise(len(t), fs, rng))
     alpha_das = np.interp(nu_das, nu_grid, alpha_pure) * float(x)
-    v_das_all = (p_das * float(cfg["throughput"]) * np.exp(-alpha_das * float(L_cm))
-                 * 1e-3 * float(cfg["resp"]) * float(cfg["gain"]))
+    p_das_opt = (p_das * float(cfg["throughput"]) * np.exp(-alpha_das * float(L_cm)))
+    i_das = p_das_opt * 1e-3 * float(cfg["resp"])
+    # 同源噪声模型（与 WMS 完全一致，公平对比）
+    s_sh_d, s_th_d, s_rin_d = noise_currents(float(np.mean(i_das)), cfg["bw"],
+                                             cfg["gain"], cfg["rin"], T)
+    s_d = float(np.sqrt(s_sh_d ** 2 + s_th_d ** 2 + s_rin_d ** 2))
+    v_das_all = i_das * float(cfg["gain"]) + rng.normal(0.0, s_d * float(cfg["gain"]), i_das.shape)
     v_das_cyc = v_das_all[idx]
     base_sel = valid & off
     if int(base_sel.sum()) > 3:
