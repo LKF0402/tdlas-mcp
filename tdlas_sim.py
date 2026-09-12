@@ -478,7 +478,9 @@ MOD_DEFAULTS = {
     "mod_freq_Hz": 30e3,     # 调制频率 Hz
     "mod_phase_deg": 0.0,    # 调制相位°
     "m_opt": 2.2,            # 最优调制系数 m = a/HWHM（2f 峰值最大处）
-    "lockin_avg": 1,         # 锁相滑动平均的调制周期数
+    "lockin_avg": 3,         # 锁相滑动平均的调制周期数（≤3 以免过度平滑线形）
+    "trim_frac": 0.12,       # 剔除扫描两端比例：三角波转折点导数不连续，
+                             # 其高频谐波会泄漏进 2f，必须丢弃（WMS 标准做法）
 }
 
 
@@ -787,13 +789,46 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     avg = int(cfg["lockin_avg"])
     S1f, _, _ = wms_harmonic_lockin(v_adc, t, fs, fm, 1, avg)
     S2f, _, _ = wms_harmonic_lockin(v_adc, t, fs, fm, 2, avg)
-    S2f1f = np.divide(S2f, S1f, out=np.zeros_like(S2f), where=S1f > 1e-15)
 
-    # 取一个扫描周期（与实验单帧对齐）
+    # 取一个扫描方向（默认上升沿）：三角波往返会让同一波数出现两次、方向相反，
+    # 叠加后无法判读；实验中也按"单次扫描"取一条。edge=both 可取完整周期。
     n_per = int(round(fs / fscan))
     if n_per < 16:
         raise ValueError(f"每扫描周期采样点太少（fs/fscan = {fs / fscan:.1f}），请提高 fs 或降低 fscan")
-    sl = slice(0, n_per)
+    half = n_per // 2
+    edge = str(kw.get("edge") or "rising").strip().lower()
+    if edge == "falling":
+        idx = np.arange(half)[::-1]          # 前半 ν 递减 → 反转为递增
+    elif edge == "both":
+        idx = np.arange(n_per)
+    else:
+        edge = "rising"
+        idx = np.arange(half, n_per)          # 后半 ν 递增
+    n_sel = int(idx.size)
+    nu_cyc = nu_laser[idx]
+    S1f_cyc, S2f_cyc, v_cyc = S1f[idx], S2f[idx], v_adc[idx]
+    alphaL_cyc = np.interp(nu_cyc, nu_grid, alpha_pure) * float(x) * float(L_cm)
+
+    # ⑧ 归一化：优先 2f/1f；若 1f 失效则退化为 PD 非吸收区光强归一化 2f/I0
+    #    · 2f/1f 的前提：1f 正比于光强。但 1f 实际正比于 L-I **斜率** dP/dV，随扫描变化，
+    #      且扫描转折处 1f→0，相除会把伪影放大成假峰 → 必须检测并弃用。
+    #    · 退化方案：I0 = 非吸收区 PD 信号平均，2f/I0 与光强无关且形状稳定（标准 DC 归一化）。
+    n_keep = int(round(float(cfg["trim_frac"]) * n_sel))
+    valid = np.ones(n_sel, dtype=bool)
+    if n_keep > 0:                            # 单方向下两端都紧邻转折点
+        valid[:n_keep] = False
+        valid[-n_keep:] = False
+    off = (alphaL_cyc < 0.02 * float(np.max(alphaL_cyc) + 1e-30)) & valid   # 非吸收区
+    I0_pd = float(np.mean(np.abs(v_cyc[off]))) if off.any() else float(np.mean(np.abs(v_cyc[valid])))
+    S2f_1f = np.divide(S2f_cyc, S1f_cyc, out=np.zeros_like(S2f_cyc), where=S1f_cyc > 1e-15)
+    S2f_I0 = S2f_cyc / max(I0_pd, 1e-30)
+    # 失效判据（仅在有效区内）：非吸收区本应≈0，若其幅值接近吸收峰（>30%）则 1f 不可用
+    pk_1f = float(np.max(np.abs(S2f_1f[valid]))) if valid.any() else 0.0
+    off_1f = float(np.max(np.abs(S2f_1f[off]))) if off.any() else 0.0
+    onef_valid = bool(pk_1f > 0 and off_1f <= 0.30 * pk_1f)
+    S2f_norm = S2f_1f if onef_valid else S2f_I0
+    norm_method = "2f/1f" if onef_valid else "2f/I0（PD 非吸收区光强均值）"
+    S2f1f = S2f_1f                     # 保留原名以向后兼容（始终输出，供用户自行判断）
 
     # 主动检查
     aL_peak = float(np.max(alpha_pure_mix)) * float(L_cm)
@@ -811,6 +846,17 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
                         f"建议 mod_amp_V≈{2.2 * hwhm / abs(cfg['eta_VI'] * cfg['dnu_dI']):.4g} V")
     warnings.append(f"调制深度 a={a_cm1:.4g} cm⁻¹（HWHM={hwhm:.4g} cm⁻¹, m={m_act:.2f}），"
                     f"调制电压 {mod_amp_V:.4g} V @ fm={fm / 1e3:g} kHz")
+    if n_keep > 0:
+        warnings.append(f"已剔除扫描两端各 {float(cfg['trim_frac']) * 100:.0f}% 数据"
+                        f"（三角波转折点导数不连续，其高频谐波会泄漏进 2f）")
+    # 归一化体检：白话说清"2f/1f 能不能用"
+    if onef_valid:
+        warnings.append(f"归一化采用 **2f/1f**（1f 有效）：非吸收区 2f/1f 泄漏 {off_1f:.3g}，"
+                        f"仅占峰值 {pk_1f:.3g} 的 {100 * off_1f / max(pk_1f, 1e-30):.1f}%")
+    else:
+        warnings.append(f"⚠ **2f/1f 失效 → 已自动改用 2f/I0（PD 非吸收区光强均值 I0={I0_pd:.4g} V）**。"
+                        f"原因：1f 正比于 L-I 斜率而非光强，非吸收区 2f/1f 泄漏达 {off_1f:.3g}，"
+                        f"占峰值 {pk_1f:.3g} 的 {100 * off_1f / max(pk_1f, 1e-30):.0f}%（>30% 判为失效）")
 
     meta = {"species": str(species).upper(), "wn_center": float(wn_center), "T": float(T),
             "P": float(P), "x": float(x), "L_cm": float(L_cm), "fs": fs,
@@ -819,48 +865,120 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
             "alpha_L_peak": aL_peak, "v_pd_mean": float(np.mean(v_pd)), "lsb_V": lsb,
             "n_sat": n_sat, "sigma_shot": s_shot * cfg["gain"],
             "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
+            "norm_method": norm_method, "onef_valid": onef_valid, "I0_pd_V": I0_pd,
+            "offband_leak_1f": off_1f, "peak_2f_1f": pk_1f,
+            "trim_frac": float(cfg["trim_frac"]), "n_trim": n_keep, "edge": edge,
             "cfg": dict(cfg), "warnings": warnings,
             "n_lines_in_window": info["n_lines_in_window"], "table": info["table"]}
     return {"t": t, "v_drive": v_drive, "v_scan": v_scan, "v_mod": v_mod_sig * mod_amp_V,
             "nu_laser": nu_laser, "p_laser": p_laser, "p_opt": p_opt, "v_pd": v_pd,
             "v_adc": v_adc, "S1f": S1f, "S2f": S2f, "S2f1f": S2f1f,
-            "nu_axis": nu_laser[sl], "S1f_cyc": S1f[sl], "S2f_cyc": S2f[sl],
-            "S2f1f_cyc": S2f1f[sl], "v_adc_cyc": v_adc[sl], "v_drive_cyc": v_drive[sl],
-            "t_cyc": t[sl], "n_per": n_per, "meta": meta}
+            "nu_axis": nu_cyc, "S1f_cyc": S1f_cyc, "S2f_cyc": S2f_cyc,
+            "S2f1f_cyc": S2f_1f, "S2f_norm_cyc": S2f_norm,
+            "v_adc_cyc": v_cyc, "v_drive_cyc": v_drive[idx],
+            "alphaL_cyc": alphaL_cyc, "offband_mask": off, "valid_mask": valid,
+            "t_cyc": t[idx], "n_per": n_sel, "edge": edge, "meta": meta}
+
+
+def use_cjk_font(matplotlib):
+    """让 matplotlib 能显示中文：探测系统 CJK 字体，找到就用，找不到静默回退。"""
+    from matplotlib import font_manager
+    have = {f.name for f in font_manager.fontManager.ttflist}
+    for name in ("Microsoft YaHei", "SimHei", "SimSun", "Noto Sans CJK SC",
+                 "Source Han Sans SC", "PingFang SC", "Heiti SC"):
+        if name in have:
+            matplotlib.rcParams["font.sans-serif"] = [name, "DejaVu Sans"]
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            return name
+    matplotlib.rcParams["axes.unicode_minus"] = False
+    return None
 
 
 def plot_wms_instrument(r, out_png):
-    """WMS 仪器链路图（单扫描周期）：驱动电压 → 波数 → 功率 → PD(调制细节) → 2f/1f。"""
+    """WMS 仪器链路图（单扫描周期，2–5 层横轴统一为波数）：
+    驱动电压 → DAS(αL) → 1f → 2f → **归一化 2f（自动选 2f/1f 或 2f/I0）**。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    use_cjk_font(matplotlib)
 
     m = r["meta"]
-    t_ms = r["t_cyc"] * 1e3
-    fig, ax = plt.subplots(5, 1, figsize=(9.5, 12))
-    ax[0].plot(t_ms, r["v_drive_cyc"])
+    nu, off, ok = r["nu_axis"], r["offband_mask"], m["onef_valid"]
+    vd = r["valid_mask"]
+
+    def seg(a_, y, color, label, lw=1.2):
+        """有效区实线 + 剔除区灰点线；y 轴范围只看有效区，避免剔除区伪影压扁曲线。"""
+        a_.plot(nu[vd], y[vd], "-", color=color, lw=lw, label=label)
+        if (~vd).any():
+            a_.plot(nu[~vd], y[~vd], ":", color="0.6", lw=1.0)
+        yv = y[vd]
+        if yv.size:
+            lo, hi = min(float(np.min(yv)), 0.0), max(float(np.max(yv)), 0.0)
+            pad = 0.08 * (hi - lo) or 1e-12
+            a_.set_ylim(lo - pad, hi + pad)
+
+    fig, ax = plt.subplots(5, 1, figsize=(9.5, 13))
+
+    # ① 驱动电压：扫描三角波 + 高频正弦调制（呈"带状"）
+    ax[0].plot(r["t_cyc"] * 1e3, r["v_drive_cyc"], lw=0.6)
     ax[0].set_ylabel("drive V (V)")
-    ax[0].set_title(f"WMS chain — {m['species']} @ {m['wn_center']:.3f} cm$^{{-1}}$   "
+    ax[0].set_xlabel("time (ms)")
+    ax[0].set_title(f"WMS — {m['species']} @ {m['wn_center']:.3f} cm$^{{-1}}$   "
                     f"x={m['x']:g}, L={m['L_cm']:g} cm, fscan={m['fscan_Hz']:g} Hz, "
-                    f"fm={m['mod_freq_Hz'] / 1e3:g} kHz, m={m['mod_coeff_m']:.2f}")
-    ax[1].plot(t_ms, r["nu_laser"][:r["n_per"]])
-    ax[1].set_ylabel(r"wavenumber (cm$^{-1}$)")
-    ax[2].plot(t_ms, r["p_opt"][:r["n_per"]])
-    ax[2].set_ylabel("power at PD (mW)")
-    n_zoom = min(max(int(3 * m["fs"] / m["mod_freq_Hz"]), 50), r["n_per"])
-    tz = r["t"][:n_zoom] * 1e3
-    ax[3].plot(tz, r["v_mod"][:n_zoom], lw=1, label="modulation (zoom)")
-    ax[3].set_ylabel("mod V (V)")
-    ax[3].legend()
-    ax[4].plot(r["nu_axis"], r["S2f1f_cyc"], "-", lw=1.2, color="C2", label="WMS-2f/1f")
-    ax[4].plot(r["nu_axis"], r["S2f_cyc"] / max(float(np.max(r["S2f_cyc"])), 1e-30),
-               "--", alpha=0.6, label="WMS-2f (norm.)")
-    ax[4].set_ylabel("2f signal (a.u.)")
+                    f"fm={m['mod_freq_Hz'] / 1e3:g} kHz, m={m['mod_coeff_m']:.2f}, "
+                    f"edge={m['edge']}")
+
+    # ② DAS：吸光度 αL(ν)，同轴对照 PD 信号（含调制）
+    seg(ax[1], r["alphaL_cyc"], "C0", r"DAS $\alpha L$（吸光度）")
+    ax[1].axhline(0.0, color="k", lw=0.5, alpha=0.4)
+    axb = ax[1].twinx()
+    axb.plot(nu, r["v_adc_cyc"], color="0.65", lw=0.6, alpha=0.8, label="PD signal (V)")
+    axb.set_ylabel("PD (V)", color="0.45")
+    ax[1].set_ylabel(r"$\alpha L$")
+    ax[1].legend(loc="upper right", fontsize=8)
+    axb.legend(loc="lower right", fontsize=8)
+    ax[1].set_xlabel(r"wavenumber (cm$^{-1}$)")
+
+    # ③ 1f：灰底标出非吸收区（1f 的参考区，也是 2f/1f 失效的暴露区）
+    seg(ax[2], r["S1f_cyc"], "C1", "1f")
+    if off.any():
+        ax[2].axvspan(nu[off].min(), nu[off].max(), color="0.85", alpha=0.45,
+                      label="非吸收区（理想 1f 应平稳）")
+    ax[2].set_ylabel("1f (V)")
+    ax[2].set_xlabel(r"wavenumber (cm$^{-1}$)")
+    ax[2].legend(loc="upper right", fontsize=8)
+
+    # ④ 2f
+    seg(ax[3], r["S2f_cyc"], "C3", "2f")
+    ax[3].axhline(0.0, color="k", lw=0.5, alpha=0.4)
+    ax[3].set_ylabel("2f (V)")
+    ax[3].set_xlabel(r"wavenumber (cm$^{-1}$)")
+    ax[3].legend(loc="upper right", fontsize=8)
+
+    # ⑤ 归一化 2f：灰虚线=2f/1f 对照，实线=自动选定并采用的方法
+    if ok:
+        seg(ax[4], r["S2f_norm_cyc"], "C2", "★采用：2f/1f（1f 有效）", 1.6)
+    else:
+        seg(ax[4], r["S2f_norm_cyc"], "C2",
+            f"★采用：2f/I0，I0={m['I0_pd_V']:.3g} V（PD 非吸收区均值）", 1.6)
+        ax[4].plot([], [], "--", color="0.55", lw=1, label="2f/1f ★已失效，未采用")
+    ax[4].axhline(0.0, color="k", lw=0.5, alpha=0.4)
+    ax[4].set_ylabel("normalized 2f (a.u.)")
     ax[4].set_xlabel(r"wavenumber (cm$^{-1}$)")
-    ax[4].legend()
+    ax[4].legend(loc="upper right", fontsize=8)
+
+    # 标出被剔除的转折点区（半透明红带）——这些区域的 2f 不可信
+    nd = int(m.get("n_trim", 0))
+    if 0 < nd < r["n_per"]:
+        for seg in (nu[:nd], nu[-nd:]):
+            if seg.size:
+                for a_ in ax[1:]:
+                    a_.axvspan(min(seg.min(), seg.max()), max(seg.min(), seg.max()),
+                               color="red", alpha=0.08)
+
     for a_ in ax:
-        a_.set_xlabel(a_.get_xlabel() or "time (ms)")
         a_.grid(alpha=0.3)
+    fig.suptitle(f"归一化方法：{m['norm_method']}", y=1.004, fontsize=10)
     fig.tight_layout()
     fig.savefig(out_png, dpi=150)
     return out_png

@@ -392,6 +392,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     m = r["meta"]
     cfg = m["cfg"]
     s2f1f = np.abs(r["S2f1f_cyc"])
+    valid_i = r["valid_mask"]
     kpk = int(s2f1f.argmax())
 
     requests = []
@@ -411,7 +412,16 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                    "mod_coeff_m": m["mod_coeff_m"]},
            "adc": {"fs_Hz": m["fs"], "n_per_scan": r["n_per"], "bits": cfg["adc_bits"],
                    "v_range_V": cfg["v_range"], "lsb_V": m["lsb_V"]},
+           "normalization": {"method": m["norm_method"], "onef_valid": m["onef_valid"],
+                             "I0_pd_V": m["I0_pd_V"],
+                             "offband_leak_1f": m["offband_leak_1f"],
+                             "peak_2f_1f": m["peak_2f_1f"],
+                             "trim_frac": m["trim_frac"], "edge": m["edge"],
+                             "note": "2f/1f 的前提是 1f∝光强；但 1f 实际∝L-I 斜率，"
+                                     "非吸收区泄漏超峰值 30% 即判失效，自动退化为 2f/I0"},
            "results": {"alpha_L_peak": m["alpha_L_peak"],
+                       "S2f_norm_peak": float(np.abs(r["S2f_norm_cyc"])[valid_i].max())
+                       if valid_i.any() else None,
                        "S2f1f_peak": float(s2f1f[kpk]),
                        "S2f1f_peak_nu_cm-1": float(r["nu_axis"][kpk]),
                        "v_pd_mean_V": m["v_pd_mean"], "saturated_points": m["n_sat"],
@@ -574,7 +584,12 @@ TOOLS = [
                          "mod_amp_V": {"type": "number",
                                        "description": "调制幅值 V；缺省=按 m≈2.2 自动优化"},
                          "m_opt": {"type": "number", "description": "目标调制系数，默认 2.2"},
-                         "lockin_avg": {"type": "integer", "description": "锁相平均周期数，默认 1"},
+                         "lockin_avg": {"type": "integer",
+                                        "description": "锁相平均调制周期数，默认 3（≤3 以免模糊线形）"},
+                         "trim_frac": {"type": "number",
+                                       "description": "剔除扫描两端比例，默认 0.12（三角波转折点高频谐波会泄漏进 2f）"},
+                         "edge": {"type": "string",
+                                  "description": "扫描方向 rising/falling/both，默认 rising（避免往返重叠）"},
                          "amp_V": {"type": "number", "description": "三角波幅值 V"},
                          "freq_Hz": {"type": "number", "description": "三角波频率 Hz，默认 100"},
                          "offset_V": {"type": "number"}, "phase_deg": {"type": "number"},
