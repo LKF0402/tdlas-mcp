@@ -8,7 +8,7 @@
   · tdlas_detection_limit  检测极限 LOD（等效透过率噪声 σ_τ → NEC / LOD）
   · tdlas_selftest         全链路自检
 
-纪律（沿用 hitran-mcp）：纯标准库 stdio JSON-RPC；HITRAN 取数复用 hitran-mcp；
+纪律（沿用 hitran-mcp）：纯标准库 stdio JSON-RPC；HITRAN 取数由本仓库提供（HAPI 1.x，免 key）；
 所有 print 收进 log 字段，绝不污染 stdout 协议流。
 
 自测：python tools/tdlas_mcp.py --selftest
@@ -156,7 +156,7 @@ DISPATCH = {"tdlas_simulate": t_simulate,
 TOOLS = [
     {"name": "tdlas_simulate",
      "description": "TDLAS/WMS 正向仿真：给定分子、目标线、工况与调制参数，返回 DAS 透过率、"
-                    "1f/2f 谐波峰高与线表信息。数据经 hitran-mcp 实时取自 HITRAN。"
+                    "1f/2f 谐波峰高与线表信息。数据经 HAPI 实时取自 HITRAN（免 API key）。"
                     "未说明 T/P/浓度/光程时应先向用户确认。",
      "inputSchema": {"type": "object",
                      "properties": {

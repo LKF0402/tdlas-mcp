@@ -8,7 +8,7 @@
                 ──► 2f/1f 归一化（弱吸收下正比于浓度）
 
 设计纪律：
-  · 吸收谱取数 / 线型 / 配分和 **全部复用 hitran-mcp**（同级仓库），不重复造轮子；
+  · HITRAN 取数**自包含**（本仓库 tools/tdlas_hitran.py，仅用 HAPI 1.x，免 API key）；
   · WMS 解析式按公开成熟公式自行实现（免标定 WMS，Rieker et al., Appl. Opt. 48 (2009) 5546），
     不依赖任何第三方 TDLAS 代码；
   · 单位：波数 cm^-1 / 温度 K / 压力 atm / 光程 cm / 调制深度 cm^-1。
@@ -26,15 +26,11 @@ import numpy as np
 
 _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
-# ── 复用 hitran-mcp（同级仓库，只取数不算谱）──
-# 其仓库根必须在 sys.path 最前，否则 "tools" 会解析到 tdlas-mcp 自己的 tools 包。
-_HITRAN_MCP_ROOT = Path(__file__).resolve().parent.parent / "hitran-mcp"
-if not _HITRAN_MCP_ROOT.exists():
-    raise RuntimeError(f"未找到 hitran-mcp 仓库：{_HITRAN_MCP_ROOT}"
-                       "（tdlas-mcp 依赖它提供 HITRAN 取数与吸收谱计算）")
-if str(_HITRAN_MCP_ROOT) not in sys.path:
-    sys.path.insert(0, str(_HITRAN_MCP_ROOT))
-from tools import hitran_mcp as hm  # noqa: E402
+# ── HITRAN 取数（自包含：本仓库 tools/tdlas_hitran.py；仅用 HAPI 1.x，免 API key）──
+_ROOT = Path(__file__).resolve().parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+from tools import tdlas_hitran as th  # noqa: E402
 
 
 # ══════════════════ 1. 免标定 WMS 解析模型 ══════════════════
@@ -66,18 +62,17 @@ def wms_calibration_free(t, tau, i0, psi1, i2, psi2):
     return X1f, Y1f, X2f, Y2f, X4f, Y4f
 
 
-# ══════════════════ 2. 吸收谱（复用 hitran-mcp）══════════════════
+# ══════════════════ 2. 吸收谱（经 tools/tdlas_hitran.py 取自 HITRAN）══════════════════
 
 def get_alpha(species, wn_lo, wn_hi, T, P, x, step=5e-4, wingHW=20.0):
-    """取吸收系数 α(ν) [cm^-1]。窗口未覆盖 / 空谱由 hitran-mcp 报错，不静默。"""
-    res = hm._compute([{"name": species, "mole_frac": x}], wn_lo, wn_hi,
-                      T=T, P=P, step=step, wingHW=wingHW, mode="alpha")
-    tb = res.get("tables") or {}
-    first = next(iter(tb.values()), {}) if tb else {}
-    return (np.asarray(res["nu"], dtype=float),
-            np.asarray(res["total"], dtype=float),
-            {"n_lines_in_window": first.get("n_lines_in_window"),
-             "table": first.get("table"), "warnings": res.get("warnings") or []})
+    """取吸收系数 α(ν) [cm^-1]；混合气按 α = x·α_pure（总压 P、空气浴）缩放。
+
+    窗口未覆盖 / 空谱由 tdlas_hitran 直接报错，绝不静默返回平谱。
+    """
+    nu, alpha_pure, info = th.absorption(species, wn_lo, wn_hi, T=T, P=P,
+                                         step=step, wingHW=wingHW)
+    info["mole_frac"] = float(x)
+    return nu, alpha_pure * float(x), info
 
 
 # ══════════════════ 3. 扫描式 WMS 正向仿真 ══════════════════

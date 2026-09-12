@@ -20,32 +20,21 @@ description: TDLAS/WMS spectroscopic simulation MCP server. Use when the user me
 
 ## 前提条件
 
-本项目依赖 **hitran-mcp** 的 HITRAN 线表获取与吸收谱计算引擎。请确保：
+本项目**自包含**：无需 API key，也不依赖其它仓库。只需：
 
-1. hitran-mcp 已配置完成（见 https://github.com/LKF0402/hitran-mcp）
-2. HITRAN 线表缓存已就绪
+1. `pip install -r requirements.txt`（numpy / matplotlib / scipy / hitran-api）
+2. 首次运行会自动从 HITRAN 下载线表并缓存到 `Hitran_Data/`（后续复用缓存）
+
+> HITRAN 取数仅用 **HAPI 1.x**（官方接口，不校验 key）；刻意不用 HAPI2（其 v2 API 需 key）。
 
 ## 工具列表
 
-### 🔬 光谱计算
-
-| 工具 | 说明 | 关键参数 |
-|------|------|---------|
-| `tdlas_das_spectrum` | 直接吸收光谱（DAS）计算 | `name`, `numin`, `numax`, `T`, `P`, `mole_frac` |
-| `tdlas_wms_spectrum` | 波长调制光谱（WMS）仿真 | `name`, `center`, `mod_depth`, `mod_freq`, `T`, `P`, `mole_frac` |
-
-### 📈 谐波分析
-
-| 工具 | 说明 | 关键参数 |
-|------|------|---------|
-| `tdlas_harmonic_2f` | 2f 二次谐波提取（核心） | 同 WMS，输出 2f 信号 |
-| `tdlas_harmonic_1f` | 1f 一次谐波提取 | 同 WMS，输出 1f 信号（背景归一化用） |
-
-### 🔧 其他
-
 | 工具 | 说明 |
 |------|------|
-| `tdlas_status` | 服务器状态与配置检查 |
+| `tdlas_simulate` | DAS + 免标定 WMS 正向仿真 → 1f/2f 谐波峰高、DAS 透过率、线表信息（可选出图） |
+| `tdlas_invert` | 免标定浓度反演：2f/1f 峰高 → 摩尔分数（仅弱吸收 αL ≪ 1） |
+| `tdlas_detection_limit` | 检测极限：等效透过率噪声 σ_τ → NEC / LOD（默认 3σ） |
+| `tdlas_selftest` | 全链路自检 |
 
 ## 使用规范
 
@@ -73,4 +62,4 @@ description: TDLAS/WMS spectroscopic simulation MCP server. Use when the user me
 ## 项目地址
 
 - GitHub: https://github.com/LKF0402/tdlas-mcp
-- 依赖: https://github.com/LKF0402/hitran-mcp
+- 取数依赖: HAPI — https://github.com/hitranonline/hapi（HITRAN 官方接口，免 key）

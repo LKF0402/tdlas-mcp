@@ -24,13 +24,13 @@
 
 通过 MCP 协议接入 AI 助手，用自然语言描述实验参数即可完成仿真。
 
-> 💡 本项目依赖 [hitran-mcp](https://github.com/LKF0402/hitran-mcp) 的 HITRAN 线表获取与吸收谱计算引擎。
+> 💡 本项目**自包含**：HITRAN 线表取数与吸收谱计算由仓库内 `tools/tdlas_hitran.py` 提供（仅用 HAPI 1.x，**无需 API key**）。
 
 ## 功能规划
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| 直接吸收光谱（DAS） | ✅ 已实现 | `simulate()` 返回透过率 τ(ν)；吸收谱经 hitran-mcp 实时取自 HITRAN |
+| 直接吸收光谱（DAS） | ✅ 已实现 | `simulate()` 返回透过率 τ(ν)；吸收谱实时取自 HITRAN |
 | 波长扫描模型 | ✅ 已实现 | `span` / `n_scan` 控制扫描范围与采样；时域模式为余弦扫描 |
 | 调制深度 / 调制频率 | ✅ 已实现 | `a` 调制深度；`i0 / i2 / psi1 / psi2` 强度调制参数 |
 | 数字锁相放大器 | ✅ 已实现 | `wms_harmonic_lockin()` 正交解调 + 整数调制周期滑动平均 |
@@ -48,7 +48,7 @@ python tdlas_sim.py --selftest         # 只跑自测（有线/2f形状/弱场�
 python tools/tdlas_mcp.py --selftest   # MCP 服务器自检
 ```
 
-要求 `hitran-mcp` 与本仓库位于同一父目录（取数与吸收谱由其提供，自动加入 `sys.path`）。
+无需 API key，也不依赖其它仓库 —— 只需 `pip install -r requirements.txt`（numpy / matplotlib / scipy / hitran-api）。
 
 ## 许可证
 
@@ -56,6 +56,5 @@ GPLv3
 
 ## References
 
-- https://github.com/LKF0402/hitran-mcp
-- https://github.com/hitranonline/hapi
-- https://github.com/hitranonline/hapi2
+- HAPI（HITRAN 官方接口，本项目取数依赖）: https://github.com/hitranonline/hapi
+- HITRAN 数据库: https://hitran.org
