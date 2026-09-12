@@ -3,53 +3,76 @@
 <h1>tdlas-mcp</h1>
 
 <p><b>TDLAS/WMS 光谱仿真 MCP 服务器</b><br>
-波长调制光谱 · 谐波分析 · 锁相检测 · 自然语言驱动</p>
+仪器系统级链路仿真 · 波长调制 · 数字锁相 · 谐波分析 · AI 主动交互</p>
 
-<a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="GPLv3"></a>
 <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB" alt="Python">
 <img src="https://img.shields.io/badge/MCP-stdio%20JSON--RPC-6B8FD4" alt="MCP">
+<img src="https://img.shields.io/badge/HITRAN-HAPI%201.x-4C8C4A" alt="HITRAN">
 
 </div>
-
-[English](./README.en.md) | 中文
 
 ---
 
 ## 项目简介
 
-`tdlas-mcp` 是 TDLAS（可调谐二极管激光吸收光谱）技术的仿真 MCP 服务器，支持：
+`tdlas-mcp` 是 TDLAS（可调谐二极管激光吸收光谱）的**仪器系统级仿真 MCP 服务器**，把真实实验链路逐级建模：
 
-- **DAS**（直接吸收光谱）—— 基于 HITRAN 数据库的吸收谱计算
-- **WMS**（波长调制光谱）—— 波长扫描 + 谐波提取 + 锁相检测仿真
+```
+DAQ 驱动电压（三角波 + 正弦调制）
+  → 激光器调谐（V → 电流 → 波数/功率）
+  → 光路损耗 + 气体吸收（HITRAN 数据库）
+  → 探测器 PD（响应度/跨阻/带宽/噪声）
+  → ADC 量化
+  → 数字锁相（正交解调 + 多级低通）
+  → 1f / 2f / 2f-1f 归一化
+```
 
-通过 MCP 协议接入 AI 助手，用自然语言描述实验参数即可完成仿真。
+通过 MCP 协议接入 AI 助手，用自然语言描述实验即可完成仿真。
 
-> 💡 本项目**自包含**：HITRAN 线表取数与吸收谱计算由仓库内 `tools/tdlas_hitran.py` 提供（仅用 HAPI 1.x，**无需 API key**）。
+> 💡 本项目**自包含**：HITRAN 线表取数与吸收谱计算由仓库内 `tools/tdlas_hitran.py` 提供（仅用 HAPI 1.x，**无需 API key**，不依赖 Hitran MCP）。
 
-## 功能规划
+## 核心特性
 
-| 模块 | 状态 | 说明 |
-|------|------|------|
-| 直接吸收光谱（DAS） | ✅ 已实现 | `simulate()` 返回透过率 τ(ν)；吸收谱实时取自 HITRAN |
-| 波长扫描模型 | ✅ 已实现 | `span` / `n_scan` 控制扫描范围与采样；时域模式为余弦扫描 |
-| 调制深度 / 调制频率 | ✅ 已实现 | `a` 调制深度；`i0 / i2 / psi1 / psi2` 强度调制参数 |
-| 数字锁相放大器 | ✅ 已实现 | `wms_harmonic_lockin()` 正交解调 + 整数调制周期滑动平均 |
-| **2f 谐波提取** | ✅ 已实现 | `wms_calibration_free()` 免标定解析式（1f/2f/4f 的 X/Y） |
-| 1f 谐波提取 | ✅ 已实现 | 同上，用于背景归一化 |
-| 免定标 WMS 模型 | ✅ 已实现 | 1f 归一化 + 背景扣除（弱场线性度 0.999） |
-| 浓度反演 | ✅ 已实现 | `sensitivity_2f1f()` / `invert_concentration()`，闭环误差 < 1% |
-| 检测极限（LOD） | ✅ 已实现 | `detection_limit()` 蒙特卡洛 → NEC / LOD |
-| DAS 时域链路 | ✅ 已实现 | `simulate_das_td()` 三角波扫描 → PD 原始信号 It(t) → 多项式基线拟合扣除 → 吸光度 |
+| 特性 | 说明 |
+|------|------|
+| **仪器系统级仿真** | 不只看"光谱"，而是完整链路（电压→激光→光路→PD→ADC→锁相） |
+| **数字锁相** | 正交解调 + 2 级级联低通（sinc²，残留 4.1%→1.5%），调制系数 m≈2.2 自动优化 |
+| **AI 主动交互** | 内置 `AI_INTERACTION_GUIDE`：正向 SOP、参数索取优先级、术语表、澄清问题生成器 |
+| **自动校验** | 每次结果附 9 项校验报告（DAS-理论一致性、2f 峰位、αL 弱吸收、采样率…） |
+| **跨会话状态机** | `tdlas_session` 记住已确认参数，多轮补全、少重复问 |
+| **统一出图** | 固定 3×2 六子图（驱动/PD原始/DAS+理论/1f/2f/归一化），技术名+线型必标 |
+
+## 工具列表（10 个）
+
+| 工具 | 说明 |
+|------|------|
+| `tdlas_simulate` | DAS + 免标定 WMS 正向仿真 → 1f/2f 峰高、透过率、线表信息 |
+| `tdlas_das_chain` | 三角波 DAS 全链路：PD 原始信号 → 基线拟合 → 吸光度 |
+| `tdlas_das_instrument` | 仪器级 DAS：DAQ 电压 → 激光 → 光路 → PD → ADC |
+| `tdlas_wms_instrument` | **WMS 仪器链路**：扫描+调制 → 锁相 → 1f/2f/归一化（含校验/澄清/工况推荐） |
+| `tdlas_review` | 二次审核：返回自动校验报告（不画图） |
+| `tdlas_session` | 对话状态机：跨会话记住已确认参数 |
+| `tdlas_guide` | AI 主动指导协议（SOP/优先级/术语表/参数指南） |
+| `tdlas_invert` | 免标定浓度反演：2f/1f 峰高 → 摩尔分数 |
+| `tdlas_detection_limit` | 检测限：噪声 → NEC / LOD |
+| `tdlas_selftest` | 全链路自检 |
 
 ## 快速开始
 
 ```bash
+pip install -r requirements.txt   # numpy / matplotlib / scipy / hitran-api
+
 python tdlas_sim.py                    # 全链路自测 + 出图
-python tdlas_sim.py --selftest         # 只跑自测（7 项：有线/2f形状/弱场线性/反演闭环/检测限/时域交叉验证/DAS链路）
+python tdlas_sim.py --selftest         # 只跑自测
 python tools/tdlas_mcp.py --selftest   # MCP 服务器自检
 ```
 
-无需 API key，也不依赖其它仓库 —— 只需 `pip install -r requirements.txt`（numpy / matplotlib / scipy / hitran-api）。
+接入 AI 助手：把 `mcp.config.example.json` 的 `args` 路径改成你的实际路径，加入 MCP 客户端配置。
+
+## 依赖
+
+- 自包含 HITRAN 取数（`tools/tdlas_hitran.py`，HAPI 1.x，免 key，首次运行自动下载线表缓存到 `Hitran_Data/`）
+- **不依赖 Hitran MCP server**，可独立部署运行
 
 ## 许可证
 
@@ -57,5 +80,5 @@ GPLv3
 
 ## References
 
-- HAPI（HITRAN 官方接口，本项目取数依赖）: https://github.com/hitranonline/hapi
+- HAPI: https://github.com/hitranonline/hapi
 - HITRAN 数据库: https://hitran.org
