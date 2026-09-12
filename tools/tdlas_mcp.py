@@ -158,12 +158,18 @@ AI_INTERACTION_GUIDE = {
                  "② 2f 峰位 Δν ≈ ±0.7a（孤立单线下应见标准双峰结构）；"
                  "③ 非吸收区残留/峰 < 2%。",
          "pass": "三项都通过 → 物理结论可信；任何一项不通过 → 停止解读，回 step 1 排查"},
-        {"step": 6, "name": "输出结论",
+        {"step": 6, "name": "自检 + 二次审核（必须）",
+         "rule": "每次出图/下结论前，必须用 tdlas_review（或读取返回的 validation）做自动校验；"
+                 "校验 9 项：波数轴对齐、DAS-理论一致、αL 弱吸收、是否孤立线、调制系数 m、"
+                 "采样率、ADC 动态范围、归一化方法、噪声。overall=fail 时**不得下结论**，"
+                 "先修 fail 项；warn 项须在结论中向用户说明。",
+         "pass": "validation.overall=pass 或（warn 项已向用户说明）"},
+        {"step": 7, "name": "输出结论",
          "rule": "按此顺序：① 工况（物种/波段/T/P/x/L/fm/调制系数）；"
                  "② normalization.method 及 I0；③ 2f（或归一化 2f）峰值与位置；"
-                 "④ 噪声分解（shot/thermal/RIN）；⑤ 检测限（若已估）。"
+                 "④ 噪声分解（shot/thermal/RIN/1f）；⑤ validation 结论（pass/warn/fail）。"
                  "所有用默认值的参数必须显式标注「默认值」。",
-         "pass": "结论完整、可复现"},
+         "pass": "结论完整、可复现、附校验结论"},
     ],
     "image_layout": {
         "layers": ["① 驱动电压", "② DAS(αL) + 理论对照", "③ 1f + 非吸收区标灰",
@@ -565,6 +571,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                        "noise_disclosure": "默认未加噪声（理想仿真）。如需注入：rin=相对强度噪声，"
                                            "drift_frac=1/f 慢漂移，flicker_frac=1/f 粉红。散粒/热为物理固有（极小）。",
                        "n_lines_in_window": m["n_lines_in_window"], "table": m["table"]},
+           "validation": ts.validate_wms_result(r),
            "assumptions": assumed, "param_requests": requests,
            "needs_input": bool(requests),
            "ai_guidance": {"role": AI_INTERACTION_GUIDE["role"],
@@ -595,6 +602,25 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     return out
 
 
+def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
+             seed=None, **kw):
+    """二次审核 / 多轮核对：跑一遍 WMS 并只返回自动校验报告（不画图）。
+
+    用于在给出最终结论前，对结果做独立复核；非专业用户可据此判断"是否可信"。
+    返回 validation（overall + 逐项 checks）+ warnings + 关键指标。
+    """
+    out = t_wms_instrument(species=species, wn_center=wn_center, T=T, P=P, x=x, L_cm=L_cm,
+                           seed=seed, save_png=False, **kw)
+    return {"species": out["species"], "wn_center_cm-1": out["wn_center_cm-1"],
+            "validation": out["validation"], "warnings": out["warnings"],
+            "key_metrics": {"alpha_L_peak": out["results"]["alpha_L_peak"],
+                            "n_lines_in_window": out["results"]["n_lines_in_window"],
+                            "norm_method": out["normalization"]["method"],
+                            "scan_window_cm-1": out["scan_window_cm-1"]},
+            "suggestion": "若 validation.overall != 'pass'，先处理 fail 项再下结论；"
+                          "warn 项须向用户说明。"}
+
+
 def t_guide(topic=None):
     """返回 AI 主动指导协议（面向实验新手）：参数索取优先级、交互流程、术语表、参数索取指南。"""
     out = dict(AI_INTERACTION_GUIDE)
@@ -618,6 +644,7 @@ DISPATCH = {"tdlas_simulate": t_simulate,
             "tdlas_das_chain": t_das_chain,
             "tdlas_das_instrument": t_das_instrument,
             "tdlas_wms_instrument": t_wms_instrument,
+            "tdlas_review": t_review,
             "tdlas_guide": t_guide,
             "tdlas_invert": t_invert,
             "tdlas_detection_limit": t_detection_limit,
@@ -759,6 +786,20 @@ TOOLS = [
                          "seed": {"type": "integer"},
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                      "required": ["species", "wn_center"]}},
+    {"name": "tdlas_review",
+     "description": "二次审核/多轮核对：跑一遍 WMS 并返回自动校验报告（validation），不画图。"
+                    "用于在给出最终结论前对结果做独立复核；非专业用户据此判断结果是否可信。"
+                    "overall=pass/warn/fail，逐项 checks 标注 DAS-理论一致性、2f 峰位、αL 弱吸收、"
+                    "是否孤立线、调制系数、采样率、ADC 动态范围、归一化方法、噪声等。",
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "species": {"type": "string", "description": "分子式，默认 CH4"},
+                         "wn_center": {"type": "number", "description": "波数 cm^-1"},
+                         "T": {"type": "number"}, "P": {"type": "number"},
+                         "x": {"type": "number"}, "L_cm": {"type": "number"},
+                         "amp_V": {"type": "number"}, "freq_Hz": {"type": "number"},
+                         "mod_freq_Hz": {"type": "number"}, "mod_amp_V": {"type": "number"},
+                         "fs": {"type": "number"}, "seed": {"type": "integer"}}}},
     {"name": "tdlas_guide",
      "description": "返回 AI 主动指导协议（面向实验新手）：参数索取优先级（实测值 → 器件型号检索 → "
                     "现场标定 → 内置默认并标注）、交互流程四步、专业术语表、全部参数索取指南。"

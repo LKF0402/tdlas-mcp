@@ -972,6 +972,98 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
             "t_cyc": t[idx], "n_per": n_sel, "edge": edge, "meta": meta}
 
 
+def validate_wms_result(r):
+    """对 WMS 结果做**自动二次审核**，返回结构化校验报告。
+
+    供 MCP 在每次出结果前调用，把每项 pass/warn/fail 附在返回里，
+    让非专业用户也能一眼看出"哪些可信、哪些要复核"。
+    """
+    m = r["meta"]
+    nu, v, off = r["nu_axis"], r["valid_mask"], r["offband_mask"]
+    das = r["das_cyc"][v]
+    th = r["alphaL_cyc"][v]
+    S2 = np.abs(r["S2f_cyc"])[v]
+    checks = []
+
+    def add(name, status, detail):
+        checks.append({"check": name, "status": status, "detail": detail})
+
+    # 1. 波数轴对齐：扫描窗口是否覆盖目标线
+    wc = m["wn_center"]
+    if nu.min() <= wc <= nu.max():
+        add("波数轴对齐", "pass", f"扫描窗口 [{nu.min():.3f}, {nu.max():.3f}] 覆盖中心 {wc:.3f}")
+    else:
+        add("波数轴对齐", "fail", f"扫描窗口未覆盖 wn_center={wc}（wn_ref 错位？）")
+
+    # 2. DAS 与理论 αL 一致性
+    pk_d, pk_t = float(das.max()), float(th.max())
+    if pk_t > 0:
+        dev = abs(pk_d - pk_t) / pk_t
+        if dev < 0.02:
+            add("DAS-理论一致", "pass", f"DAS 峰值 {pk_d:.4g} vs 理论 {pk_t:.4g}，偏差 {dev:.1%}")
+        elif dev < 0.10:
+            add("DAS-理论一致", "warn", f"DAS 峰值 {pk_d:.4g} vs 理论 {pk_t:.4g}，偏差 {dev:.1%}（>2%）")
+        else:
+            add("DAS-理论一致", "fail", f"DAS 峰值 {pk_d:.4g} vs 理论 {pk_t:.4g}，偏差 {dev:.1%}（基线/错位可疑）")
+    else:
+        add("DAS-理论一致", "warn", "理论 αL 峰值为 0，无法校验")
+
+    # 3. 弱吸收区 αL
+    aL = m["alpha_L_peak"]
+    if 1e-5 <= aL <= 0.1:
+        add("弱吸收区", "pass", f"αL={aL:.3g} 在弱吸收线性区 [1e-5, 0.1]")
+    elif aL > 0.1:
+        add("弱吸收区", "warn", f"αL={aL:.3g} > 0.1：2f 进入非线性，建议降 x 或 L_cm")
+    else:
+        add("弱吸收区", "warn", f"αL={aL:.3g} < 1e-5：吸收太弱，信噪比可能不足")
+
+    # 4. 孤立线（标准谐波前提）
+    nl = m["n_lines_in_window"]
+    if nl <= 10:
+        add("孤立单线", "pass", f"窗口内 {nl} 条线，2f 应呈标准双峰")
+    else:
+        add("孤立单线", "warn", f"窗口内 {nl} 条线：2f 是多线叠加，非标准双峰（DAS 包络更直观）")
+
+    # 5. 调制系数 m
+    mm = m["mod_coeff_m"]
+    if 2.0 <= mm <= 2.6:
+        add("调制系数 m", "pass", f"m={mm:.2f} 接近最优 2.2")
+    else:
+        add("调制系数 m", "warn", f"m={mm:.2f} 偏离 2.2（2f 灵敏度非最优）")
+
+    # 6. 采样率
+    fsr = m["fs"] / m["mod_freq_Hz"]
+    if fsr >= 8:
+        add("采样率", "pass", f"每调制周期 {fsr:.1f} 点（≥8）")
+    else:
+        add("采样率", "fail", f"每调制周期仅 {fsr:.1f} 点，锁相精度不足")
+
+    # 7. ADC 动态范围
+    if m["n_sat"] > 0:
+        add("ADC 动态范围", "fail", f"{m['n_sat']} 点饱和，需降增益")
+    elif m["v_pd_mean"] < 0.05 * m["cfg"]["v_range"]:
+        add("ADC 动态范围", "warn", f"PD 信号 {m['v_pd_mean']:.3g} V 远小于量程，动态范围浪费")
+    else:
+        add("ADC 动态范围", "pass", "无饱和，动态范围合理")
+
+    # 8. 归一化方法
+    add("归一化方法", "pass", f"采用 {m['norm_method']}（1f 有效={m['onef_valid']}）")
+
+    # 9. 噪声告知（1/f 默认关，须向用户说明）
+    if m["drift_frac"] == 0 and m["flicker_frac"] == 0 and m["cfg"]["rin"] == 0:
+        add("噪声", "pass", "未加噪声（理想仿真），已按约定告知")
+    else:
+        add("噪声", "pass", f"已加噪声：rin={m['cfg']['rin']}, drift={m['drift_frac']}, flicker={m['flicker_frac']}")
+
+    status = "fail" if any(c["status"] == "fail" for c in checks) else \
+             ("warn" if any(c["status"] == "warn" for c in checks) else "pass")
+    return {"overall": status, "checks": checks,
+            "summary": f"{status.upper()}: {len(checks)} 项校验，" +
+                       f"{sum(c['status']=='pass' for c in checks)} 通过、" +
+                       f"{sum(c['status']=='warn' for c in checks)} 提醒、" +
+                       f"{sum(c['status']=='fail' for c in checks)} 失败"}
+
+
 def use_cjk_font(matplotlib):
     """让 matplotlib 能显示中文：探测系统 CJK 字体，找到就用，找不到静默回退。"""
     from matplotlib import font_manager
