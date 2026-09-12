@@ -471,6 +471,46 @@ PD_DEFAULTS = {
     "bw": 1e6,               # 探测器 + 前放带宽 Hz
     "rin": 1e-5,             # 相对强度噪声 /√Hz
 }
+# WMS 调制参数（正弦调制）。调制幅值默认自动优化：使调制系数 m = a/HWHM ≈ 2.2，
+# 这是 2f 谐波幅值最大、检测灵敏度最优的经典取值（Arndt 1965 / Reid & Labrie 1981）。
+MOD_DEFAULTS = {
+    "mod_amp_V": None,       # 正弦调制幅值 V；None = 自动按 m_opt 优化
+    "mod_freq_Hz": 30e3,     # 调制频率 Hz
+    "mod_phase_deg": 0.0,    # 调制相位°
+    "m_opt": 2.2,            # 最优调制系数 m = a/HWHM（2f 峰值最大处）
+    "lockin_avg": 1,         # 锁相滑动平均的调制周期数
+}
+
+
+def estimate_hwhm(nu, alpha):
+    """从吸收谱主峰估半高半宽 HWHM（cm^-1）：主峰 3 dB 宽 / 2。"""
+    nu = np.asarray(nu, dtype=float)
+    alpha = np.asarray(alpha, dtype=float)
+    if alpha.size < 3 or not np.any(alpha > 0):
+        raise ValueError("吸收谱为空，无法估计线宽")
+    i = int(np.argmax(alpha))
+    half = 0.5 * float(alpha[i])
+    li = i
+    while li > 0 and alpha[li] > half:
+        li -= 1
+    ri = i
+    while ri < alpha.size - 1 and alpha[ri] > half:
+        ri += 1
+    return 0.5 * float(nu[ri] - nu[li])
+
+
+def optimal_mod_amp_V(nu, alpha, eta_VI, dnu_dI, m_target=2.2):
+    """按最优调制系数 m≈2.2 反算正弦调制电压幅值 (V)。
+
+    m = a / HWHM，a 为调制深度(cm^-1)；dν/dV = η_VI·dν/dI，故 mod_amp_V = a / |dν/dV|。
+    返回 (mod_amp_V, a_cm-1, hwhm_cm-1, m_actual)。
+    """
+    hwhm = estimate_hwhm(nu, alpha)
+    a = float(m_target) * hwhm
+    dnu_dV = abs(float(eta_VI) * float(dnu_dI))
+    if dnu_dV <= 0:
+        raise ValueError("dν/dV 为零，无法换算调制电压")
+    return a / dnu_dV, a, hwhm, float(m_target)
 
 
 def daq_triangle(t, amp_V, freq_Hz, phase_deg=0.0, offset_V=0.0):
@@ -656,6 +696,166 @@ def plot_das_instrument(r, out_png, n_show_periods=2):
     ax[3].legend()
     ax[4].plot(r["nu_das"], r["das"], ".", ms=2, label=f"DAS ({m['edge']})")
     ax[4].set_ylabel("absorbance")
+    ax[4].set_xlabel(r"wavenumber (cm$^{-1}$)")
+    ax[4].legend()
+    for a_ in ax:
+        a_.set_xlabel(a_.get_xlabel() or "time (ms)")
+        a_.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=150)
+    return out_png
+
+
+def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
+                            x=1e-3, L_cm=50.0, seed=None, **kw):
+    """WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相。
+
+    与 DAS 的差别：驱动电压叠加**高频正弦调制** fm，探测器信号被编码到 fm 及其谐波，
+    经正交解调 + 整数周期滑动平均得到 1f/2f 谐波；2f/1f 在弱吸收下 ∝ 浓度，
+    且信号被搬离低频 → 天然规避 1/f 噪声与激光 RIN。
+
+    调制幅值默认**自动优化**：使调制系数 m = a/HWHM ≈ 2.2（2f 峰值最大）。
+
+    返回 dict：一个扫描周期内的 t, v_drive, v_scan, v_mod, nu_laser, p_laser, p_opt,
+                v_adc, S1f, S2f, S2f1f, meta；另有全局序列供局部放大查看。
+    """
+    cfg = {**DAQ_DEFAULTS, **SCAN_DEFAULTS, **MOD_DEFAULTS, **LASER_DEFAULTS,
+           **OPTICS_DEFAULTS, **PD_DEFAULTS}
+    cfg.update({k: v for k, v in kw.items() if v is not None})
+
+    warnings = []
+    fm = float(cfg["mod_freq_Hz"])
+    fs = float(cfg["fs"])
+    fs_min = 8.0 * fm                       # 每调制周期 ≥8 点，数字锁相才有足够精度
+    if fs < fs_min:
+        warnings.append(f"采样率 {fs / 1e3:.0f} kHz 不足以准确解调 {fm / 1e3:.0f} kHz 调制的 2f"
+                        f"（建议 ≥ {fs_min / 1e3:.0f} kS/s，即每调制周期 ≥8 点）→ 已自动提升")
+        fs = fs_min
+    if fs > 250e3:
+        warnings.append(f"所需采样率 {fs / 1e3:.0f} kS/s 超过 NI USB-6211 上限（250 kS/s）→ "
+                        f"实际采集需更高采样率的 DAQ，或降低调制频率 fm")
+    t = np.arange(int(cfg["n_samples"]), dtype=float) / fs
+    fscan = float(cfg["freq_Hz"])
+
+    # ① 驱动电压 = 三角波扫描 + 正弦调制
+    v_scan = daq_triangle(t, cfg["amp_V"], fscan, cfg["phase_deg"], cfg["offset_V"])
+    v_mod_sig = np.cos(2 * np.pi * fm * t + np.deg2rad(float(cfg["mod_phase_deg"])))
+
+    span_scan = float(cfg["amp_V"]) * abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
+    nu_grid, alpha_pure, info = th.absorption(
+        species, wn_center - span_scan - 0.3, wn_center + span_scan + 0.3, T=T, P=P,
+        step=min(2e-4, span_scan / 2000.0), wingHW=max(10.0, 5.0 * span_scan))
+    alpha_pure_mix = alpha_pure * float(x)
+    auto_mod = cfg["mod_amp_V"] is None
+    if auto_mod:
+        mod_amp_V, a_cm1, hwhm, m_act = optimal_mod_amp_V(
+            nu_grid, alpha_pure_mix, cfg["eta_VI"], cfg["dnu_dI"], cfg["m_opt"])
+    else:
+        mod_amp_V = float(cfg["mod_amp_V"])
+        a_cm1 = mod_amp_V * abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
+        hwhm = estimate_hwhm(nu_grid, alpha_pure_mix)
+        m_act = a_cm1 / hwhm if hwhm > 0 else float("nan")
+    v_drive = v_scan + mod_amp_V * v_mod_sig
+
+    # ② V → I → 波数 / 功率
+    i_laser, nu_laser, p_laser = voltage_to_laser(
+        v_drive, cfg["eta_VI"], cfg["dnu_dI"], cfg["wn_ref"], cfg["i_ref"],
+        cfg["i_th"], cfg["eta_IP"])
+
+    # ③ 光路
+    alpha = np.interp(nu_laser, nu_grid, alpha_pure) * float(x)
+    tau = np.exp(-alpha * float(L_cm))
+    p_opt = p_laser * float(cfg["throughput"]) * tau
+
+    # ④ PD
+    i_pd = p_opt * 1e-3 * float(cfg["resp"])
+    v_pd = i_pd * float(cfg["gain"])
+
+    # ⑤ 噪声
+    rng = np.random.default_rng(seed)
+    s_shot, s_therm, s_rin = noise_currents(float(np.mean(i_pd)), cfg["bw"],
+                                            cfg["gain"], cfg["rin"], T)
+    s_total = float(np.sqrt(s_shot ** 2 + s_therm ** 2 + s_rin ** 2))
+    v_noisy = v_pd + rng.normal(0.0, s_total * float(cfg["gain"]), v_pd.shape)
+
+    # ⑥ ADC
+    lsb = 2.0 * float(cfg["v_range"]) / float(2 ** int(cfg["adc_bits"]))
+    n_sat = int(np.sum(np.abs(v_noisy) >= float(cfg["v_range"])))
+    v_adc = np.clip(np.round(v_noisy / lsb) * lsb, -float(cfg["v_range"]), float(cfg["v_range"]))
+
+    # ⑦ 数字锁相 → 1f / 2f
+    avg = int(cfg["lockin_avg"])
+    S1f, _, _ = wms_harmonic_lockin(v_adc, t, fs, fm, 1, avg)
+    S2f, _, _ = wms_harmonic_lockin(v_adc, t, fs, fm, 2, avg)
+    S2f1f = np.divide(S2f, S1f, out=np.zeros_like(S2f), where=S1f > 1e-15)
+
+    # 取一个扫描周期（与实验单帧对齐）
+    n_per = int(round(fs / fscan))
+    if n_per < 16:
+        raise ValueError(f"每扫描周期采样点太少（fs/fscan = {fs / fscan:.1f}），请提高 fs 或降低 fscan")
+    sl = slice(0, n_per)
+
+    # 主动检查
+    aL_peak = float(np.max(alpha_pure_mix)) * float(L_cm)
+    if aL_peak > 0.1:
+        warnings.append(f"αL≈{aL_peak:.3g} 偏大（>0.1）：2f 偏离弱吸收线性区，建议降低浓度或光程")
+    elif aL_peak < 1e-5:
+        warnings.append(f"αL≈{aL_peak:.3g} 偏小（<1e-5）：2f 信噪比可能不足")
+    if n_sat > 0:
+        warnings.append(f"ADC 饱和：{n_sat} 个采样点超出 ±{cfg['v_range']:g} V → 降低跨阻增益")
+    v_max = float(np.max(np.abs(v_adc)))
+    if v_max < 0.05 * float(cfg["v_range"]):
+        warnings.append(f"PD 信号仅 {v_max:.3g} V，远小于量程 ±{cfg['v_range']:g} V → 可提高增益")
+    if not (2.0 <= m_act <= 2.6):
+        warnings.append(f"调制系数 m={m_act:.2f} 偏离最优 2.2（2f 峰值最大处）→ "
+                        f"建议 mod_amp_V≈{2.2 * hwhm / abs(cfg['eta_VI'] * cfg['dnu_dI']):.4g} V")
+    warnings.append(f"调制深度 a={a_cm1:.4g} cm⁻¹（HWHM={hwhm:.4g} cm⁻¹, m={m_act:.2f}），"
+                    f"调制电压 {mod_amp_V:.4g} V @ fm={fm / 1e3:g} kHz")
+
+    meta = {"species": str(species).upper(), "wn_center": float(wn_center), "T": float(T),
+            "P": float(P), "x": float(x), "L_cm": float(L_cm), "fs": fs,
+            "fscan_Hz": fscan, "mod_freq_Hz": fm, "mod_amp_V": mod_amp_V, "auto_mod": auto_mod,
+            "mod_coeff_m": m_act, "mod_depth_cm-1": a_cm1, "hwhm_cm-1": hwhm,
+            "alpha_L_peak": aL_peak, "v_pd_mean": float(np.mean(v_pd)), "lsb_V": lsb,
+            "n_sat": n_sat, "sigma_shot": s_shot * cfg["gain"],
+            "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
+            "cfg": dict(cfg), "warnings": warnings,
+            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"]}
+    return {"t": t, "v_drive": v_drive, "v_scan": v_scan, "v_mod": v_mod_sig * mod_amp_V,
+            "nu_laser": nu_laser, "p_laser": p_laser, "p_opt": p_opt, "v_pd": v_pd,
+            "v_adc": v_adc, "S1f": S1f, "S2f": S2f, "S2f1f": S2f1f,
+            "nu_axis": nu_laser[sl], "S1f_cyc": S1f[sl], "S2f_cyc": S2f[sl],
+            "S2f1f_cyc": S2f1f[sl], "v_adc_cyc": v_adc[sl], "v_drive_cyc": v_drive[sl],
+            "t_cyc": t[sl], "n_per": n_per, "meta": meta}
+
+
+def plot_wms_instrument(r, out_png):
+    """WMS 仪器链路图（单扫描周期）：驱动电压 → 波数 → 功率 → PD(调制细节) → 2f/1f。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    m = r["meta"]
+    t_ms = r["t_cyc"] * 1e3
+    fig, ax = plt.subplots(5, 1, figsize=(9.5, 12))
+    ax[0].plot(t_ms, r["v_drive_cyc"])
+    ax[0].set_ylabel("drive V (V)")
+    ax[0].set_title(f"WMS chain — {m['species']} @ {m['wn_center']:.3f} cm$^{{-1}}$   "
+                    f"x={m['x']:g}, L={m['L_cm']:g} cm, fscan={m['fscan_Hz']:g} Hz, "
+                    f"fm={m['mod_freq_Hz'] / 1e3:g} kHz, m={m['mod_coeff_m']:.2f}")
+    ax[1].plot(t_ms, r["nu_laser"][:r["n_per"]])
+    ax[1].set_ylabel(r"wavenumber (cm$^{-1}$)")
+    ax[2].plot(t_ms, r["p_opt"][:r["n_per"]])
+    ax[2].set_ylabel("power at PD (mW)")
+    n_zoom = min(max(int(3 * m["fs"] / m["mod_freq_Hz"]), 50), r["n_per"])
+    tz = r["t"][:n_zoom] * 1e3
+    ax[3].plot(tz, r["v_mod"][:n_zoom], lw=1, label="modulation (zoom)")
+    ax[3].set_ylabel("mod V (V)")
+    ax[3].legend()
+    ax[4].plot(r["nu_axis"], r["S2f1f_cyc"], "-", lw=1.2, color="C2", label="WMS-2f/1f")
+    ax[4].plot(r["nu_axis"], r["S2f_cyc"] / max(float(np.max(r["S2f_cyc"])), 1e-30),
+               "--", alpha=0.6, label="WMS-2f (norm.)")
+    ax[4].set_ylabel("2f signal (a.u.)")
     ax[4].set_xlabel(r"wavenumber (cm$^{-1}$)")
     ax[4].legend()
     for a_ in ax:

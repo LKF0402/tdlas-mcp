@@ -67,6 +67,43 @@ PARAM_ACQ_GUIDE = {
     "bw": ("PD 带宽", "Hz", "与噪声带宽、可解调的最高调制频率相关"),
     "rin": ("激光相对强度噪声 RIN", "1/√Hz", "常为 TDLAS 系统的主导噪声源"),
     "throughput": ("光学元件总透过率", "—", "窗片 / 镜片 / 光纤耦合损耗"),
+    "mod_freq_Hz": ("正弦调制频率 fm", "Hz", "把信号搬到高频以规避 1/f 噪声与激光 RIN"),
+    "mod_amp_V": ("正弦调制幅值", "V", "决定调制系数 m=a/HWHM；m≈2.2 时 2f 峰值最大"),
+    "m_opt": ("目标调制系数 m", "—", "2f 灵敏度最优的调制深度/线宽比，经典值 2.2"),
+    "lockin_avg": ("锁相平均周期数", "—", "正交解调后低通平均的调制周期数，越大越平滑"),
+}
+
+# ★ AI 主动指导协议：本 MCP 面向**实验新手**，AI 必须主动引导而非被动等参数。
+# 每次涉及真实器件的仿真，按此顺序与用户交互（用专业术语，但首次出现给白话解释）。
+AI_INTERACTION_GUIDE = {
+    "role": "你是 TDLAS 实验设计助手，服务对象多为实验新手。职责是**主动指导**，不是被动等参数。"
+            "凡信息不足必须主动索取，绝不能默默用默认值出结果。",
+    "priority": [
+        "① 先要实测标定值（最可靠）；",
+        "② 用户给不出值、但能给**器件型号** → AI 自行检索该型号规格书提取参数；",
+        "③ 型号也没有 → 引导用户**现场标定**（例：改变驱动电压 ΔV，记录波数变化 Δν，得 dν/dV）；",
+        "④ 以上都做不到 → 用内置默认值，但**必须在结论中显式标注**「以下参数用了默认值 X」。",
+    ],
+    "workflow": [
+        "第 1 步｜确认场景：测什么分子、什么波段、什么工况（T/P/浓度量级/光程）。"
+        "用户不确定时主动给推荐（CH4 → 3.3 μm 或 1.65 μm；CO → 2.3 μm；CO2 → 2.0 μm）。",
+        "第 2 步｜分组索取参数，每次只问一组，并说明该参数控制什么物理量（见 PARAM_ACQ_GUIDE 的 why）。",
+        "第 3 步｜拿到结果后做**合理性体检**并主动告知：αL 是否在弱吸收区、ADC 是否饱和、"
+        "噪声主导来源（散粒/热/RIN）、检测限量级、调制系数 m 是否接近 2.2。",
+        "第 4 步｜若返回值中 warnings / param_requests 非空，**先向用户澄清再解读结论**，"
+        "不要拿不合理参数直接下结论。",
+    ],
+    "glossary": {
+        "αL": "吸光度（吸收系数×光程），无量纲；≪1 才算弱吸收，DAS/2f 才与浓度成正比",
+        "HWHM": "吸收线半高半宽（cm⁻¹），决定最优调制深度",
+        "m": "调制系数 = 调制深度 a ÷ HWHM，最优约 2.2",
+        "fm": "正弦调制频率（把信号搬到高频，避开低频噪声）",
+        "fscan": "三角波扫描频率（扫过整条吸收线）",
+        "RIN": "激光相对强度噪声，常为 TDLAS 主导噪声源",
+        "2f/1f": "用 1f 谐波归一化 2f，抵消光强波动；弱吸收下正比于浓度（免标定核心）",
+        "LOD": "检测限（最小可测浓度）",
+        "m 优化": "工具会自动按 m≈2.2 反算正弦调制幅值；如需手动指定可用 mod_amp_V",
+    },
 }
 
 
@@ -326,6 +363,91 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     return out
 
 
+_INSTR_KEYS_WMS = _INSTR_KEYS + ("mod_freq_Hz", "mod_amp_V", "m_opt", "lockin_avg")
+
+
+def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
+                     seed=None, save_png=False, **kw):
+    """WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相（2f/1f）。
+
+    调制幅值默认按**最优调制系数 m≈2.2** 自动优化（2f 峰值最大处）。
+    未给出的参数列入 assumptions / param_requests；AI 须按 AI_INTERACTION_GUIDE 处理并显式标注。
+    """
+    import numpy as np
+    given_scene = {"T": T, "P": P, "x": x, "L_cm": L_cm}
+    scene = {k: (_SCENE_DEFAULTS[k] if v is None else v) for k, v in given_scene.items()}
+    assumed = [k for k, v in given_scene.items() if v is None]
+
+    given_inst = {k: kw.get(k) for k in _INSTR_KEYS_WMS}
+    assumed += [k for k, v in given_inst.items() if v is None]
+    inst = {k: v for k, v in given_inst.items() if v is not None}
+    if not (species and str(species).strip()):
+        raise ValueError("species 不能为空")
+
+    with _quiet() as g:
+        r = ts.simulate_wms_instrument(species, wn_center=float(wn_center),
+                                       T=float(scene["T"]), P=float(scene["P"]),
+                                       x=float(scene["x"]), L_cm=float(scene["L_cm"]),
+                                       seed=seed, **inst)
+    m = r["meta"]
+    cfg = m["cfg"]
+    s2f1f = np.abs(r["S2f1f_cyc"])
+    kpk = int(s2f1f.argmax())
+
+    requests = []
+    for k in assumed:
+        if k in PARAM_ACQ_GUIDE:
+            cn, unit, why = PARAM_ACQ_GUIDE[k]
+            requests.append({"param": k, "cn": cn, "unit": unit, "why": why,
+                             "value_used": cfg.get(k, _SCENE_DEFAULTS.get(k)),
+                             "how": "① 实测值 ② 器件型号（AI 检索规格书）③ 引导现场标定 ④ 保留默认并注明"})
+
+    out = {"species": str(species).upper(), "wn_center_cm-1": float(wn_center),
+           "scan_window_cm-1": [round(float(r["nu_axis"].min()), 4),
+                                round(float(r["nu_axis"].max()), 4)],
+           "wms": {"fscan_Hz": m["fscan_Hz"], "mod_freq_Hz": m["mod_freq_Hz"],
+                   "mod_amp_V": m["mod_amp_V"], "auto_optimized": m["auto_mod"],
+                   "mod_depth_cm-1": m["mod_depth_cm-1"], "HWHM_cm-1": m["hwhm_cm-1"],
+                   "mod_coeff_m": m["mod_coeff_m"]},
+           "adc": {"fs_Hz": m["fs"], "n_per_scan": r["n_per"], "bits": cfg["adc_bits"],
+                   "v_range_V": cfg["v_range"], "lsb_V": m["lsb_V"]},
+           "results": {"alpha_L_peak": m["alpha_L_peak"],
+                       "S2f1f_peak": float(s2f1f[kpk]),
+                       "S2f1f_peak_nu_cm-1": float(r["nu_axis"][kpk]),
+                       "v_pd_mean_V": m["v_pd_mean"], "saturated_points": m["n_sat"],
+                       "noise_breakdown_mV": {"shot": m["sigma_shot"] * 1e3,
+                                              "thermal": m["sigma_thermal"] * 1e3,
+                                              "rin": m["sigma_rin"] * 1e3},
+                       "n_lines_in_window": m["n_lines_in_window"], "table": m["table"]},
+           "assumptions": assumed, "param_requests": requests,
+           "needs_input": bool(requests),
+           "ai_guidance": {"role": AI_INTERACTION_GUIDE["role"],
+                           "priority": AI_INTERACTION_GUIDE["priority"],
+                           "next_step": "若 param_requests 非空：先向用户索取实测值或器件型号；"
+                                        "保留默认时须在结论中标注。"},
+           "warnings": m["warnings"], "edge_note": EDGE_TECH_NOTE,
+           "log": g.getvalue().splitlines()}
+    if save_png:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        png = OUT_DIR / f"wms_instr_{str(species).upper()}_{float(wn_center):g}cm-1.png"
+        with _quiet():
+            ts.plot_wms_instrument(r, png)
+        out["png"] = str(png)
+    return out
+
+
+def t_guide(topic=None):
+    """返回 AI 主动指导协议（面向实验新手）：参数索取优先级、交互流程、术语表、参数索取指南。"""
+    out = dict(AI_INTERACTION_GUIDE)
+    out["param_guide"] = {k: {"cn": v[0], "unit": v[1], "why": v[2]}
+                          for k, v in PARAM_ACQ_GUIDE.items()}
+    if topic:
+        t = str(topic).upper()
+        out["glossary_hit"] = {k: v for k, v in AI_INTERACTION_GUIDE["glossary"].items()
+                               if t in k.upper() or t in str(v).upper()}
+    return out
+
+
 def t_selftest():
     """全链路自检（有线 / 2f 形状 / 弱场线性 / 反演闭环 / 检测限 / 时域交叉验证 / DAS 链路）。"""
     with _quiet() as g:
@@ -336,6 +458,8 @@ def t_selftest():
 DISPATCH = {"tdlas_simulate": t_simulate,
             "tdlas_das_chain": t_das_chain,
             "tdlas_das_instrument": t_das_instrument,
+            "tdlas_wms_instrument": t_wms_instrument,
+            "tdlas_guide": t_guide,
             "tdlas_invert": t_invert,
             "tdlas_detection_limit": t_detection_limit,
             "tdlas_selftest": t_selftest}
@@ -433,6 +557,45 @@ TOOLS = [
                          "seed": {"type": "integer"},
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                      "required": ["species", "wn_center"]}},
+    {"name": "tdlas_wms_instrument",
+     "description": "WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相，"
+                    "输出 2f/1f（免标定归一化）。**调制幅值默认按最优调制系数 m≈2.2 自动优化**"
+                    "（2f 峰值最大处，可用 mod_amp_V 手动覆盖）。默认 fm=30 kHz、fscan=100 Hz。"
+                    "采样率不足时会自动提升并提示（30 kHz 调制需 ≥240 kS/s）。"
+                    "缺省参数列入 param_requests，AI 须按 ai_guidance 主动向用户澄清。",
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "species": {"type": "string", "description": "分子式，默认 CH4"},
+                         "wn_center": {"type": "number", "description": "扫描中心波数 cm^-1，默认 2968.5"},
+                         "T": {"type": "number"}, "P": {"type": "number"},
+                         "x": {"type": "number", "description": "摩尔分数，默认 1e-3"},
+                         "L_cm": {"type": "number", "description": "光程 cm，默认 50"},
+                         "mod_freq_Hz": {"type": "number", "description": "正弦调制频率 Hz，默认 30000"},
+                         "mod_amp_V": {"type": "number",
+                                       "description": "调制幅值 V；缺省=按 m≈2.2 自动优化"},
+                         "m_opt": {"type": "number", "description": "目标调制系数，默认 2.2"},
+                         "lockin_avg": {"type": "integer", "description": "锁相平均周期数，默认 1"},
+                         "amp_V": {"type": "number", "description": "三角波幅值 V"},
+                         "freq_Hz": {"type": "number", "description": "三角波频率 Hz，默认 100"},
+                         "offset_V": {"type": "number"}, "phase_deg": {"type": "number"},
+                         "eta_VI": {"type": "number"}, "dnu_dI": {"type": "number"},
+                         "wn_ref": {"type": "number"}, "i_ref": {"type": "number"},
+                         "i_th": {"type": "number"}, "eta_IP": {"type": "number"},
+                         "fs": {"type": "number"}, "n_samples": {"type": "integer"},
+                         "adc_bits": {"type": "integer"}, "v_range": {"type": "number"},
+                         "throughput": {"type": "number"}, "resp": {"type": "number"},
+                         "gain": {"type": "number"}, "bw": {"type": "number"},
+                         "rin": {"type": "number"}, "seed": {"type": "integer"},
+                         "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
+                     "required": ["species", "wn_center"]}},
+    {"name": "tdlas_guide",
+     "description": "返回 AI 主动指导协议（面向实验新手）：参数索取优先级（实测值 → 器件型号检索 → "
+                    "现场标定 → 内置默认并标注）、交互流程四步、专业术语表、全部参数索取指南。"
+                    "**在开始任何 TDLAS 任务前应先调用本工具**，据此主动引导用户。",
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "topic": {"type": "string",
+                                   "description": "可选：查询特定术语（如 m / RIN / 2f1f / LOD）"}}}},
     {"name": "tdlas_invert",
      "description": "免标定浓度反演：给定测得的 WMS-2f/1f 峰高，返回摩尔分数（用仿真灵敏度 k，无需标气标定）。"
                     "仅适用弱吸收（αL≪1），强吸收时结果偏高。",
