@@ -33,6 +33,29 @@ SERVER_INFO = {"name": "tdlas", "version": "0.2.0",
                "capabilities": {"tools": {}}}
 OUT_DIR = _ROOT / "tmp" / "mcp_out"
 
+# 对话状态机：跨会话记住用户已确认的工况参数（存 JSON，MCP 重启/换会话仍保留）
+_SESSION_FILE = _ROOT / ".tdlas_session" / "memory" / "tdlas_session.json"
+
+
+def _load_sessions():
+    if _SESSION_FILE.exists():
+        try:
+            return json.loads(_SESSION_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_sessions(sessions):
+    _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _SESSION_FILE.write_text(json.dumps(sessions, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+
+
+def _get_session(session_id="default"):
+    return _load_sessions().get(session_id,
+                                {"confirmed": {}, "pending": [], "stage": "clarify"})
+
 # 技术知识：随工具返回，供 AI 向用户解释真实实验要点（而非只给数字）
 EDGE_TECH_NOTE = (
     "真实实验中三角波上升沿与下降沿常不重合，成因："
@@ -574,7 +597,7 @@ _INSTR_KEYS_WMS = _INSTR_KEYS + ("mod_freq_Hz", "mod_amp_V", "m_opt", "lockin_av
 
 
 def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
-                     seed=None, save_png=False, **kw):
+                     seed=None, save_png=False, session_id="default", **kw):
     """WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相（2f/1f）。
 
     调制幅值默认按**最优调制系数 m≈2.2** 自动优化（2f 峰值最大处）。
@@ -588,8 +611,17 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                  "x": prof.get("x_typ", _SCENE_DEFAULTS["x"]),
                  "L_cm": prof.get("L_cm", _SCENE_DEFAULTS["L_cm"])}
     given_scene = {"T": T, "P": P, "x": x, "L_cm": L_cm}
-    scene = {k: (scene_rec[k] if v is None else v) for k, v in given_scene.items()}
-    assumed = [k for k, v in given_scene.items() if v is None]
+    # 工况优先级：本次显式给 > 会话已确认(跨会话记忆) > 物种推荐 > 全局默认
+    confirmed = _get_session(session_id).get("confirmed", {})
+    scene = {}
+    for k, v in given_scene.items():
+        if v is not None:
+            scene[k] = v
+        elif k in confirmed:
+            scene[k] = confirmed[k]
+        else:
+            scene[k] = scene_rec[k]
+    assumed = [k for k, v in given_scene.items() if v is None and k not in confirmed]
 
     given_inst = {k: kw.get(k) for k in _INSTR_KEYS_WMS}
     assumed += [k for k, v in given_inst.items() if v is None]
@@ -707,6 +739,38 @@ def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
                           "warn 项须向用户说明。"}
 
 
+def t_session(action="view", session_id="default", **fields):
+    """对话状态机：跨会话记住用户已确认的工况参数。
+
+    action:
+      view  — 查看当前会话状态（已确认参数 / 待确认 / 阶段）
+      set   — 记录已确认的参数（fields 为键值，None 值跳过）
+      reset — 清空该会话
+    持久化在 .tdlas_session.json，MCP 重启/换会话仍保留。
+    """
+    sessions = _load_sessions()
+    sess = sessions.get(session_id, {"confirmed": {}, "pending": [], "stage": "clarify"})
+
+    if action == "view":
+        return {"session_id": session_id, **sess}
+    if action == "reset":
+        sessions.pop(session_id, None)
+        _save_sessions(sessions)
+        return {"session_id": session_id, "reset": True}
+    if action == "set":
+        for k, v in fields.items():
+            if v is not None and k != "session_id":
+                sess["confirmed"][k] = v
+        sess["stage"] = "confirmed" if sess["confirmed"] else "clarify"
+        sessions[session_id] = sess
+        _save_sessions(sessions)
+        return {"session_id": session_id,
+                "confirmed": sess["confirmed"],
+                "stage": sess["stage"],
+                "hint": "confirmed 参数会在后续 tdlas_wms_instrument 中自动复用"}
+    return {"error": f"unknown action {action!r}"}
+
+
 def t_guide(topic=None):
     """返回 AI 主动指导协议（面向实验新手）：参数索取优先级、交互流程、术语表、参数索取指南。"""
     out = dict(AI_INTERACTION_GUIDE)
@@ -731,6 +795,7 @@ DISPATCH = {"tdlas_simulate": t_simulate,
             "tdlas_das_instrument": t_das_instrument,
             "tdlas_wms_instrument": t_wms_instrument,
             "tdlas_review": t_review,
+            "tdlas_session": t_session,
             "tdlas_guide": t_guide,
             "tdlas_invert": t_invert,
             "tdlas_detection_limit": t_detection_limit,
@@ -886,6 +951,18 @@ TOOLS = [
                          "amp_V": {"type": "number"}, "freq_Hz": {"type": "number"},
                          "mod_freq_Hz": {"type": "number"}, "mod_amp_V": {"type": "number"},
                          "fs": {"type": "number"}, "seed": {"type": "integer"}}}},
+    {"name": "tdlas_session",
+     "description": "对话状态机（跨会话记忆）：记住用户已确认的工况参数，MCP 重启/换会话仍保留。"
+                    "action=view 查看；set 记录（键值）；reset 清空。"
+                    "已确认参数会在后续 tdlas_wms_instrument 中自动复用，实现多轮补全、少重复问。",
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "action": {"type": "string",
+                                    "description": "view / set / reset，默认 view"},
+                         "session_id": {"type": "string", "description": "会话标识，默认 default"},
+                         "T": {"type": "number"}, "P": {"type": "number"},
+                         "x": {"type": "number"}, "L_cm": {"type": "number"},
+                         "species": {"type": "string"}, "wn_center": {"type": "number"}}}},
     {"name": "tdlas_guide",
      "description": "返回 AI 主动指导协议（面向实验新手）：参数索取优先级（实测值 → 器件型号检索 → "
                     "现场标定 → 内置默认并标注）、交互流程四步、专业术语表、全部参数索取指南。"
