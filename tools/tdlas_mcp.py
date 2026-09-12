@@ -180,7 +180,7 @@ AI_INTERACTION_GUIDE = {
         "公平对比前提": "DAS 与 WMS 必须用同一套噪声模型（白噪声 + 1/f 粉红噪声 + 慢漂移）与同源噪声；"
                 "DAS 漏加噪声等于作弊，会得出'WMS 反而差'的假象。",
         "正确判据": "看浓度反演稳定性/检测限，而非单周期 σ；2f/1f 不应在非吸收区（2f、1f 都≈0）测噪声。",
-        "何时用 DAS": "需要绝对浓度、或谱线密集区想看直观包络时；"
+        "何时用 DAS": "需要绝对浓度、或谱线密集区想看直观包络时；",
         "何时用 WMS": "痕量检测、抗 1/f 与漂移、在线免标定时。",
         "谱线密度与波形": "孤立单线（n_lines ≤10）→ 2f 呈标准双峰；密集谱区 → 2f 多峰叠加（DAS 包络更直观）。"
                           "这只是'波形形态'问题，不代表 DAS 更强。",
@@ -188,6 +188,17 @@ AI_INTERACTION_GUIDE = {
     "edge_definition": "edge 指**驱动电压**方向（daq_triangle 前半=电压上升、后半=电压下降）；"
                        "因 dν/dI<0，电压上升沿对应波数下降、下降沿对应波数上升。"
                        "工具内部已把所选方向反转为波数单调递增再输出，无需用户处理。",
+    "das_baseline_method": {
+        "仿真做法": "DAS 基线用**理想 I0**（无吸收光强）：I0 = p_laser × throughput × resp × gain，"
+                    "直接用 -ln(v_das / I0) 得 αL。因为仿真里 I0 可精确算出，无需拟合。",
+        "为何不用非吸收区拟合": "真实实验常用'非吸收区多项式拟合'估 I0，但**密集谱区没有非吸收区**"
+                "（如 C2H6 2963-2966 有 159 条线），off 掩码为空 → 拟合退化、基线把吸收也平均进去，"
+                "导致 DAS 峰值偏移/为负（已实测：峰值偏 1.4 cm^-1、相关系数仅 0.015）。",
+        "真实实验对应": "实测无法直接得 I0，应：① 扫到线翼外取非吸收基线；② 或充纯缓冲气测背景谱扣基线；"
+                "③ 或用相邻无非吸收区时做多项式外推。仿真用 I0 是'已知真值的上限'，供验证用。",
+        "告知": "解读 DAS 时须向用户说明：本仿真的 DAS 基线用的是理想 I0（非吸收光强），"
+                "真实实验需另做背景扣除，DAS 实际精度会低于此理想值。",
+    },
     "condition_adaptation": {
         "规则": "工况参数（T/P/x/L_cm）未给时，按物种用 SPECIES_PROFILES 自动推荐（自适应），"
                 "不套用全局默认；返回 condition_advice 告知推荐值。",
@@ -564,6 +575,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "edge_definition": AI_INTERACTION_GUIDE["edge_definition"],
                            "noise_and_interaction": AI_INTERACTION_GUIDE["noise_and_interaction"],
                            "condition_adaptation": AI_INTERACTION_GUIDE["condition_adaptation"],
+                           "das_baseline_method": AI_INTERACTION_GUIDE["das_baseline_method"],
                            "next_step": "若 param_requests 非空：先向用户索取实测值或器件型号；"
                                         "保留默认时须在结论中标注。",
                            "must_disclose": ["① 本次用了哪些噪声（白噪声散粒/热/RIN + 1/f 漂移/粉红，见 noise_disclosure）",
