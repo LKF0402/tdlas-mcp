@@ -331,8 +331,8 @@ def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
         raise ValueError(f"采样点太少（fs/fscan = {float(fs) * period:.1f}），请提高 fs 或降低 fscan")
 
     t = np.linspace(0.0, period, n, endpoint=False)
-    phase = (t / period + 0.25) % 1.0                    # 三角波：值域 [-1, 1]
-    tri = 4.0 * np.abs(phase - 0.5) - 1.0
+    phase = (t / period) % 1.0                           # 三角波：关于 wn0 对称，先上升后下降
+    tri = 1.0 - 4.0 * np.abs(phase - 0.5)                # 0→-1, 0.5→+1, 1→-1；值域 [-1, 1]
     wn = float(wn0) + float(span) * tri
     I0 = 1.0 + float(baseline_slope) * tri               # 无吸收时的光强基线（随扫描变化）
 
@@ -376,7 +376,7 @@ def plot_das_td(r, out_png):
     ax[0].set_xlabel("time (ms)")
     ax[0].set_title(f"DAS chain — {m['species']} @ {m['wn0']:.3f} cm$^{{-1}}$   "
                     f"T={m['T']:g} K, P={m['P']:g} atm, x={m['x']:g}, L={m['L']:g} cm, "
-                    f"slope={m['baseline_slope']:g}, fit={m['fit_order']} 阶")
+                    f"slope={m['baseline_slope']:g}, baseline fit order={m['fit_order']}")
     ax[1].plot(t_ms, r["I0"])
     ax[1].set_ylabel(r"$I_0$ (a.u.)")
     ax[1].set_xlabel("time (ms)")
