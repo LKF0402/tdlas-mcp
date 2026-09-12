@@ -182,6 +182,17 @@ def selftest():
           f"NEC = {dl['NEC']:.3e}，LOD(3σ) = {dl['LOD']:.3e}")
     assert 0 < dl["LOD"] < 1e-2, f"LOD 不合理：{dl['LOD']}"
 
+    # 6) 交叉验证：时域数字锁相 vs 解析模型（2f 形状应一致）
+    td = simulate_td()
+    idx = np.argsort(td["wn_scan"])
+    interp = np.interp(r["wn_scan"], td["wn_scan"][idx], td["S2f"][idx])
+    core = slice(r["wn_scan"].size // 10, -r["wn_scan"].size // 10)   # 去两端低通瞬态
+    an = r["S2f"][core] / max(float(r["S2f"][core].max()), 1e-30)
+    td_n = interp[core] / max(float(interp[core].max()), 1e-30)
+    corr = float(np.corrcoef(an, td_n)[0, 1])
+    print(f"  交叉验证（时域锁相 vs 解析模型，2f 形状相关）: {corr:.4f}")
+    assert corr > 0.9, f"时域锁相与解析模型不一致（corr={corr:.3f}）"
+
     print("  自测通过")
     return r
 
@@ -236,7 +247,57 @@ def detection_limit(species="H2O", wn0=7185.596, T=296.0, P=1.0, L=30.0, a=0.10,
             "n_trials": int(n_trials), "samples": est}
 
 
-# ══════════════════ 6. 绘图 ══════════════════
+# ══════════════════ 6. 数字锁相（时域交叉验证）══════════════════
+
+def wms_harmonic_lockin(S, t, fs, fm, n, n_cycle_avg=1):
+    """数字锁相：正交解调 + 整数调制周期滑动平均。
+
+    低通用"一个调制周期窗口的滑动平均"实现 —— 在 fc/fs 极低（扫描/调制频率比很大）
+    时比 Butterworth 数值更稳健（后者在归一化截止 ~1e-3 时会出现病态），
+    对无噪 / 低噪仿真足够。
+
+    S : 时域探测器信号；fs / fm : 采样率 / 调制频率 (Hz)
+    n : 谐波阶数；n_cycle_avg : 平均的调制周期数（越大带宽越窄、越平滑）
+    """
+    w = 2.0 * np.pi * fm
+    S = np.asarray(S, dtype=float)
+    win = max(1, int(round(n_cycle_avg * fs / fm)))
+    ker = np.ones(win) / win
+    X = np.convolve(S * np.cos(n * w * t), ker, mode="same")
+    Y = np.convolve(S * np.sin(n * w * t), ker, mode="same")
+    return np.sqrt(X ** 2 + Y ** 2), X, Y
+
+
+def simulate_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
+                a=0.10, i0=0.1671, i2=2.48e-3,
+                psi1=1.9356 * np.pi, psi2=4.4138 * np.pi,
+                i_s=0.1661, psi_s=1.411 * np.pi,
+                span=0.8, fscan=100.0, fm=1e4, fs=5e5, n_cycle_avg=1, step=5e-4):
+    """时域仿真：生成探测器信号 I(t)=I₀(t)·τ(ν(t))，再用数字锁相提取 1f/2f。
+
+    与解析模型（simulate）是两条独立实现，互为交叉验证。
+    扫描波形为余弦（fscan），叠加高频正弦调制（fm）。
+    """
+    if not 0.0 < x <= 1.0:
+        raise ValueError(f"摩尔分数必须在 (0, 1]，收到 {x}")
+    ws, wm = 2.0 * np.pi * fscan, 2.0 * np.pi * fm
+    t = np.arange(int(round(fs / fscan)), dtype=float) / fs
+    wn_scan = wn0 + span * np.cos(ws * t)
+    wn = wn_scan + a * np.cos(wm * t)
+    I0 = (1.0 + i_s * np.cos(ws * t + psi_s)
+          + i0 * np.cos(wm * t + psi1) + i2 * np.cos(2.0 * wm * t + psi2))
+    nu, alpha, info = get_alpha(species, wn0 - span, wn0 + span, T, P, x, step=step)
+    tau = np.exp(-np.interp(wn, nu, alpha) * L)
+    It = I0 * tau
+    S1f, _, _ = wms_harmonic_lockin(It, t, fs, fm, 1, n_cycle_avg)
+    S2f, _, _ = wms_harmonic_lockin(It, t, fs, fm, 2, n_cycle_avg)
+    return {"t": t, "wn_scan": wn_scan, "It": It, "S1f": S1f, "S2f": S2f,
+            "meta": {"species": species, "wn0": wn0, "T": T, "P": P, "x": x, "L": L,
+                     "a": a, "fscan": fscan, "fm": fm, "fs": fs,
+                     "n_lines_in_window": info["n_lines_in_window"]}}
+
+
+# ══════════════════ 7. 绘图 ══════════════════
 
 def plot(r, out_png):
     import matplotlib
