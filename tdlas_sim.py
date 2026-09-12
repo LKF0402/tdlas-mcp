@@ -1090,7 +1090,7 @@ def plot_wms_instrument(r, out_png):
     nu, off, ok = r["nu_axis"], r["offband_mask"], m["onef_valid"]
     vd = r["valid_mask"]
 
-    def seg(a_, y, color, label, lw=1.2):
+    def seg(a_, y, color, label, lw=1.2, ls="-"):
         """有效区实线 + 剔除区灰点线；y 轴范围只看有效区，避免剔除区伪影压扁曲线。
 
         注意：曲线本身可能有上万点，而画布只有几百像素，逐点连线会互相穿插成
@@ -1098,7 +1098,7 @@ def plot_wms_instrument(r, out_png):
         """
         stride = max(1, int(round(nu.size / 1200)))
         sl = slice(None, None, stride)
-        a_.plot(nu[vd][sl], y[vd][sl], "-", color=color, lw=lw, label=label)
+        a_.plot(nu[vd][sl], y[vd][sl], ls, color=color, lw=lw, label=label)
         if (~vd).any():
             a_.plot(nu[~vd][sl], y[~vd][sl], ":", color="0.6", lw=1.0)
         yv = y[vd]
@@ -1125,9 +1125,9 @@ def plot_wms_instrument(r, out_png):
     ax[1].set_xlabel(r"波数 (cm$^{-1}$)")
     ax[1].set_title("② 直接吸收 DAS（无调制）")
 
-    # ②b DAS αL + HITRAN 理论对照
-    seg(ax[2], r["das_cyc"], "C0", "DAS αL（-ln 提取）")
-    seg(ax[2], r["alphaL_cyc"], "C2", "HITRAN 理论 αL", lw=1.0)
+    # ②b DAS αL + HITRAN 理论对照（实测=实线，理论=虚线）
+    seg(ax[2], r["das_cyc"], "C0", "DAS αL（实测，-ln 提取）")
+    seg(ax[2], r["alphaL_cyc"], "C2", "HITRAN 理论 αL（虚线=数据库参考）", lw=1.2, ls="--")
     ax[2].axhline(0.0, color="k", lw=0.5, alpha=0.4)
     ax[2].set_ylabel(r"$\alpha L$")
     ax[2].set_xlabel(r"波数 (cm$^{-1}$)")
@@ -1157,7 +1157,7 @@ def plot_wms_instrument(r, out_png):
     ax[5].set_xlabel(r"波数 (cm$^{-1}$)")
     ax[5].set_title(f"⑤ 归一化：{m['norm_method']}")
 
-    # 剔除区（三角波转折点）标红
+    # 剔除区（三角波转折点）标红 + 灰点线图例说明
     nd = int(m.get("n_trim", 0))
     if 0 < nd < r["n_per"]:
         for s_ in (nu[:nd], nu[-nd:]):
@@ -1165,6 +1165,9 @@ def plot_wms_instrument(r, out_png):
                 for a_ in ax[1:]:
                     a_.axvspan(min(s_.min(), s_.max()), max(s_.min(), s_.max()),
                                color="red", alpha=0.06)
+        for a_ in ax[1:]:
+            a_.plot([], [], ":", color="0.6", lw=1.5,
+                    label="点线=剔除区（转折点，不可信）")
 
     for a_ in ax:
         a_.grid(alpha=0.3)
