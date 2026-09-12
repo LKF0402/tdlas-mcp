@@ -1107,7 +1107,9 @@ def plot_wms_instrument(r, out_png):
             pad = 0.08 * (hi - lo) or 1e-12
             a_.set_ylim(lo - pad, hi + pad)
 
-    fig, ax = plt.subplots(3, 2, figsize=(11, 14))
+    # 3×2 布局，每子图约 2:1（宽:高）——谱图横轴是波数、横长竖短更利于读线形，
+    # 且贴近黄金矩形，兼顾阅读与美观。
+    fig, ax = plt.subplots(3, 2, figsize=(14, 10))
     ax = ax.ravel()
 
     # ① 驱动电压：三角波 + 正弦调制
