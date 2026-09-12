@@ -564,6 +564,10 @@ def simulate_das_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     cfg = {**DAQ_DEFAULTS, **SCAN_DEFAULTS, **LASER_DEFAULTS,
            **OPTICS_DEFAULTS, **PD_DEFAULTS}
     cfg.update({k: v for k, v in kw.items() if v is not None})
+    # ★ 同 WMS：让激光波数轴中心落在 wn_center，否则与吸收谱错位
+    if kw.get("wn_ref") is None:
+        i_mid = float(cfg["eta_VI"]) * float(cfg["offset_V"])
+        cfg["wn_ref"] = float(wn_center) - (i_mid - float(cfg["i_ref"])) * float(cfg["dnu_dI"])
 
     fs = float(cfg["fs"])
     n_samples = int(cfg["n_samples"])
@@ -724,6 +728,11 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     cfg = {**DAQ_DEFAULTS, **SCAN_DEFAULTS, **MOD_DEFAULTS, **LASER_DEFAULTS,
            **OPTICS_DEFAULTS, **PD_DEFAULTS}
     cfg.update({k: v for k, v in kw.items() if v is not None})
+    # ★ 关键：让激光波数轴的中心落在 wn_center。否则吸收谱算在 wn_center、
+    #   激光却在 wn_ref 附近 → 两者错位，锁相输出全是噪声/伪影（严重假信号）。
+    if kw.get("wn_ref") is None:
+        i_mid = float(cfg["eta_VI"]) * float(cfg["offset_V"])
+        cfg["wn_ref"] = float(wn_center) - (i_mid - float(cfg["i_ref"])) * float(cfg["dnu_dI"])
 
     warnings = []
     fm = float(cfg["mod_freq_Hz"])
@@ -805,7 +814,11 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
         edge = "rising"
         idx = np.arange(half, n_per)          # 后半 ν 递增
     n_sel = int(idx.size)
-    nu_cyc = nu_laser[idx]
+    # ★ 横轴必须用"扫描波数"（不含调制），不能用瞬时波数 nu_laser[idx] ——
+    #   后者带 ±a 的摆动，每个点在横轴上来回平移，会把曲线折成"水平条纹"乱麻。
+    _, nu_scan_all, _ = voltage_to_laser(v_scan, cfg["eta_VI"], cfg["dnu_dI"],
+                                         cfg["wn_ref"], cfg["i_ref"], cfg["i_th"], cfg["eta_IP"])
+    nu_cyc = nu_scan_all[idx]
     S1f_cyc, S2f_cyc, v_cyc = S1f[idx], S2f[idx], v_adc[idx]
     alphaL_cyc = np.interp(nu_cyc, nu_grid, alpha_pure) * float(x) * float(L_cm)
 
@@ -822,13 +835,36 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     I0_pd = float(np.mean(np.abs(v_cyc[off]))) if off.any() else float(np.mean(np.abs(v_cyc[valid])))
     S2f_1f = np.divide(S2f_cyc, S1f_cyc, out=np.zeros_like(S2f_cyc), where=S1f_cyc > 1e-15)
     S2f_I0 = S2f_cyc / max(I0_pd, 1e-30)
-    # 失效判据（仅在有效区内）：非吸收区本应≈0，若其幅值接近吸收峰（>30%）则 1f 不可用
+    # 失效判据（仅在有效区内），两条各对应一种物理失效：
+    #   (a) 非吸收区本应≈0，若其幅值接近吸收峰（>30%）→ 1f 随扫描漂移，不可作分母；
+    #   (b) 共振中心 1f 会因 AM 与吸收导数相消而**过零**，此处 2f/1f 必然爆成假尖峰。
     pk_1f = float(np.max(np.abs(S2f_1f[valid]))) if valid.any() else 0.0
     off_1f = float(np.max(np.abs(S2f_1f[off]))) if off.any() else 0.0
-    onef_valid = bool(pk_1f > 0 and off_1f <= 0.30 * pk_1f)
+    abs1 = np.abs(S1f_cyc[valid]) if valid.any() else np.array([0.0])
+    onef_min, onef_med = float(np.min(abs1)), float(np.median(abs1))
+    onef_ok_off = off_1f <= 0.30 * pk_1f
+    onef_ok_zero = onef_min > 0.05 * max(onef_med, 1e-30)
+    onef_valid = bool(pk_1f > 0 and onef_ok_off and onef_ok_zero)
     S2f_norm = S2f_1f if onef_valid else S2f_I0
     norm_method = "2f/1f" if onef_valid else "2f/I0（PD 非吸收区光强均值）"
     S2f1f = S2f_1f                     # 保留原名以向后兼容（始终输出，供用户自行判断）
+
+    # ⑨ DAS 对照：DAS 是**不带调制**的直接吸收技术，所以不能用"对含调制信号做平均"
+    #    来伪造 —— 那样平均窗口内波数仍在摆动，会折出锯齿。这里把调制置零、
+    #    走同一条链路重算一次 PD 信号，才是真正的 DAS。
+    _, nu_das, p_das = voltage_to_laser(v_scan, cfg["eta_VI"], cfg["dnu_dI"],
+                                        cfg["wn_ref"], cfg["i_ref"], cfg["i_th"], cfg["eta_IP"])
+    alpha_das = np.interp(nu_das, nu_grid, alpha_pure) * float(x)
+    v_das_all = (p_das * float(cfg["throughput"]) * np.exp(-alpha_das * float(L_cm))
+                 * 1e-3 * float(cfg["resp"]) * float(cfg["gain"]))
+    v_das_cyc = v_das_all[idx]
+    base_sel = valid & off
+    if int(base_sel.sum()) > 3:
+        _c = np.polyfit(nu_cyc[base_sel] - float(wn_center), v_das_cyc[base_sel], 2)
+        base_das = np.polyval(_c, nu_cyc - float(wn_center))
+    else:
+        base_das = np.full_like(v_das_cyc, float(np.mean(v_das_cyc[valid])))
+    das_cyc = -np.log(np.maximum(v_das_cyc, 1e-12) / np.maximum(base_das, 1e-12))
 
     # 主动检查
     aL_peak = float(np.max(alpha_pure_mix)) * float(L_cm)
@@ -851,12 +887,16 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
                         f"（三角波转折点导数不连续，其高频谐波会泄漏进 2f）")
     # 归一化体检：白话说清"2f/1f 能不能用"
     if onef_valid:
-        warnings.append(f"归一化采用 **2f/1f**（1f 有效）：非吸收区 2f/1f 泄漏 {off_1f:.3g}，"
-                        f"仅占峰值 {pk_1f:.3g} 的 {100 * off_1f / max(pk_1f, 1e-30):.1f}%")
+        warnings.append(f"归一化采用 **2f/1f**（1f 有效）：非吸收区泄漏 {off_1f:.3g} 占峰值 "
+                        f"{100 * off_1f / max(pk_1f, 1e-30):.1f}%，1f 最小值/中位数 = "
+                        f"{onef_min / max(onef_med, 1e-30):.2f}（无过零）")
     else:
+        _why = (f"非吸收区泄漏 {off_1f:.3g} 占峰值 {100 * off_1f / max(pk_1f, 1e-30):.0f}%（>30%）"
+                if not onef_ok_off else
+                f"1f 在共振中心过零（min/中位数 = {onef_min / max(onef_med, 1e-30):.2f} < 0.05），"
+                f"相除会爆成假尖峰")
         warnings.append(f"⚠ **2f/1f 失效 → 已自动改用 2f/I0（PD 非吸收区光强均值 I0={I0_pd:.4g} V）**。"
-                        f"原因：1f 正比于 L-I 斜率而非光强，非吸收区 2f/1f 泄漏达 {off_1f:.3g}，"
-                        f"占峰值 {pk_1f:.3g} 的 {100 * off_1f / max(pk_1f, 1e-30):.0f}%（>30% 判为失效）")
+                        f"原因：{_why}")
 
     meta = {"species": str(species).upper(), "wn_center": float(wn_center), "T": float(T),
             "P": float(P), "x": float(x), "L_cm": float(L_cm), "fs": fs,
@@ -867,6 +907,7 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
             "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
             "norm_method": norm_method, "onef_valid": onef_valid, "I0_pd_V": I0_pd,
             "offband_leak_1f": off_1f, "peak_2f_1f": pk_1f,
+            "onef_min_over_median": onef_min / max(onef_med, 1e-30),
             "trim_frac": float(cfg["trim_frac"]), "n_trim": n_keep, "edge": edge,
             "cfg": dict(cfg), "warnings": warnings,
             "n_lines_in_window": info["n_lines_in_window"], "table": info["table"]}
@@ -877,6 +918,7 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
             "S2f1f_cyc": S2f_1f, "S2f_norm_cyc": S2f_norm,
             "v_adc_cyc": v_cyc, "v_drive_cyc": v_drive[idx],
             "alphaL_cyc": alphaL_cyc, "offband_mask": off, "valid_mask": valid,
+            "das_cyc": das_cyc, "v_das_cyc": v_das_cyc,
             "t_cyc": t[idx], "n_per": n_sel, "edge": edge, "meta": meta}
 
 
@@ -907,10 +949,16 @@ def plot_wms_instrument(r, out_png):
     vd = r["valid_mask"]
 
     def seg(a_, y, color, label, lw=1.2):
-        """有效区实线 + 剔除区灰点线；y 轴范围只看有效区，避免剔除区伪影压扁曲线。"""
-        a_.plot(nu[vd], y[vd], "-", color=color, lw=lw, label=label)
+        """有效区实线 + 剔除区灰点线；y 轴范围只看有效区，避免剔除区伪影压扁曲线。
+
+        注意：曲线本身可能有上万点，而画布只有几百像素，逐点连线会互相穿插成
+        "乱麻"（绘图混叠）。这里做等间隔抽取，保证每像素至多 ~1 个点。
+        """
+        stride = max(1, int(round(nu.size / 1200)))
+        sl = slice(None, None, stride)
+        a_.plot(nu[vd][sl], y[vd][sl], "-", color=color, lw=lw, label=label)
         if (~vd).any():
-            a_.plot(nu[~vd], y[~vd], ":", color="0.6", lw=1.0)
+            a_.plot(nu[~vd][sl], y[~vd][sl], ":", color="0.6", lw=1.0)
         yv = y[vd]
         if yv.size:
             lo, hi = min(float(np.min(yv)), 0.0), max(float(np.max(yv)), 0.0)
@@ -928,11 +976,13 @@ def plot_wms_instrument(r, out_png):
                     f"fm={m['mod_freq_Hz'] / 1e3:g} kHz, m={m['mod_coeff_m']:.2f}, "
                     f"edge={m['edge']}")
 
-    # ② DAS：吸光度 αL(ν)，同轴对照 PD 信号（含调制）
-    seg(ax[1], r["alphaL_cyc"], "C0", r"DAS $\alpha L$（吸光度）")
+    # ② DAS（不带调制的直接吸收）：把 PD 信号的调制平均掉后提取吸光度
+    seg(ax[1], r["das_cyc"], "C0", "DAS 吸光度（PD 信号提取）")
+    seg(ax[1], r["alphaL_cyc"], "0.55", "理论 αL（HITRAN 对照）", lw=1.0)
     ax[1].axhline(0.0, color="k", lw=0.5, alpha=0.4)
     axb = ax[1].twinx()
-    axb.plot(nu, r["v_adc_cyc"], color="0.65", lw=0.6, alpha=0.8, label="PD signal (V)")
+    axb.plot(nu, r["v_das_cyc"], color="0.7", lw=0.7, alpha=0.85,
+             label="PD 信号（已平均掉调制, V）")
     axb.set_ylabel("PD (V)", color="0.45")
     ax[1].set_ylabel(r"$\alpha L$")
     ax[1].legend(loc="upper right", fontsize=8)
