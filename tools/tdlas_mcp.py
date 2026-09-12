@@ -153,12 +153,14 @@ AI_INTERACTION_GUIDE = {
                        "因 dν/dI<0，电压上升沿对应波数下降、下降沿对应波数上升。"
                        "工具内部已把所选方向反转为波数单调递增再输出，无需用户处理。",
     "noise_and_interaction": {
-        "默认噪声": "白噪声（散粒+热+RIN）恒定注入；1/f 噪声（drift_frac=0.005 慢漂移 + "
-                    "flicker_frac=0.01 粉红）**默认开**。这是 DAS 受害、WMS 占优的物理来源，不可省略。",
+        "默认": "**默认不加任何噪声**（理想仿真：rin=0, drift_frac=0, flicker_frac=0）。",
+        "询问": "MCP 必须在出图/解读前**主动询问用户**：是否需要加噪声？加哪类？多大？"
+                "可选：① RIN 白噪声(rin) ② 1/f 慢漂移(drift_frac) ③ 1/f 粉红(flicker_frac)。"
+                "散粒/热噪声为物理固有、量级极小，保留但通常可忽略。",
         "透明化": "每次返回必须把 noise_breakdown_mV + noise_1f 原样告知用户，"
-                  "并说明哪些是白噪声、哪些是 1/f、各自可调。",
+                  "并明确「本次是否加了噪声、加了哪些、幅度多少」。",
         "多交互": "MCP 服务要**多与用户交互**，而非一次性吐结果：① 先确认工况（物种/波段/T/P/浓度/光程）；"
-                  "② 明确告知注入的噪声与默认值；③ 解读前确认归一化方法；④ 主动问是否需要调噪声/换孤立线。",
+                  "② 主动问噪声需求；③ 解读前确认归一化方法；④ 主动问是否调噪声/换孤立线。",
     },
     "glossary": {
         "αL": "吸光度（吸收系数×光程），无量纲；≪1 才算弱吸收，DAS/2f 才与浓度成正比",
@@ -498,8 +500,8 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                               "rin_white": m["sigma_rin"] * 1e3},
                        "noise_1f": {"drift_frac": m["drift_frac"],
                                     "flicker_frac": m["flicker_frac"]},
-                       "noise_disclosure": "已注入噪声（须告知用户）：散粒+热+RIN(白) 为白噪声；"
-                                           "drift_frac/flicker_frac 为 1/f 噪声（默认开，可关）。",
+                       "noise_disclosure": "默认未加噪声（理想仿真）。如需注入：rin=相对强度噪声，"
+                                           "drift_frac=1/f 慢漂移，flicker_frac=1/f 粉红。散粒/热为物理固有（极小）。",
                        "n_lines_in_window": m["n_lines_in_window"], "table": m["table"]},
            "assumptions": assumed, "param_requests": requests,
            "needs_input": bool(requests),
