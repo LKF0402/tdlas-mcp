@@ -33,6 +33,17 @@ SERVER_INFO = {"name": "tdlas", "version": "0.2.0",
                "capabilities": {"tools": {}}}
 OUT_DIR = _ROOT / "tmp" / "mcp_out"
 
+# 技术知识：随工具返回，供 AI 向用户解释真实实验要点（而非只给数字）
+EDGE_TECH_NOTE = (
+    "真实实验中三角波上升沿与下降沿常不重合，成因："
+    "① 激光调谐非线性（注入电流→波长响应并非完美线性）；"
+    "② 扫描期间激光器热漂移（波长与功率随时间漂移）；"
+    "③ 探测器与前置放大器带宽有限 → 上升/下降沿的相位滞后不同；"
+    "④ 电流源上升/下降沿的扫频响应差异。"
+    "处理建议：先用 edge='both' 对照两段；若重合约，任取一段即可；若不重合，取较干净的一段，"
+    "或用 edge='average' 两段平均（随机噪声按 √2 改善，但系统性偏差不会被平均抵消）。"
+)
+
 
 @contextlib.contextmanager
 def _quiet():
@@ -141,41 +152,70 @@ def t_detection_limit(species="H2O", wn0=7185.596, T=296.0, P=1.0, L=30.0,
             "sensitivity_k": float(dl["k"]), "log": g.getvalue().splitlines()}
 
 
-def t_das_chain(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=1e-3, L=30.0,
-                span=0.8, fscan=100.0, fs=5e5, baseline_slope=0.05,
-                sigma=0.0, seed=None, fit_order=3, fit_frac=0.3, save_png=False):
+def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
+                span=None, fscan=None, fs=None, baseline_slope=None,
+                sigma=0.0, seed=None, fit_order=None, fit_frac=None,
+                edge=None, save_png=False):
     """三角波扫描 DAS 全链路：PD 原始信号 → 多项式基线拟合扣除 → DAS 吸光度信号。
 
-    对应真实 DAS 实验处理：三角波扫波长 → PD 测 It(t)=I₀·τ → 用两端无吸收区拟合基线
-    → 扣除 → A = -ln(It/baseline)。返回扣除后吸光度峰、真值 αL 与偏差百分比。
+    默认工况（未显式给出时使用，并列入 assumptions 供复核）：
+        **1000 ppm（x=1e-3）、0.5 m 光程（L=50 cm）、296 K、1 atm、上升沿（edge="rising"）**。
+    技术知识见返回中的 edge_note（上升/下降沿为何不重合、如何取舍）。
     """
+    _DEF = {"T": 296.0, "P": 1.01325, "x": 1e-3, "L": 50.0, "span": 0.8,
+            "fscan": 100.0, "fs": 5e5, "baseline_slope": 0.05,
+            "fit_order": 3, "fit_frac": 0.3, "edge": "rising"}
+    given = {"T": T, "P": P, "x": x, "L": L, "span": span, "fscan": fscan, "fs": fs,
+             "baseline_slope": baseline_slope, "fit_order": fit_order,
+             "fit_frac": fit_frac, "edge": edge}
+    assumed = [f"{k}={v}" for k, v in _DEF.items() if given[k] is None]
+    T = _DEF["T"] if T is None else float(T)
+    P = _DEF["P"] if P is None else float(P)
+    x = _DEF["x"] if x is None else float(x)
+    L = _DEF["L"] if L is None else float(L)
+    span = _DEF["span"] if span is None else float(span)
+    fscan = _DEF["fscan"] if fscan is None else float(fscan)
+    fs = _DEF["fs"] if fs is None else float(fs)
+    baseline_slope = _DEF["baseline_slope"] if baseline_slope is None else float(baseline_slope)
+    fit_order = _DEF["fit_order"] if fit_order is None else int(fit_order)
+    fit_frac = _DEF["fit_frac"] if fit_frac is None else float(fit_frac)
+    edge = _DEF["edge"] if edge is None else str(edge)
+
     if not (species and str(species).strip()):
         raise ValueError("species 不能为空")
-    if not 0.0 < float(x) <= 1.0:
+    if not 0.0 < x <= 1.0:
         raise ValueError(f"mole_frac 必须在 (0, 1]，收到 {x}")
-    if float(L) <= 0:
-        raise ValueError(f"光程 L 必须 > 0，收到 {L}")
-    if float(fscan) <= 0 or float(fs) <= 0:
+    if L <= 0:
+        raise ValueError(f"光程 L 必须 > 0（cm），收到 {L}")
+    if fscan <= 0 or fs <= 0:
         raise ValueError("fscan / fs 必须 > 0")
+
     with _quiet() as g:
-        r = ts.simulate_das_td(species, float(wn0), float(T), float(P), float(x), float(L),
-                               span=float(span), fscan=float(fscan), fs=float(fs),
-                               baseline_slope=float(baseline_slope), sigma=float(sigma),
-                               seed=seed, fit_order=int(fit_order), fit_frac=float(fit_frac))
+        r = ts.simulate_das_td(species, float(wn0), T, P, x, L,
+                               span=span, fscan=fscan, fs=fs,
+                               baseline_slope=baseline_slope, sigma=float(sigma),
+                               seed=seed, fit_order=fit_order, fit_frac=fit_frac, edge=edge)
     tp = float(r["alpha_L_true"].max())
     dp = float(r["das"].max())
-    out = {"species": str(species).upper(), "wn0_cm-1": float(wn0), "T_K": float(T),
-           "P_atm": float(P), "mole_frac": float(x), "path_cm": float(L),
-           "span_cm-1": float(span), "fscan_Hz": float(fscan), "fs_Hz": float(fs),
-           "baseline_slope": float(baseline_slope), "sigma_tau": float(sigma),
-           "fit_order": int(fit_order), "fit_frac": float(fit_frac),
+    out = {"species": str(species).upper(), "wn0_cm-1": float(wn0), "T_K": T, "P_atm": P,
+           "mole_frac": x, "mole_ppm": x * 1e6, "path_cm": L, "path_m": L / 100.0,
+           "span_cm-1": span, "fscan_Hz": fscan, "fs_Hz": fs, "edge": edge,
+           "baseline_slope": baseline_slope, "sigma_tau": float(sigma),
+           "fit_order": fit_order, "fit_frac": fit_frac,
+           "alpha_L_peak": float(r["meta"]["alpha_L_peak"]),
            "das_absorbance_peak": dp, "alpha_L_true_peak": tp,
            "error_pct": (abs(dp - tp) / tp * 100.0) if tp > 0 else None,
            "n_lines_in_window": r["meta"]["n_lines_in_window"],
+           "assumptions": assumed,
+           "needs_confirm": bool(assumed),
+           "confirm_note": "assumptions 为本次被迫使用的默认工况；若与用户描述不符，"
+                           "请先向用户确认（尤其浓度 / 光程 / 温度 / 取哪一段沿），再解读结果。",
+           "warnings": r["meta"]["warnings"],
+           "edge_note": EDGE_TECH_NOTE,
            "log": g.getvalue().splitlines()}
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        png = OUT_DIR / f"das_chain_{str(species).upper()}_{float(wn0):g}cm-1_x{float(x):g}.png"
+        png = OUT_DIR / f"das_chain_{str(species).upper()}_{float(wn0):g}cm-1_x{x:g}.png"
         with _quiet():
             ts.plot_das_td(r, png)
         out["png"] = str(png)
@@ -218,23 +258,33 @@ TOOLS = [
                          "save_png": {"type": "boolean", "description": "是否出图，默认 False"}},
                      "required": ["species", "wn0"]}},
     {"name": "tdlas_das_chain",
-     "description": "三角波扫描 DAS 全链路仿真：生成 PD 原始信号 It(t) → 多项式基线拟合扣除 → DAS 吸光度信号。"
-                    "对应真实 DAS 实验处理流程，可用于演示基线拟合阶数对反演的影响。",
+     "description": "三角波扫描 DAS 全链路仿真：PD 原始信号 It(t) → 多项式基线拟合扣除 → DAS 吸光度信号。"
+                    "对应真实 DAS 实验处理流程。默认工况：1000 ppm / 0.5 m 光程 / 296 K / 1 atm / "
+                    "上升沿；未给出的参数会列入返回的 assumptions，需先向用户复核。"
+                    "技术知识：真实实验中三角波上升沿与下降沿常不重合（激光调谐非线性、扫描期热漂移、"
+                    "探测器带宽引起的相位滞后）——详见返回的 edge_note。",
      "inputSchema": {"type": "object",
                      "properties": {
-                         "species": {"type": "string"}, "wn0": {"type": "number"},
-                         "T": {"type": "number"}, "P": {"type": "number"},
-                         "x": {"type": "number", "description": "摩尔分数，默认 1e-3"},
-                         "L": {"type": "number", "description": "光程 cm，默认 30"},
+                         "species": {"type": "string", "description": "分子式，如 CH4 / H2O / CO2"},
+                         "wn0": {"type": "number", "description": "扫描中心波数 cm^-1"},
+                         "T": {"type": "number", "description": "温度 K，默认 296"},
+                         "P": {"type": "number", "description": "气压 atm，默认 1.01325"},
+                         "x": {"type": "number", "description": "摩尔分数，默认 1e-3（1000 ppm）"},
+                         "L": {"type": "number", "description": "光程 cm，默认 50（0.5 m）"},
                          "span": {"type": "number", "description": "扫描半宽 cm^-1，默认 0.8"},
                          "fscan": {"type": "number", "description": "三角波频率 Hz，默认 100"},
                          "fs": {"type": "number", "description": "采样率 Hz，默认 5e5"},
                          "baseline_slope": {"type": "number", "description": "I0 基线斜率，默认 0.05"},
                          "sigma": {"type": "number", "description": "等效透过率噪声，默认 0"},
                          "seed": {"type": "integer"},
-                         "fit_order": {"type": "integer", "description": "基线多项式阶数，默认 3"},
+                         "fit_order": {"type": "integer",
+                                       "description": "基线多项式阶数，默认 3（过高会过拟合、低估吸收）"},
                          "fit_frac": {"type": "number", "description": "无吸收区占比，默认 0.3"},
-                         "save_png": {"type": "boolean", "description": "是否出四层链路图"}},
+                         "edge": {"type": "string",
+                                  "description": "取哪一段作 DAS：rising(默认,上升沿) / falling / "
+                                                 "average(两段平均) / both(对照两段)"},
+                         "save_png": {"type": "boolean",
+                                      "description": "是否出四层链路图（含上升/下降沿对照）"}},
                      "required": ["species", "wn0"]}},
     {"name": "tdlas_invert",
      "description": "免标定浓度反演：给定测得的 WMS-2f/1f 峰高，返回摩尔分数（用仿真灵敏度 k，无需标气标定）。"

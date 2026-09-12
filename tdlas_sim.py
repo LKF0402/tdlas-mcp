@@ -189,11 +189,11 @@ def selftest():
     assert corr > 0.9, f"时域锁相与解析模型不一致（corr={corr:.3f}）"
 
     # 7) DAS 时域链路：三角波 → PD 原始信号 → 基线拟合扣除 → 吸光度应回到 αL
-    d = simulate_das_td(x=1e-3, baseline_slope=0.05, fit_order=3)
+    d = simulate_das_td(x=1e-4, L=30.0, baseline_slope=0.05, fit_order=3)
     tp = float(d["alpha_L_true"].max())
     dp = float(d["das"].max())
     derr = abs(dp - tp) / tp
-    print(f"  DAS 链路（三角波、基线斜率 0.05、3 阶拟合）：吸光度峰 {dp:.4e} "
+    print(f"  DAS 链路（三角波·上升沿、基线斜率 0.05、3 阶拟合）：吸光度峰 {dp:.4e} "
           f"vs 真值 αL {tp:.4e}（差 {derr * 100:.2f}%）")
     assert derr < 0.05, f"DAS 基线扣除误差 {derr:.1%} 超过 5%"
 
@@ -303,9 +303,10 @@ def simulate_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
 
 # ══════════════════ 7. DAS 时域链路（三角波 → PD 信号 → 基线扣除）══════════════════
 
-def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
+def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=1e-3, L=50.0,
                     span=0.8, fscan=100.0, fs=5e5, baseline_slope=0.05,
-                    sigma=0.0, seed=None, fit_order=3, fit_frac=0.3, step=5e-4):
+                    sigma=0.0, seed=None, fit_order=3, fit_frac=0.3, step=5e-4,
+                    edge="rising"):
     """三角波扫描 DAS 时域仿真：PD 原始信号 → 多项式基线拟合/扣除 → DAS 信号。
 
     与真实 DAS 实验一一对应：
@@ -318,8 +319,15 @@ def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
     sigma         : 等效透过率噪声（加到 PD 信号上）
     fit_order     : 基线拟合多项式阶数
     fit_frac      : 距中心多远处的点算"无吸收区"（占 span 的比例）
+    edge          : 用哪一段作最终 DAS（默认 "rising"）——
+                    "rising" 上升沿 / "falling" 下降沿 / "average" 两段平均（SNR↑√2）/
+                    "both" 两段都留（wn 非单调，供对照）。
+                    **真实实验中上升沿与下降沿常不重合**（激光调谐非线性、扫描期热漂移、
+                    探测器/电路带宽导致的相位滞后），故需显式选段，不默认合并。
 
-    返回：t, wn, tri, I0, It, baseline, das, alpha, alpha_L_true, meta
+    返回：t, wn, tri, I0, It, baseline, das_full, das, wn_das, alpha, alpha_L_true, meta
+      · das_full   : 完整三角波周期的吸光度（两段都在，供画对照图）
+      · das/wn_das : 按 edge 选取的最终结果（wn 递增；edge="both" 时即完整周期）
     """
     if span <= 0:
         raise ValueError(f"扫描半宽 span 必须 > 0，收到 {span}")
@@ -351,15 +359,45 @@ def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
         baseline = np.polyval(coef, wn_c)
     else:                                                # 拟合点不足 → 退化为常数基线
         baseline = np.full_like(It, float(np.mean(It[mask])))
-    das = -np.log(np.maximum(It, 1e-12) / np.maximum(baseline, 1e-12))
+    das_full = -np.log(np.maximum(It, 1e-12) / np.maximum(baseline, 1e-12))
+
+    # 按 edge 选取最终 DAS（三角波：前半周期上升、后半周期下降）
+    edge = str(edge).strip().lower()
+    if edge not in ("rising", "falling", "both", "average"):
+        raise ValueError(f"edge 必须是 rising / falling / both / average，收到 {edge!r}")
+    half = n // 2
+    if edge == "rising":
+        wn_das, das = wn[:half], das_full[:half]
+    elif edge == "falling":
+        wn_das, das = wn[half:][::-1], das_full[half:][::-1]     # 反转 → wn 递增
+    elif edge == "average":
+        wn_das = wn[:half]
+        das = 0.5 * (das_full[:half] + das_full[half:][::-1])    # 两段对应点平均（SNR↑√2）
+    else:
+        wn_das, das = wn, das_full
+
+    # 替用户主动考虑：参数是否落在合理区间（不合理时明确提示，而非静默给错结果）
+    warnings = []
+    aL = float(alpha_wn.max()) * float(L)
+    if aL > 0.1:
+        warnings.append(f"αL ≈ {aL:.3g} 偏大（>0.1）：DAS 进入非线性区、峰形被压低，"
+                        f"建议降低浓度或光程（当前 x={x:g}, L={L:g} cm）")
+    elif aL < 1e-4:
+        warnings.append(f"αL ≈ {aL:.3g} 偏小（<1e-4）：吸收太弱、信噪比可能不足，"
+                        f"建议加大光程或浓度（当前 x={x:g}, L={L:g} cm）")
+    if float(span) < 0.2:
+        warnings.append(f"扫描半宽 span={span:g} cm^-1 偏窄：可能未完整覆盖吸收线两翼，"
+                        f"基线拟合会偏")
 
     meta = {"species": str(species).upper(), "wn0": float(wn0), "T": float(T), "P": float(P),
             "x": float(x), "L": float(L), "span": float(span), "fscan": float(fscan),
             "fs": float(fs), "baseline_slope": float(baseline_slope), "sigma": float(sigma),
-            "fit_order": int(fit_order), "fit_frac": float(fit_frac),
+            "fit_order": int(fit_order), "fit_frac": float(fit_frac), "edge": edge,
+            "alpha_L_peak": aL, "warnings": warnings,
             "n_lines_in_window": info["n_lines_in_window"], "table": info["table"]}
     return {"t": t, "wn": wn, "tri": tri, "I0": I0, "It": It, "baseline": baseline,
-            "das": das, "alpha": alpha, "alpha_L_true": alpha_wn * float(L), "meta": meta}
+            "das_full": das_full, "das": das, "wn_das": wn_das,
+            "alpha": alpha, "alpha_L_true": alpha_wn * float(L), "meta": meta}
 
 
 def plot_das_td(r, out_png):
@@ -385,8 +423,12 @@ def plot_das_td(r, out_png):
     ax[2].set_ylabel(r"$I_t$ (a.u.)")
     ax[2].set_xlabel("time (ms)")
     ax[2].legend()
-    ax[3].plot(r["wn"], r["das"], ".", ms=2, label="DAS (baseline-subtracted)")
-    ax[3].plot(r["wn"], r["alpha_L_true"], "-", lw=1, alpha=0.7, label=r"true $\alpha L$")
+    half = r["t"].size // 2                    # 三角波：前半周期上升、后半周期下降
+    dfl = r["das_full"]
+    ax[3].plot(r["wn"][:half], dfl[:half], ".", ms=2, color="C0", alpha=0.45, label="DAS — rising edge")
+    ax[3].plot(r["wn"][half:], dfl[half:], ".", ms=2, color="C3", alpha=0.45, label="DAS — falling edge")
+    ax[3].plot(r["wn_das"], r["das"], "-", lw=1.2, color="C2", label=f"final DAS ({m['edge']})")
+    ax[3].plot(r["wn"], r["alpha_L_true"], "--", lw=1, alpha=0.7, color="k", label=r"true $\alpha L$")
     ax[3].set_ylabel("absorbance")
     ax[3].set_xlabel(r"wavenumber (cm$^{-1}$)")
     ax[3].legend()
@@ -434,7 +476,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     png = plot(r, out_dir / "wms_demo.png")
     print(f"  WMS 图已保存：{png}")
-    d = simulate_das_td(x=1e-3)
+    d = simulate_das_td(species="CH4", wn0=2968.5, span=1.5, x=1e-4)
     png2 = plot_das_td(d, out_dir / "das_chain.png")
     print(f"  DAS 链路图已保存：{png2}")
 
