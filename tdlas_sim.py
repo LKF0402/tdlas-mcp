@@ -842,16 +842,16 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     I0_pd = float(np.mean(np.abs(v_cyc[off]))) if off.any() else float(np.mean(np.abs(v_cyc[valid])))
     S2f_1f = np.divide(S2f_cyc, S1f_cyc, out=np.zeros_like(S2f_cyc), where=S1f_cyc > 1e-15)
     S2f_I0 = S2f_cyc / max(I0_pd, 1e-30)
-    # 失效判据（仅在有效区内），两条各对应一种物理失效：
-    #   (a) 非吸收区本应≈0，若其幅值接近吸收峰（>30%）→ 1f 随扫描漂移，不可作分母；
-    #   (b) 共振中心 1f 会因 AM 与吸收导数相消而**过零**，此处 2f/1f 必然爆成假尖峰。
+    # 2f/1f 适用性判据（只在有效区内）：
+    #   真正让 2f/1f 不好用的是"1f 基线随扫描漂移"（AM 即 dP/dV 非线性），
+    #   表现为**真无吸收处** 2f/1f 背景不平（泄漏接近峰值）。
+    #   注意：1f 在共振中心两侧的"过零"是 AM 与吸收 1f 相消的**物理奇点**，
+    #   属正常现象（真实 WMS 亦然），**不构成"1f 失效"**，故不参与判据。
     pk_1f = float(np.max(np.abs(S2f_1f[valid]))) if valid.any() else 0.0
     off_1f = float(np.max(np.abs(S2f_1f[off]))) if off.any() else 0.0
     abs1 = np.abs(S1f_cyc[valid]) if valid.any() else np.array([0.0])
     onef_min, onef_med = float(np.min(abs1)), float(np.median(abs1))
-    onef_ok_off = off_1f <= 0.30 * pk_1f
-    onef_ok_zero = onef_min > 0.05 * max(onef_med, 1e-30)
-    onef_valid = bool(pk_1f > 0 and onef_ok_off and onef_ok_zero)
+    onef_valid = bool(pk_1f > 0 and off_1f <= 0.30 * pk_1f)
     S2f_norm = S2f_1f if onef_valid else S2f_I0
     norm_method = "2f/1f" if onef_valid else "2f/I0（PD 非吸收区光强均值）"
     S2f1f = S2f_1f                     # 保留原名以向后兼容（始终输出，供用户自行判断）
@@ -894,16 +894,16 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
                         f"（三角波转折点导数不连续，其高频谐波会泄漏进 2f）")
     # 归一化体检：白话说清"2f/1f 能不能用"
     if onef_valid:
-        warnings.append(f"归一化采用 **2f/1f**（1f 有效）：非吸收区泄漏 {off_1f:.3g} 占峰值 "
-                        f"{100 * off_1f / max(pk_1f, 1e-30):.1f}%，1f 最小值/中位数 = "
-                        f"{onef_min / max(onef_med, 1e-30):.2f}（无过零）")
+        warnings.append(f"归一化采用 **2f/1f**（1f 基线平稳）：非吸收区泄漏 {off_1f:.3g} "
+                        f"占峰值 {100 * off_1f / max(pk_1f, 1e-30):.1f}%")
+        if onef_min < 0.05 * max(onef_med, 1e-30):
+            warnings.append(f"提示：1f 在共振两侧存在过零点（min/中位数="
+                            f"{onef_min / max(onef_med, 1e-30):.2f}），该处 2f/1f 有奇点，"
+                            f"读取浓度应取 2f 峰值点而非过零区")
     else:
-        _why = (f"非吸收区泄漏 {off_1f:.3g} 占峰值 {100 * off_1f / max(pk_1f, 1e-30):.0f}%（>30%）"
-                if not onef_ok_off else
-                f"1f 在共振中心过零（min/中位数 = {onef_min / max(onef_med, 1e-30):.2f} < 0.05），"
-                f"相除会爆成假尖峰")
-        warnings.append(f"⚠ **2f/1f 失效 → 已自动改用 2f/I0（PD 非吸收区光强均值 I0={I0_pd:.4g} V）**。"
-                        f"原因：{_why}")
+        warnings.append(f"⚠ **2f/1f 不可用 → 已自动改用 2f/I0（PD 非吸收区光强均值 I0={I0_pd:.4g} V）**。"
+                        f"原因：非吸收区 2f/1f 泄漏 {off_1f:.3g} 占峰值 "
+                        f"{100 * off_1f / max(pk_1f, 1e-30):.0f}%（>30%，1f 基线随扫描漂移）")
 
     meta = {"species": str(species).upper(), "wn_center": float(wn_center), "T": float(T),
             "P": float(P), "x": float(x), "L_cm": float(L_cm), "fs": fs,
