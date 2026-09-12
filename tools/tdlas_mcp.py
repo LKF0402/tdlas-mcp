@@ -94,59 +94,45 @@ AI_INTERACTION_GUIDE = {
         "第 4 步｜若返回值中 warnings / param_requests 非空，**先向用户澄清再解读结论**，"
         "不要拿不合理参数直接下结论。",
     ],
-    # ★ 常见错误与正确做法（这些坑都实际踩过，症状→根因→正确做法）。
-    #   当用户说"图很乱/有伪影/波形不对"时，**先按此表逐条排查**，不要急着解释物理。
-    "pitfalls": [
-        {"id": "wavenumber_axis_mismatch",
-         "symptom": "2f/1f 幅度极小、峰值位置与目标吸收线对不上、曲线像纯噪声",
-         "cause": "激光波数轴与吸收谱不匹配：voltage_to_laser 的 wn_ref 没跟随 wn_center，"
-                  "导致激光扫在 A 波段、吸收谱却算在 B 波段，两者毫无交集",
-         "fix": "给 wn_ref 时须满足 wn_ref = wn_center - (eta_VI*offset_V - i_ref)*dnu_dI；"
-                "工具已自动处理，但**自定义链路时必须自查**。判据：返回的 scan_window 应包含 wn_center"},
-        {"id": "x_axis_should_be_scan_not_instantaneous",
-         "symptom": "曲线被折成'水平条纹/扫帚状'，同一波数出现多个值",
-         "cause": "横轴用了瞬时波数 nu_laser（含 ±a 的调制摆动），每个点在横轴上前后平移",
-         "fix": "横轴必须用**扫描波数**（由 v_scan 换算，不含调制）。工具返回的 nu_axis 已正确"},
-        {"id": "das_must_be_unmodulated_path",
-         "symptom": "DAS 曲线呈密集锯齿/扫帚状，峰值与理论不符",
-         "cause": "用'对含调制信号做周期平均'来伪造 DAS。但平均窗口内波数仍在 ±a 摆动，会折出锯齿",
-         "fix": "DAS 是**不带调制**的技术：必须把调制置零、独立走一遍链路重算 PD 信号。"
-                "工具返回的 das_cyc 已是真无调制结果（实测与 HITRAN 理论偏差 <1%）"},
-        {"id": "single_line_for_standard_lineshape",
-         "symptom": "2f 看不出标准双峰、峰位对不上 ±0.7a",
-         "cause": "目标窗口谱线重叠（如 CH4 @2968.5 有 221 条线），2f 是多线叠加结构",
-         "fix": "要展示/校验标准谐波形状，必须选**孤立单线**（如 H2O 7185.596，实测 2f 峰位 Δν=+0.0704 vs 理论 ±0.069）。"
-                "线数可从返回结果的 n_lines_in_window 判断，>10 条就别指望标准形状"},
-        {"id": "2f_over_1f_may_be_invalid",
-         "symptom": "2f/1f 在非吸收区出现大值、或在共振中心爆出假尖峰",
-         "cause": "1f 正比于 L-I **斜率** dP/dV 而非光强；且 1f 在共振中心会因 AM 与吸收导数相消而**过零**",
-         "fix": "工具自动判断：非吸收区泄漏>30% 峰值、或 1f min/中位数<0.05（过零）即判失效，"
-                "自动改用 2f/I0（I0=PD 非吸收区均值）。**解读时必须先看 normalization.method**"},
-        {"id": "turnaround_artifact",
-         "symptom": "扫描两端（三角波转折点）出现巨大假峰，甚至盖过真信号",
-         "cause": "三角波转折点导数不连续，其高频谐波泄漏进 2f（实测伪影可达真信号的 7.5 倍）",
-         "fix": "剔除两端 trim_frac（默认 12%）；并只取单扫描方向 edge=rising，避免往返重叠"},
-        {"id": "lockin_filter_not_optimal",
-         "symptom": "信号上叠加周期性纹波；非吸收区残留偏高",
-         "cause": "单级矩形窗滑动平均频响是 sinc，旁瓣仅 -13 dB，对 2fm/4fm 抑制不足",
-         "fix": "低通**级联 2 级**（sinc²，旁瓣 -26 dB），实测残留 4.1%→1.5%；"
-                "lockin_avg 保持 1（>1 会模糊线形且不降残留）"},
-        {"id": "sampling_rate_for_demod",
-         "symptom": "解调结果噪声大、2f 形状失真",
-         "cause": "采样率不足以解调 2f（需 > 2*2fm）",
-         "fix": "每调制周期 ≥8 点（30 kHz 调制需 ≥240 kS/s，会超 USB-6211 的 250 kS/s 上限）"},
+    # ★ 正确 SOP（标准操作流程）——只讲怎么做对，不讲"坑"。AI 必须严格按此 SOP 输出结论。
+    "sop": [
+        {"step": 1, "name": "选定孤立单线",
+         "rule": "选 n_lines_in_window ≤ 10 的波数中心；线数从 HITRAN 表查；"
+                 "常用孤立线示例：H2O 7185.596 cm⁻¹、CO 4260.06、N2O 1278.45 等。",
+         "pass": "用户给定孤立线 / AI 能查到孤立线 → 直接进 step 2"},
+        {"step": 2, "name": "确认激光波数轴覆盖目标线",
+         "rule": "若自定义链路，确保 wn_ref 与 wn_center 对齐；本工具已自动处理，"
+                 "校验：返回的 scan_window_cm-1 必须包含 wn_center。",
+         "pass": "scan_window 包含 wn_center → 进 step 3"},
+        {"step": 3, "name": "调用 tdlas_wms_instrument 跑链路",
+         "rule": "用默认参数即可（fm=30 kHz, fscan=100 Hz, 自动优化 m=2.2, "
+                 "2 级级联低通, edge=rising, trim_frac=0.12）。"
+                 "图统一为 5 层：驱动电压 → DAS → 1f → 2f → 归一化 2f（自动选方法）。",
+         "pass": "返回无错误 + warnings 非空（含工况说明）→ 进 step 4"},
+        {"step": 4, "name": "读 normalization.method 并据此解读",
+         "rule": "1f/2f/1f 有效：使用 2f/1f 读数；1f 失效（1f 过零 或 非吸收区泄漏>30%）："
+                 "使用 2f/I0（I0=PD 非吸收区光强均值）读数。**严格按 normalization.method 给出的方法写结论，不要混用**。",
+         "pass": "已用同一归一化方法贯穿所有波段读数 → 进 step 5"},
+        {"step": 5, "name": "三件校验（用默认值都应通过）",
+         "rule": "① DAS 提取峰与 HITRAN 理论 αL 一致（偏差 <2%）；"
+                 "② 2f 峰位 Δν ≈ ±0.7a（孤立单线下应见标准双峰结构）；"
+                 "③ 非吸收区残留/峰 < 2%。",
+         "pass": "三项都通过 → 物理结论可信；任何一项不通过 → 停止解读，回 step 1 排查"},
+        {"step": 6, "name": "输出结论",
+         "rule": "按此顺序：① 工况（物种/波段/T/P/x/L/fm/调制系数）；"
+                 "② normalization.method 及 I0；③ 2f（或归一化 2f）峰值与位置；"
+                 "④ 噪声分解（shot/thermal/RIN）；⑤ 检测限（若已估）。"
+                 "所有用默认值的参数必须显式标注「默认值」。",
+         "pass": "结论完整、可复现"},
     ],
-    "troubleshooting_order": "图不对劲时按此序排查：① scan_window 是否包含 wn_center（波数轴对齐）"
-                             "→ ② 横轴是否扫描波数 → ③ n_lines_in_window 是否 >10（该换孤立线）"
-                             "→ ④ normalization.method 是否失效 → ⑤ 剔除区/转折点 → ⑥ 滤波器级数。",
-    "correct_workflow": [
-        "1. 先调 tdlas_guide 读本协议与 pitfalls；",
-        "2. 选定**孤立单线**（n_lines_in_window 应很小），确认波段与工况；",
-        "3. 用 tdlas_wms_instrument 跑链路，**先看 warnings / normalization / scan_window 三项**；",
-        "4. 校验三件事：DAS 与 HITRAN 理论一致（偏差应 <2%）、2f 峰位≈±0.7a（标准双峰）、"
-        "非吸收区残留/峰 <2%；",
-        "5. 只有以上都对，才解读浓度/检测限等物理结论。",
-    ],
+    "image_layout": {
+        "layers": ["① 驱动电压", "② DAS(αL) + 理论对照", "③ 1f + 非吸收区标灰",
+                   "④ 2f", "⑤ 归一化 2f（自动选 2f/1f 或 2f/I0）"],
+        "rule": "横轴统一为波数（扫描波数，不是瞬时）；剔除区用灰点线/红带标出；"
+                "y 轴范围只看有效区；绘图自动降采样避免混叠。",
+    },
+    "defaults_when_unknown": "所有物理参数未给时按以下顺序索取：① 实测标定值 → "
+                             "② 器件型号（AI 自己检索规格书）→ ③ 引导用户现场标定 → ④ 保留内置默认并**显式标注**「默认值 X」。",
     "glossary": {
         "αL": "吸光度（吸收系数×光程），无量纲；≪1 才算弱吸收，DAS/2f 才与浓度成正比",
         "HWHM": "吸收线半高半宽（cm⁻¹），决定最优调制深度",
@@ -487,8 +473,8 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            "needs_input": bool(requests),
            "ai_guidance": {"role": AI_INTERACTION_GUIDE["role"],
                            "priority": AI_INTERACTION_GUIDE["priority"],
-                           "troubleshooting_order": AI_INTERACTION_GUIDE["troubleshooting_order"],
-                           "pitfalls": AI_INTERACTION_GUIDE["pitfalls"],
+                           "sop": AI_INTERACTION_GUIDE["sop"],
+                           "image_layout": AI_INTERACTION_GUIDE["image_layout"],
                            "next_step": "若 param_requests 非空：先向用户索取实测值或器件型号；"
                                         "保留默认时须在结论中标注。"},
            "warnings": m["warnings"], "edge_note": EDGE_TECH_NOTE,
