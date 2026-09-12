@@ -162,11 +162,45 @@ def selftest():
     print(f"  弱场线性度（x=1e-4 → 1e-3，理想 1.00）：{lin:.3f}")
     assert 0.7 < lin < 1.3, "弱吸收下 2f/1f 未正比于浓度，链路有问题"
 
+    # 4) 浓度反演闭环：真值 → 仿真峰高 → 反演 → 对比
+    sens = sensitivity_2f1f(x_ref=1e-3)
+    print(f"  灵敏度 k = {sens:.4e}（2f/1f 峰高 ÷ 浓度）")
+    for x_true in (1e-4, 1e-3, 1e-2):
+        x_est = invert_concentration(float(simulate(x=x_true)["S2f1f"].max()), sens)
+        err = abs(x_est - x_true) / x_true
+        print(f"  反演闭环：真值 {x_true:g} → 反演 {x_est:.4e}（差 {err * 100:.2f}%）")
+        assert err < 0.05, f"反演误差 {err:.1%} 超过 5%"
+
     print("  自测通过")
     return r
 
 
-# ══════════════════ 5. 绘图 ══════════════════
+# ══════════════════ 5. 免标定浓度反演 ══════════════════
+
+def sensitivity_2f1f(species="H2O", wn0=7185.596, T=296.0, P=1.0, L=30.0,
+                     a=0.10, x_ref=1e-3, **kw):
+    """单位浓度的 WMS-2f/1f 峰高灵敏度 k（弱吸收下 S2f1f_peak ≈ k·x）。
+
+    k 只取决于 T/P/L、调制参数与谱线参数，与待测浓度无关 —— 这正是"免标定"：
+    用一次仿真（或一次已知浓度实验）定出 k，之后由峰高即可直接反演浓度。
+    """
+    if x_ref <= 0:
+        raise ValueError(f"参考浓度 x_ref 必须 > 0，收到 {x_ref}")
+    r = simulate(species, wn0, T, P, x=x_ref, L=L, a=a, **kw)
+    peak = float(r["S2f1f"].max())
+    if peak <= 0:
+        raise ValueError("参考浓度下 2f/1f 峰高为零：请检查线选择 / 调制深度 a / 扫描窗口")
+    return peak / float(x_ref)
+
+
+def invert_concentration(peak_2f1f, k):
+    """免标定反演：由测得的 2f/1f 峰高与灵敏度 k 求摩尔分数 x = peak / k。"""
+    if k <= 0:
+        raise ValueError(f"灵敏度 k 必须 > 0，收到 {k}")
+    return float(peak_2f1f) / float(k)
+
+
+# ══════════════════ 6. 绘图 ══════════════════
 
 def plot(r, out_png):
     import matplotlib
