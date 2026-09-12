@@ -893,6 +893,9 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     if flicker_frac > 0:
         p_das = p_das * (1.0 + flicker_frac * pink_noise(len(t), fs, rng))
     alpha_das = np.interp(nu_das, nu_grid, alpha_pure) * float(x)
+    # ★ DAS 基线必须用"无吸收光强 I0"（仿真里可精确给出）。之前的"非吸收区多项式拟合"
+    #   在密集谱区（如 C2H6 159 条线，无非吸收区）会失效，导致 DAS 基线错、吸光度失真。
+    v_das_I0 = (p_das * float(cfg["throughput"]) * 1e-3 * float(cfg["resp"]) * float(cfg["gain"]))
     p_das_opt = (p_das * float(cfg["throughput"]) * np.exp(-alpha_das * float(L_cm)))
     i_das = p_das_opt * 1e-3 * float(cfg["resp"])
     # 同源噪声模型（与 WMS 完全一致，公平对比）
@@ -901,13 +904,7 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     s_d = float(np.sqrt(s_sh_d ** 2 + s_th_d ** 2 + s_rin_d ** 2))
     v_das_all = i_das * float(cfg["gain"]) + rng.normal(0.0, s_d * float(cfg["gain"]), i_das.shape)
     v_das_cyc = v_das_all[idx]
-    base_sel = valid & off
-    if int(base_sel.sum()) > 3:
-        _c = np.polyfit(nu_cyc[base_sel] - float(wn_center), v_das_cyc[base_sel], 2)
-        base_das = np.polyval(_c, nu_cyc - float(wn_center))
-    else:
-        base_das = np.full_like(v_das_cyc, float(np.mean(v_das_cyc[valid])))
-    das_cyc = -np.log(np.maximum(v_das_cyc, 1e-12) / np.maximum(base_das, 1e-12))
+    das_cyc = -np.log(np.maximum(v_das_cyc, 1e-12) / np.maximum(v_das_I0[idx], 1e-12))
 
     # 主动检查
     aL_peak = float(np.max(alpha_pure_mix)) * float(L_cm)

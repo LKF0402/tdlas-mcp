@@ -76,6 +76,42 @@ PARAM_ACQ_GUIDE = {
     "flicker_frac": ("1/f 粉红噪声幅度", "相对光强", "频域 1/√f 噪声；默认 0.01"),
 }
 
+# ★ 物种推荐工况（自适应）：未给工况参数时，按物种/波段自动推荐，而非死板用默认值。
+SPECIES_PROFILES = {
+    "CH4": {"bands": [("3.3 μm", 3010.0), ("1.65 μm", 6046.9)],
+            "x_typ": 1e-4, "L_cm": 100.0, "T": 296.0, "P": 1.0,
+            "note": "甲烷近红外 6046.9(2ν3 带 R(3)线，较孤立)、中红外 3010(ν3 带强吸收)"},
+    "C2H6": {"bands": [("3.4 μm ν7 带", 2964.5), ("1.7 μm", 5920.0)],
+             "x_typ": 1e-4, "L_cm": 100.0, "T": 296.0, "P": 1.0,
+             "note": "2964.5 附近 Q 支密集(159 线)，需 L 较小避免 αL 过大"},
+    "H2O": {"bands": [("1.39 μm", 7185.6)],
+            "x_typ": 0.02, "L_cm": 30.0, "T": 296.0, "P": 1.0,
+            "note": "7185.6 为较孤立单线，常用于锁相/谐波标定"},
+    "CO": {"bands": [("2.33 μm", 4285.0)],
+           "x_typ": 1e-4, "L_cm": 100.0, "T": 296.0, "P": 1.0,
+           "note": "基频 R 支，线孤立、线强表成熟"},
+    "CO2": {"bands": [("2.0 μm", 5003.0)],
+            "x_typ": 5e-4, "L_cm": 100.0, "T": 296.0, "P": 1.0,
+            "note": "2.0 μm 组合带"},
+    "NO": {"bands": [("5.26 μm", 1900.0)],
+           "x_typ": 1e-4, "L_cm": 50.0, "T": 296.0, "P": 1.0,
+           "note": "基频带"},
+}
+
+
+def adaptive_condition(species, wn_center=None):
+    """工况自适应：未给工况参数时，返回该物种的推荐波段/典型浓度/光程。"""
+    sp = str(species).strip().upper()
+    p = SPECIES_PROFILES.get(sp, {})
+    rec = {"species": sp,
+           "推荐波段": p.get("bands", []),
+           "推荐浓度 x": p.get("x_typ"),
+           "推荐光程 L_cm": p.get("L_cm"),
+           "推荐 T": p.get("T"), "推荐 P": p.get("P"),
+           "说明": p.get("note", "无内置资料，请提供工况")}
+    return rec
+
+
 # ★ AI 主动指导协议：本 MCP 面向**实验新手**，AI 必须主动引导而非被动等参数。
 # 每次涉及真实器件的仿真，按此顺序与用户交互（用专业术语，但首次出现给白话解释）。
 AI_INTERACTION_GUIDE = {
@@ -152,6 +188,14 @@ AI_INTERACTION_GUIDE = {
     "edge_definition": "edge 指**驱动电压**方向（daq_triangle 前半=电压上升、后半=电压下降）；"
                        "因 dν/dI<0，电压上升沿对应波数下降、下降沿对应波数上升。"
                        "工具内部已把所选方向反转为波数单调递增再输出，无需用户处理。",
+    "condition_adaptation": {
+        "规则": "工况参数（T/P/x/L_cm）未给时，按物种用 SPECIES_PROFILES 自动推荐（自适应），"
+                "不套用全局默认；返回 condition_advice 告知推荐值。",
+        "主动询问": "出图前必须**主动向用户确认工况**：物种/波段是否正确、浓度量级、光程、"
+                    "T/P；用户不确定时给出 condition_advice 的推荐。",
+        "弱吸收校验": "推荐工况应使 αL 落在 1e-3 ~ 1e-1（弱吸收线性区）；"
+                      "若 αL>0.1 应建议降低 x 或 L_cm，若 <1e-5 应建议增大。",
+    },
     "noise_and_interaction": {
         "默认": "**默认不加任何噪声**（理想仿真：rin=0, drift_frac=0, flicker_frac=0）。",
         "询问": "MCP 必须在出图/解读前**主动询问用户**：是否需要加噪声？加哪类？多大？"
@@ -444,8 +488,14 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     未给出的参数列入 assumptions / param_requests；AI 须按 AI_INTERACTION_GUIDE 处理并显式标注。
     """
     import numpy as np
+    sp = str(species).strip().upper()
+    prof = SPECIES_PROFILES.get(sp, {})
+    scene_rec = {"T": prof.get("T", _SCENE_DEFAULTS["T"]),
+                 "P": prof.get("P", _SCENE_DEFAULTS["P"]),
+                 "x": prof.get("x_typ", _SCENE_DEFAULTS["x"]),
+                 "L_cm": prof.get("L_cm", _SCENE_DEFAULTS["L_cm"])}
     given_scene = {"T": T, "P": P, "x": x, "L_cm": L_cm}
-    scene = {k: (_SCENE_DEFAULTS[k] if v is None else v) for k, v in given_scene.items()}
+    scene = {k: (scene_rec[k] if v is None else v) for k, v in given_scene.items()}
     assumed = [k for k, v in given_scene.items() if v is None]
 
     given_inst = {k: kw.get(k) for k in _INSTR_KEYS_WMS}
@@ -474,6 +524,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                              "how": "① 实测值 ② 器件型号（AI 检索规格书）③ 引导现场标定 ④ 保留默认并注明"})
 
     out = {"species": str(species).upper(), "wn_center_cm-1": float(wn_center),
+           "condition_advice": adaptive_condition(species, wn_center),
            "scan_window_cm-1": [round(float(r["nu_axis"].min()), 4),
                                 round(float(r["nu_axis"].max()), 4)],
            "wms": {"fscan_Hz": m["fscan_Hz"], "mod_freq_Hz": m["mod_freq_Hz"],
@@ -512,6 +563,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "das_vs_wms": AI_INTERACTION_GUIDE["das_vs_wms"],
                            "edge_definition": AI_INTERACTION_GUIDE["edge_definition"],
                            "noise_and_interaction": AI_INTERACTION_GUIDE["noise_and_interaction"],
+                           "condition_adaptation": AI_INTERACTION_GUIDE["condition_adaptation"],
                            "next_step": "若 param_requests 非空：先向用户索取实测值或器件型号；"
                                         "保留默认时须在结论中标注。",
                            "must_disclose": ["① 本次用了哪些噪声（白噪声散粒/热/RIN + 1/f 漂移/粉红，见 noise_disclosure）",
