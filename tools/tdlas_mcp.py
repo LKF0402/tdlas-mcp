@@ -76,6 +76,57 @@ PARAM_ACQ_GUIDE = {
     "flicker_frac": ("1/f 粉红噪声幅度", "相对光强", "频域 1/√f 噪声；默认 0.01"),
 }
 
+# ★ 澄清问题模板：把缺省参数转成"带选项的自然语言问句"，供 AI 主动向用户提问。
+CLARIFY_QUESTIONS = {
+    "x": {"question": "待测气体浓度（摩尔分数）量级是多少？",
+          "options": ["痕量 ~1e-6", "低 ~1e-4", "中 ~1e-2", "不确定，帮我推荐"],
+          "why": "决定吸收强弱 αL，弱吸收(1e-5~0.1)下 DAS/2f 才线性"},
+    "L_cm": {"question": "吸收池光程是多少？",
+             "options": ["10 cm", "30 cm", "100 cm", "多通池（几十米）", "不确定"],
+             "why": "与浓度共同决定 αL"},
+    "T": {"question": "气体温度？",
+          "options": ["室温 296 K", "其他（请填数值）"],
+          "why": "决定线强与多普勒线宽"},
+    "P": {"question": "气体压力？",
+          "options": ["常压 1 atm", "减压（请填数值）", "其他"],
+          "why": "决定碰撞展宽（Lorentz HWHM）"},
+    "mod_freq_Hz": {"question": "正弦调制频率 fm 用多少？",
+                    "options": ["默认 30 kHz", "其他（请填）"],
+                    "why": "信号搬到 fm 以避开 1/f 噪声"},
+    "drift_frac": {"question": "是否加入 1/f 慢漂移噪声？",
+                   "options": ["不加（理想仿真）", "加 0.5%", "加 1%", "其他"],
+                   "why": "模拟激光功率慢漂移；DAS 受害、WMS 抑制"},
+    "flicker_frac": {"question": "是否加入 1/f 粉红噪声？",
+                     "options": ["不加（理想仿真）", "加 1%", "加 3%", "其他"],
+                     "why": "模拟 1/f 光强噪声"},
+}
+
+
+def build_clarify_questions(species, wn_center, assumed, used_values):
+    """把缺省参数转成结构化澄清问题（含选项），供 AI 主动向用户提问。"""
+    questions = []
+    # 波段澄清（优先问，因为影响后续一切）
+    prof = SPECIES_PROFILES.get(str(species).strip().upper(), {})
+    if prof.get("bands"):
+        q = {"param": "波段", "question": f"{species} 要测哪个波段？",
+             "options": [f"{nm}（{wn} cm⁻¹）" for nm, wn in prof["bands"]],
+             "why": "不同波段线强/线密度不同", "current": wn_center}
+        questions.append(q)
+    for k in assumed:
+        tpl = CLARIFY_QUESTIONS.get(k)
+        if tpl:
+            questions.append({"param": k, "question": tpl["question"],
+                              "options": tpl["options"], "why": tpl["why"],
+                              "current_default": used_values.get(k)})
+        else:
+            cn, unit, why = PARAM_ACQ_GUIDE.get(k, (k, "—", ""))
+            questions.append({"param": k, "中文名": cn, "单位": unit,
+                              "question": f"请确认 {cn}（{unit}），当前用默认 {used_values.get(k)}",
+                              "options": [], "why": why,
+                              "current_default": used_values.get(k)})
+    return questions
+
+
 # ★ 物种推荐工况（自适应）：未给工况参数时，按物种/波段自动推荐，而非死板用默认值。
 SPECIES_PROFILES = {
     "CH4": {"bands": [("3.3 μm", 3010.0), ("1.65 μm", 6046.9)],
@@ -229,6 +280,14 @@ AI_INTERACTION_GUIDE = {
                     "T/P；用户不确定时给出 condition_advice 的推荐。",
         "弱吸收校验": "推荐工况应使 αL 落在 1e-3 ~ 1e-1（弱吸收线性区）；"
                       "若 αL>0.1 应建议降低 x 或 L_cm，若 <1e-5 应建议增大。",
+    },
+    "clarify_protocol": {
+        "触发": "返回的 clarify.needed=True（有缺省参数）时，必须进入澄清流程。",
+        "流程": "① 按 clarify.questions 逐条向用户提问（带选项，减少用户负担）；"
+                "② 收到回答后填入对应参数重跑；③ 用户明确说'用默认值'才可跳过该项；"
+                "④ 全部确认后才出图/下结论。",
+        "强制": "clarify.instruction 明确要求'先问再出结果'，这是硬约束，不是建议。",
+        "多轮": "支持多轮：每次用户补充一个参数，就少问一个（questions 会随 assumed 缩小）。",
     },
     "noise_and_interaction": {
         "默认": "**默认不加任何噪声**（理想仿真：rin=0, drift_frac=0, flicker_frac=0）。",
@@ -557,6 +616,10 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                              "value_used": cfg.get(k, _SCENE_DEFAULTS.get(k)),
                              "how": "① 实测值 ② 器件型号（AI 检索规格书）③ 引导现场标定 ④ 保留默认并注明"})
 
+    # 澄清问题：把缺省参数转成带选项的问句，供 AI 主动向用户提问
+    _used = {k: (scene[k] if k in scene else cfg.get(k)) for k in assumed}
+    _clarify_qs = build_clarify_questions(species, wn_center, assumed, _used)
+
     out = {"species": str(species).upper(), "wn_center_cm-1": float(wn_center),
            "condition_advice": adaptive_condition(species, wn_center),
            "scan_window_cm-1": [round(float(r["nu_axis"].min()), 4),
@@ -591,6 +654,10 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            "validation": ts.validate_wms_result(r),
            "assumptions": assumed, "param_requests": requests,
            "needs_input": bool(requests),
+           "clarify": {"needed": bool(requests),
+                       "instruction": "needed=True 时：**先向用户提出 questions 里的澄清问题，"
+                                      "收到回答前不要直接出图/下结论**。用户明确说'用默认值'才可跳过。",
+                       "questions": _clarify_qs},
            "ai_guidance": {"role": AI_INTERACTION_GUIDE["role"],
                            "priority": AI_INTERACTION_GUIDE["priority"],
                            "sop": AI_INTERACTION_GUIDE["sop"],
@@ -600,6 +667,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "pd_baseline_slope": AI_INTERACTION_GUIDE["pd_baseline_slope"],
                            "noise_and_interaction": AI_INTERACTION_GUIDE["noise_and_interaction"],
                            "condition_adaptation": AI_INTERACTION_GUIDE["condition_adaptation"],
+                           "clarify_protocol": AI_INTERACTION_GUIDE["clarify_protocol"],
                            "das_baseline_method": AI_INTERACTION_GUIDE["das_baseline_method"],
                            "next_step": "若 param_requests 非空：先向用户索取实测值或器件型号；"
                                         "保留默认时须在结论中标注。",
