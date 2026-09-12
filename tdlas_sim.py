@@ -813,13 +813,15 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
         raise ValueError(f"每扫描周期采样点太少（fs/fscan = {fs / fscan:.1f}），请提高 fs 或降低 fscan")
     half = n_per // 2
     edge = str(kw.get("edge") or "rising").strip().lower()
-    if edge == "falling":
-        idx = np.arange(half)[::-1]          # 前半 ν 递减 → 反转为递增
+    # 注意 daq_triangle：前半=电压上升(-1→+1)、后半=电压下降(+1→-1)；
+    # 因 dν/dI<0，电压上升沿对应 ν 递减、下降沿对应 ν 递增。edge 指**驱动电压**方向。
+    if edge == "rising":
+        idx = np.arange(half)[::-1]          # 电压上升沿(前半)，ν 递减 → 反转为递增
     elif edge == "both":
         idx = np.arange(n_per)
     else:
-        edge = "rising"
-        idx = np.arange(half, n_per)          # 后半 ν 递增
+        edge = "falling"
+        idx = np.arange(half, n_per)          # 电压下降沿(后半)，ν 递增
     n_sel = int(idx.size)
     # ★ 横轴必须用"扫描波数"（不含调制），不能用瞬时波数 nu_laser[idx] ——
     #   后者带 ±a 的摆动，每个点在横轴上来回平移，会把曲线折成"水平条纹"乱麻。

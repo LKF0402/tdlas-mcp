@@ -96,10 +96,12 @@ AI_INTERACTION_GUIDE = {
     ],
     # ★ 正确 SOP（标准操作流程）——只讲怎么做对，不讲"坑"。AI 必须严格按此 SOP 输出结论。
     "sop": [
-        {"step": 1, "name": "选定孤立单线",
-         "rule": "选 n_lines_in_window ≤ 10 的波数中心；线数从 HITRAN 表查；"
-                 "常用孤立线示例：H2O 7185.596 cm⁻¹、CO 4260.06、N2O 1278.45 等。",
-         "pass": "用户给定孤立线 / AI 能查到孤立线 → 直接进 step 2"},
+        {"step": 1, "name": "技术选型 + 选定孤立单线",
+         "rule": "先按谱线密度选技术：窗口内线数 ≤10 → WMS（2f 呈标准双峰、免标定、抗 RIN）；"
+                 "线数多（密集谱区）→ 2f 会把每根线都放大成独立峰、看似杂乱，此时 DAS 的直接吸收包络更直观，"
+                 "不宜用 WMS 展示标准谐波。WMS 定量/展示标准谐波一律选孤立单线，"
+                 "示例：H2O 7185.596、CO 4260.06、N2O 1278.45。线数看 n_lines_in_window。",
+         "pass": "已按线密度选对技术 + 用户给定/AI 查到孤立线 → 进 step 2"},
         {"step": 2, "name": "确认激光波数轴覆盖目标线",
          "rule": "若自定义链路，确保 wn_ref 与 wn_center 对齐；本工具已自动处理，"
                  "校验：返回的 scan_window_cm-1 必须包含 wn_center。",
@@ -133,6 +135,17 @@ AI_INTERACTION_GUIDE = {
     },
     "defaults_when_unknown": "所有物理参数未给时按以下顺序索取：① 实测标定值 → "
                              "② 器件型号（AI 自己检索规格书）→ ③ 引导用户现场标定 → ④ 保留内置默认并**显式标注**「默认值 X」。",
+    "das_vs_wms": {
+        "本质": "DAS 测吸收 α(ν) 本身；WMS 的 2f 是吸收对调制的二阶响应（≈二阶导），"
+                "会把每根窄线'锐化'成独立峰。",
+        "结论": "密集谱区（线数多）：2f 有一堆峰、看似乱，DAS 的平滑包络更直观；"
+                "孤立单线：2f 呈标准双峰，且带免标定/抗 RIN 优势。"
+                "这不是噪声，也不是 bug，是两种技术的本质差异。",
+        "判据": "n_lines_in_window ≤10 → WMS；否则 → DAS（或换孤立线做 WMS）。",
+    },
+    "edge_definition": "edge 指**驱动电压**方向（daq_triangle 前半=电压上升、后半=电压下降）；"
+                       "因 dν/dI<0，电压上升沿对应波数下降、下降沿对应波数上升。"
+                       "工具内部已把所选方向反转为波数单调递增再输出，无需用户处理。",
     "glossary": {
         "αL": "吸光度（吸收系数×光程），无量纲；≪1 才算弱吸收，DAS/2f 才与浓度成正比",
         "HWHM": "吸收线半高半宽（cm⁻¹），决定最优调制深度",
@@ -475,6 +488,8 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "priority": AI_INTERACTION_GUIDE["priority"],
                            "sop": AI_INTERACTION_GUIDE["sop"],
                            "image_layout": AI_INTERACTION_GUIDE["image_layout"],
+                           "das_vs_wms": AI_INTERACTION_GUIDE["das_vs_wms"],
+                           "edge_definition": AI_INTERACTION_GUIDE["edge_definition"],
                            "next_step": "若 param_requests 非空：先向用户索取实测值或器件型号；"
                                         "保留默认时须在结论中标注。"},
            "warnings": m["warnings"], "edge_note": EDGE_TECH_NOTE,
