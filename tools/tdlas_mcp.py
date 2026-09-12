@@ -44,6 +44,31 @@ EDGE_TECH_NOTE = (
     "或用 edge='average' 两段平均（随机噪声按 √2 改善，但系统性偏差不会被平均抵消）。"
 )
 
+# 参数索取指南：缺省参数的索取优先级 ——
+# ① 用户提供的实测标定值 → ② 用户提供的器件型号（由 AI 检索规格书）
+# → ③ 引导用户现场测量（如"驱动电压变化 ΔV → 波数变化 Δν"）
+# → ④ 保留内置默认值并在返回中明确标注（assumptions）
+PARAM_ACQ_GUIDE = {
+    "amp_V": ("三角波幅值", "V", "决定扫描波数半宽 Δν = amp_V·|η_VI·dν/dI|"),
+    "offset_V": ("三角波偏置", "V", "决定扫描中心波数（即落在哪条吸收线上）"),
+    "freq_Hz": ("三角波频率", "Hz", "扫描速率；与采样率共同决定每周期采样点数"),
+    "phase_deg": ("三角波相位", "°", "起始相位（默认中心对称、先上升后下降）"),
+    "eta_VI": ("驱动器跨导 η_VI", "mA/V", "电压—电流转换，取决于驱动器电路"),
+    "dnu_dI": ("激光器调谐系数 dν/dI", "cm⁻¹/mA", "波数标定核心；给出激光器型号可查规格书"),
+    "eta_IP": ("功率斜率效率", "mW/mA", "决定光功率量级，进而决定 PD 电压与 ADC 量程占用"),
+    "wn_ref": ("参考波数", "cm⁻¹", "调谐基准点（通常取规格书中心波长）"),
+    "i_ref": ("参考电流", "mA", "与参考波数配对的工作点电流"),
+    "i_th": ("阈值电流", "mA", "低于此电流无激光输出"),
+    "fs": ("采集卡采样率", "Hz", "NI USB-6211 上限 250 kS/s"),
+    "adc_bits": ("ADC 位数", "bit", "决定量化噪声与动态范围（USB-6211：16-bit）"),
+    "v_range": ("ADC 输入量程", "V", "决定满量程与饱和阈值"),
+    "resp": ("PD 响应度 R", "A/W", "光电转换效率（InGaAs 典型 0.9 A/W）"),
+    "gain": ("PD 跨阻增益 G", "V/A", "决定 PD 输出电压；过高会导致 ADC 饱和"),
+    "bw": ("PD 带宽", "Hz", "与噪声带宽、可解调的最高调制频率相关"),
+    "rin": ("激光相对强度噪声 RIN", "1/√Hz", "常为 TDLAS 系统的主导噪声源"),
+    "throughput": ("光学元件总透过率", "—", "窗片 / 镜片 / 光纤耦合损耗"),
+}
+
 
 @contextlib.contextmanager
 def _quiet():
@@ -222,6 +247,85 @@ def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
     return out
 
 
+_INSTR_KEYS = ("amp_V", "freq_Hz", "offset_V", "phase_deg", "eta_VI", "dnu_dI",
+               "wn_ref", "i_ref", "i_th", "eta_IP", "fs", "n_samples", "adc_bits",
+               "v_range", "throughput", "resp", "gain", "bw", "rin")
+_SCENE_DEFAULTS = {"T": 296.0, "P": 1.01325, "x": 1e-3, "L_cm": 50.0,
+                   "edge": "rising", "fit_order": 3, "fit_frac": 0.3}
+
+
+def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
+                     edge=None, fit_order=None, fit_frac=None, seed=None,
+                     save_png=False, **kw):
+    """仪器系统级 DAS 仿真：DAQ 电压 → 激光 → 光路 → PD → ADC 量化 → 基线扣除。
+
+    缺省参数按优先级索取：① 用户实测标定值 → ② 器件型号（AI 检索规格书）
+    → ③ 引导用户现场测量 → ④ 内置默认（NI USB-6211 + 典型中红外 DFB 激光器）。
+    返回 assumptions / param_requests / warnings，供 AI 主动向用户澄清后再解读结论。
+    """
+    given_scene = {"T": T, "P": P, "x": x, "L_cm": L_cm, "edge": edge,
+                   "fit_order": fit_order, "fit_frac": fit_frac}
+    scene = {k: (_SCENE_DEFAULTS[k] if v is None else v) for k, v in given_scene.items()}
+    assumed = [k for k, v in given_scene.items() if v is None]
+
+    given_inst = {k: kw.get(k) for k in _INSTR_KEYS}
+    assumed += [k for k, v in given_inst.items() if v is None]
+    inst = {k: v for k, v in given_inst.items() if v is not None}
+
+    if not (species and str(species).strip()):
+        raise ValueError("species 不能为空")
+
+    with _quiet() as g:
+        r = ts.simulate_das_instrument(species, wn_center=float(wn_center),
+                                       T=float(scene["T"]), P=float(scene["P"]),
+                                       x=float(scene["x"]), L_cm=float(scene["L_cm"]),
+                                       edge=scene["edge"], fit_order=int(scene["fit_order"]),
+                                       fit_frac=float(scene["fit_frac"]), seed=seed, **inst)
+    m = r["meta"]
+    cfg = m["cfg"]
+
+    requests = []
+    for k in assumed:
+        if k in PARAM_ACQ_GUIDE:
+            cn, unit, why = PARAM_ACQ_GUIDE[k]
+            requests.append({"param": k, "cn": cn, "unit": unit, "why": why,
+                             "value_used": cfg.get(k, _SCENE_DEFAULTS.get(k)),
+                             "how": "① 用户实测值 ② 器件型号（AI 检索规格书）"
+                                    "③ 引导现场标定 ④ 保留默认并注明"})
+
+    out = {"species": str(species).upper(), "wn_center_cm-1": float(wn_center),
+           "scan_window_cm-1": [round(m["scan_lo"], 4), round(m["scan_hi"], 4)],
+           "scan_half_span_cm-1": round(m["span_cm-1"], 4),
+           "tri_wave": {k: cfg[k] for k in ("amp_V", "freq_Hz", "offset_V", "phase_deg")},
+           "laser": {k: cfg[k] for k in ("eta_VI", "dnu_dI", "wn_ref", "i_ref", "i_th", "eta_IP")},
+           "pd": {k: cfg[k] for k in ("resp", "gain", "bw", "rin", "throughput")},
+           "adc": {"fs_Hz": cfg["fs"], "n_samples": cfg["n_samples"],
+                   "bits": cfg["adc_bits"], "v_range_V": cfg["v_range"], "lsb_V": m["lsb_V"]},
+           "results": {"alpha_L_peak": m["alpha_L_peak"],
+                       "v_pd_mean_V": m["v_pd_mean"],
+                       "saturated_points": m["n_sat"],
+                       "noise_rms_mV": m["sigma_v_noise"] * 1e3,
+                       "noise_breakdown_mV": {"shot": m["sigma_shot"] * 1e3,
+                                              "thermal": m["sigma_thermal"] * 1e3,
+                                              "rin": m["sigma_rin"] * 1e3},
+                       "n_lines_in_window": m["n_lines_in_window"], "table": m["table"]},
+           "assumptions": assumed,
+           "param_requests": requests,
+           "needs_input": bool(requests),
+           "confirm_note": "param_requests 为缺省参数：请优先向用户索取实测值或器件型号；"
+                           "必要时引导现场标定；保留默认时须在结论中明确注明。",
+           "warnings": m["warnings"],
+           "edge_note": EDGE_TECH_NOTE,
+           "log": g.getvalue().splitlines()}
+    if save_png:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        png = OUT_DIR / f"das_instr_{str(species).upper()}_{float(wn_center):g}cm-1.png"
+        with _quiet():
+            ts.plot_das_instrument(r, png)
+        out["png"] = str(png)
+    return out
+
+
 def t_selftest():
     """全链路自检（有线 / 2f 形状 / 弱场线性 / 反演闭环 / 检测限 / 时域交叉验证 / DAS 链路）。"""
     with _quiet() as g:
@@ -231,6 +335,7 @@ def t_selftest():
 
 DISPATCH = {"tdlas_simulate": t_simulate,
             "tdlas_das_chain": t_das_chain,
+            "tdlas_das_instrument": t_das_instrument,
             "tdlas_invert": t_invert,
             "tdlas_detection_limit": t_detection_limit,
             "tdlas_selftest": t_selftest}
@@ -286,6 +391,48 @@ TOOLS = [
                          "save_png": {"type": "boolean",
                                       "description": "是否出四层链路图（含上升/下降沿对照）"}},
                      "required": ["species", "wn0"]}},
+    {"name": "tdlas_das_instrument",
+     "description": "仪器系统级 DAS 仿真：DAQ 输出电压 → 激光器调谐（V→I→波数/功率）→ 光路损耗与吸收 "
+                    "→ PD 光电转换（响应度/跨阻增益/带宽/噪声）→ ADC 量化（位数/量程/饱和）→ 基线扣除。"
+                    "默认器件：NI USB-6211 + 典型中红外 DFB（V→I 24 mA/V、dν/dI −0.088 cm⁻¹/mA、"
+                    "中心 2964.7 cm⁻¹）+ CH4 @2968.5 cm⁻¹。"
+                    "**缺省参数的索取优先级：① 用户实测值 → ② 器件型号（AI 检索规格书）→ "
+                    "③ 引导用户现场标定 → ④ 保留默认并注明。**"
+                    "未给出的参数列入返回的 param_requests 与 assumptions，须先向用户澄清再解读结论。"
+                    "噪声按 散粒/热/RIN 分别给出，可判断系统噪声主导来源。",
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "species": {"type": "string", "description": "分子式，默认 CH4"},
+                         "wn_center": {"type": "number", "description": "扫描中心波数 cm^-1，默认 2968.5"},
+                         "T": {"type": "number", "description": "温度 K，默认 296"},
+                         "P": {"type": "number", "description": "气压 atm，默认 1.01325"},
+                         "x": {"type": "number", "description": "摩尔分数，默认 1e-3（1000 ppm）"},
+                         "L_cm": {"type": "number", "description": "光程 cm，默认 50"},
+                         "amp_V": {"type": "number", "description": "三角波幅值 V，默认 0.71（→±1.5 cm⁻¹）"},
+                         "freq_Hz": {"type": "number", "description": "三角波频率 Hz，默认 100"},
+                         "offset_V": {"type": "number", "description": "三角波偏置 V，默认 3.20"},
+                         "phase_deg": {"type": "number", "description": "三角波相位 °，默认 0"},
+                         "eta_VI": {"type": "number", "description": "驱动器跨导 mA/V，默认 24"},
+                         "dnu_dI": {"type": "number", "description": "激光器调谐系数 cm⁻¹/mA，默认 −0.088"},
+                         "wn_ref": {"type": "number", "description": "参考波数 cm⁻¹，默认 2964.7"},
+                         "i_ref": {"type": "number", "description": "参考电流 mA，默认 120"},
+                         "i_th": {"type": "number", "description": "阈值电流 mA，默认 30"},
+                         "eta_IP": {"type": "number", "description": "功率斜率效率 mW/mA，默认 0.15"},
+                         "fs": {"type": "number", "description": "采样率 Hz，默认 1e5（USB-6211 上限 2.5e5）"},
+                         "n_samples": {"type": "integer", "description": "采样点数，默认 1e5"},
+                         "adc_bits": {"type": "integer", "description": "ADC 位数，默认 16"},
+                         "v_range": {"type": "number", "description": "ADC 输入量程 ±V，默认 10"},
+                         "throughput": {"type": "number", "description": "光学总透过率，默认 0.90"},
+                         "resp": {"type": "number", "description": "PD 响应度 A/W，默认 0.9"},
+                         "gain": {"type": "number", "description": "PD 跨阻增益 V/A，默认 1e3"},
+                         "bw": {"type": "number", "description": "PD 带宽 Hz，默认 1e6"},
+                         "rin": {"type": "number", "description": "激光 RIN 1/√Hz，默认 1e-5"},
+                         "edge": {"type": "string", "description": "rising(默认) / falling / average / both"},
+                         "fit_order": {"type": "integer", "description": "基线多项式阶数，默认 3"},
+                         "fit_frac": {"type": "number", "description": "无吸收区占比，默认 0.3"},
+                         "seed": {"type": "integer"},
+                         "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
+                     "required": ["species", "wn_center"]}},
     {"name": "tdlas_invert",
      "description": "免标定浓度反演：给定测得的 WMS-2f/1f 峰高，返回摩尔分数（用仿真灵敏度 k，无需标气标定）。"
                     "仅适用弱吸收（αL≪1），强吸收时结果偏高。",

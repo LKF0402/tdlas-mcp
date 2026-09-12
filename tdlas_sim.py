@@ -439,7 +439,234 @@ def plot_das_td(r, out_png):
     return out_png
 
 
-# ══════════════════ 8. 绘图 ══════════════════
+# ══════════════════ 8. 仪器系统链路（DAQ 电压 → 激光 → 光路 → PD → ADC）══════════════════
+
+# 内置默认参数：NI USB-6211 + 典型中红外 DFB 激光器 + CH4 @2968.5 cm⁻¹ 场景。
+# 参数缺省时的索取优先级：① 用户给实测值 → ② 用户给器件型号（由 AI 检索规格书）
+# → ③ 用户现场标定（如"电压变化 ΔV → 波数变化 Δν"）→ ④ 用下列默认值并明确标注。
+DAQ_DEFAULTS = {
+    "fs": 100e3,             # 采样率 Hz（DAQ 助手默认 100 kHz）
+    "n_samples": 100_000,    # 采样点数（100k）
+    "adc_bits": 16,          # ADC 位数（USB-6211：16-bit）
+    "v_range": 10.0,         # ADC 输入量程 ±V（USB-6211：±10 V）
+}
+SCAN_DEFAULTS = {
+    "amp_V": 0.71,           # 三角波幅值 V → 扫描半宽 ≈ amp_V × |η_VI·dν/dI| ≈ 1.5 cm⁻¹
+    "freq_Hz": 100.0,        # 三角波频率 Hz
+    "offset_V": 3.20,        # 三角波偏置 V → I=76.8 mA → 2968.5 cm⁻¹（对齐 CH4 目标线）
+    "phase_deg": 0.0,        # 起始相位°（三角波中心对称、先上升后下降）
+}
+LASER_DEFAULTS = {
+    "eta_VI": 24.0,          # V→I 跨导 mA/V（驱动器线性估算：Vop 5 V / Iop 120 mA）
+    "dnu_dI": -0.088,        # I→波数 调谐系数 cm⁻¹/mA（官方 0.10 nm/mA @3373 nm 换算）
+    "wn_ref": 2964.7,        # 参考波数 cm⁻¹（10⁷/3373 nm）
+    "i_ref": 120.0,          # 参考电流 mA（Iop max）
+    "i_th": 30.0,            # 阈值电流 mA（低于此无激光输出）
+    "eta_IP": 0.15,          # I→P 斜率效率 mW/mA（工作点 71 mA→6.4 mW 反推）
+}
+OPTICS_DEFAULTS = {"throughput": 0.90}   # 光学元件总透过率（窗片/镜片）
+PD_DEFAULTS = {
+    "resp": 0.9,             # 响应度 A/W（InGaAs）
+    "gain": 1e3,             # 跨阻增益 V/A（适配 mW 光功率与 ±10 V 量程）
+    "bw": 1e6,               # 探测器 + 前放带宽 Hz
+    "rin": 1e-5,             # 相对强度噪声 /√Hz
+}
+
+
+def daq_triangle(t, amp_V, freq_Hz, phase_deg=0.0, offset_V=0.0):
+    """DAQ 模拟输出通道的三角波驱动电压（中心对称、先上升后下降）。"""
+    period = 1.0 / float(freq_Hz)
+    ph = (np.asarray(t, dtype=float) / period + float(phase_deg) / 360.0) % 1.0
+    tri = 1.0 - 4.0 * np.abs(ph - 0.5)                 # 0→-1, 0.5→+1, 1→-1（先升后降）
+    return float(offset_V) + float(amp_V) * tri
+
+
+def voltage_to_laser(v, eta_VI=24.0, dnu_dI=-0.088, wn_ref=2964.7, i_ref=120.0,
+                     i_th=30.0, eta_IP=0.15):
+    """驱动电压 → 激光器电流 / 波数 / 输出功率。返回 (i_mA, nu_cm-1, p_mW)。"""
+    i = float(eta_VI) * np.asarray(v, dtype=float)
+    nu = float(wn_ref) + (i - float(i_ref)) * float(dnu_dI)
+    p = np.maximum(float(eta_IP) * (i - float(i_th)), 0.0)   # 低于阈值电流无输出
+    return i, nu, p
+
+
+def noise_currents(i_mean_A, bw_Hz, gain_V_per_A, rin_per_sqrtHz, T=296.0):
+    """PD + 前放的等效输入电流噪声密度（A）：散粒 + 热（跨阻）+ 激光 RIN。"""
+    q, kb = 1.602176634e-19, 1.380649e-23
+    i = abs(float(i_mean_A))
+    shot = np.sqrt(2.0 * q * i * float(bw_Hz))
+    thermal = np.sqrt(4.0 * kb * float(T) * float(bw_Hz) / float(gain_V_per_A))
+    rin = i * float(rin_per_sqrtHz) * np.sqrt(float(bw_Hz))
+    return shot, thermal, rin
+
+
+def simulate_das_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
+                            x=1e-3, L_cm=50.0, edge="rising", fit_order=3,
+                            fit_frac=0.3, seed=None, **kw):
+    """完整仪器链路 DAS 仿真：DAQ 电压 → 激光 → 光路 → PD → ADC → 基线扣除。
+
+    链路：
+      ① DAQ 输出三角波电压 V(t)（幅值 / 频率 / 相位 / 偏置）
+      ② V→I→ν/P：驱动器跨导 → 电流 → 波数调谐 + 功率
+      ③ 光路：光学元件透过率 η_opt × 气体吸收 exp(-αL)
+      ④ PD：响应度 R → 光电流 → 跨阻增益 G → 电压
+      ⑤ 噪声：散粒 + 热 + RIN（等效输入电流噪声 → 电压噪声）
+      ⑥ ADC：按位数与量程量化（含饱和/动态范围检查）
+      ⑦ 取一个扫描周期 → 多项式基线拟合扣除 → DAS 吸光度
+
+    参数 kw 可覆盖任何内置默认（见 DAQ_DEFAULTS / SCAN_DEFAULTS / LASER_DEFAULTS /
+    OPTICS_DEFAULTS / PD_DEFAULTS 的键名）。
+    返回 dict：t, v_drive, i_laser, nu_laser, p_laser, p_opt, v_pd, v_adc,
+                nu_das, das, das_full, baseline, meta
+    """
+    cfg = {**DAQ_DEFAULTS, **SCAN_DEFAULTS, **LASER_DEFAULTS,
+           **OPTICS_DEFAULTS, **PD_DEFAULTS}
+    cfg.update({k: v for k, v in kw.items() if v is not None})
+
+    fs = float(cfg["fs"])
+    n_samples = int(cfg["n_samples"])
+    period = 1.0 / float(cfg["freq_Hz"])
+    t = np.arange(n_samples, dtype=float) / fs
+
+    # ① DAQ 三角波驱动电压
+    v_drive = daq_triangle(t, cfg["amp_V"], cfg["freq_Hz"], cfg["phase_deg"], cfg["offset_V"])
+
+    # ② V → I → 波数 / 功率
+    i_laser, nu_laser, p_laser = voltage_to_laser(
+        v_drive, cfg["eta_VI"], cfg["dnu_dI"], cfg["wn_ref"], cfg["i_ref"],
+        cfg["i_th"], cfg["eta_IP"])
+
+    # ③ 光路：光学损耗 + 气体吸收
+    span = float(cfg["amp_V"]) * abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
+    nu_grid, alpha_pure, info = th.absorption(
+        species, wn_center - span - 0.2, wn_center + span + 0.2, T=T, P=P,
+        step=min(5e-4, span / 500.0), wingHW=max(10.0, 5.0 * span))
+    alpha = np.interp(nu_laser, nu_grid, alpha_pure) * float(x)
+    tau = np.exp(-alpha * float(L_cm))
+    p_opt = p_laser * float(cfg["throughput"]) * tau          # 到达 PD 的光功率 mW
+
+    # ④ PD：光功率 → 光电流 → 跨阻电压
+    i_pd = p_opt * 1e-3 * float(cfg["resp"])                  # A
+    v_pd = i_pd * float(cfg["gain"])                          # V
+
+    # ⑤ 噪声
+    rng = np.random.default_rng(seed)
+    s_shot, s_therm, s_rin = noise_currents(float(np.mean(i_pd)), cfg["bw"],
+                                            cfg["gain"], cfg["rin"], T)
+    s_total = float(np.sqrt(s_shot ** 2 + s_therm ** 2 + s_rin ** 2))
+    v_noisy = v_pd + rng.normal(0.0, s_total * float(cfg["gain"]), v_pd.shape)
+
+    # ⑥ ADC 量化（含饱和统计）
+    lsb = 2.0 * float(cfg["v_range"]) / float(2 ** int(cfg["adc_bits"]))
+    n_sat = int(np.sum(np.abs(v_noisy) >= float(cfg["v_range"])))
+    v_adc = np.clip(np.round(v_noisy / lsb) * lsb, -float(cfg["v_range"]), float(cfg["v_range"]))
+
+    # ⑦ 取一个扫描周期 → 基线拟合扣除 → DAS
+    n_per = int(round(fs * period))
+    if n_per < 16:
+        raise ValueError(f"每周期采样点太少（fs/freq = {fs * period:.1f}），请提高 fs 或降低 freq")
+    sl = slice(0, n_per)
+    wn_cyc = nu_laser[sl]
+    wn_c = wn_cyc - float(wn_center)                          # 中心化改善拟合条件数
+    v_cyc = v_adc[sl]
+    mask = np.abs(wn_c) > span * (1.0 - float(fit_frac))
+    if int(mask.sum()) > int(fit_order) + 1:
+        coef = np.polyfit(wn_c[mask], v_cyc[mask], int(fit_order))
+        baseline = np.polyval(coef, wn_c)
+    else:
+        baseline = np.full_like(v_cyc, float(np.mean(v_cyc[mask])))
+    das_full = -np.log(np.maximum(v_cyc, 1e-12) / np.maximum(baseline, 1e-12))
+
+    # 按 edge 选取：电压前半周期为"上升沿"（注意 dν/dI<0 → 波长是先降后升，故需注明）
+    edge = str(edge).strip().lower()
+    if edge not in ("rising", "falling", "both", "average"):
+        raise ValueError(f"edge 必须是 rising / falling / both / average，收到 {edge!r}")
+    half = n_per // 2
+    if edge == "rising":
+        nu_das, das = wn_cyc[:half], das_full[:half]
+    elif edge == "falling":
+        nu_das, das = wn_cyc[half:][::-1], das_full[half:][::-1]
+    elif edge == "average":
+        nu_das = wn_cyc[:half]
+        das = 0.5 * (das_full[:half] + das_full[half:][::-1])
+    else:
+        nu_das, das = wn_cyc, das_full
+
+    # 主动检查：吸收强弱、ADC 饱和、动态范围、噪声量级
+    warnings = []
+    aL_peak = float(alpha.max()) * float(L_cm)
+    if aL_peak > 0.1:
+        warnings.append(f"αL≈{aL_peak:.3g} 偏大（>0.1）：DAS 进入非线性区、峰形被压低，"
+                        f"建议降低浓度或光程（x={x:g}, L={L_cm:g} cm）")
+    elif aL_peak < 1e-4:
+        warnings.append(f"αL≈{aL_peak:.3g} 偏小（<1e-4）：吸收太弱、信噪比可能不足")
+    if n_sat > 0:
+        warnings.append(f"ADC 饱和：{n_sat} 个采样点超出 ±{cfg['v_range']:g} V 量程 → "
+                        f"请降低 PD 跨阻增益（当前 {cfg['gain']:g} V/A）或光功率")
+    v_max = float(np.max(np.abs(v_adc)))
+    if v_max < 0.05 * float(cfg["v_range"]):
+        warnings.append(f"PD 信号仅 {v_max:.3g} V，远小于量程 ±{cfg['v_range']:g} V → "
+                        f"ADC 动态范围浪费，可提高跨阻增益（当前 {cfg['gain']:g} V/A）")
+    v_noise_rms = float(np.std(v_noisy - v_pd))
+    warnings.append(f"输出电压噪声 RMS≈{v_noise_rms * 1e3:.3g} mV（散粒 {s_shot * cfg['gain'] * 1e3:.3g} / "
+                    f"热 {s_therm * cfg['gain'] * 1e3:.3g} / RIN {s_rin * cfg['gain'] * 1e3:.3g} mV）")
+
+    meta = {"species": str(species).upper(), "wn_center": float(wn_center), "T": float(T),
+            "P": float(P), "x": float(x), "L_cm": float(L_cm), "edge": edge,
+            "span_cm-1": span, "scan_lo": float(nu_laser.min()),
+            "scan_hi": float(nu_laser.max()), "alpha_L_peak": aL_peak,
+            "v_pd_mean": float(np.mean(v_pd)), "lsb_V": lsb, "n_sat": n_sat,
+            "sigma_v_noise": v_noise_rms, "sigma_shot": s_shot * cfg["gain"],
+            "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
+            "cfg": dict(cfg), "warnings": warnings,
+            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"]}
+    return {"t": t, "v_drive": v_drive, "i_laser": i_laser, "nu_laser": nu_laser,
+            "p_laser": p_laser, "p_opt": p_opt, "v_pd": v_pd, "v_adc": v_adc,
+            "nu_das": nu_das, "das": das, "das_full": das_full, "baseline": baseline,
+            "meta": meta}
+
+
+def plot_das_instrument(r, out_png, n_show_periods=2):
+    """仪器链路五层图：驱动电压 → 激光波数 → 激光功率 → PD(ADC) 电压 → DAS。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    m = r["meta"]
+    fs = float(m["cfg"]["fs"])
+    period = 1.0 / float(m["cfg"]["freq_Hz"])
+    n_per = int(round(fs * period))
+    n = min(r["t"].size, max(n_per * int(n_show_periods), 100))
+    t_ms = r["t"][:n] * 1e3
+
+    fig, ax = plt.subplots(5, 1, figsize=(9.5, 12))
+    ax[0].plot(t_ms, r["v_drive"][:n])
+    ax[0].set_ylabel("drive V (V)")
+    ax[0].set_title(f"instrument chain — {m['species']} @ {m['wn_center']:.3f} cm$^{{-1}}$   "
+                    f"T={m['T']:g} K, P={m['P']:g} atm, x={m['x']:g}, L={m['L_cm']:g} cm, "
+                    f"edge={m['edge']}")
+    ax[1].plot(t_ms, r["nu_laser"][:n])
+    ax[1].set_ylabel(r"wavenumber (cm$^{-1}$)")
+    ax[2].plot(t_ms, r["p_laser"][:n], label="laser")
+    ax[2].plot(t_ms, r["p_opt"][:n], "--", label="at PD (loss+absorption)")
+    ax[2].set_ylabel("power (mW)")
+    ax[2].legend()
+    ax[3].plot(t_ms, r["v_adc"][:n] * 1e3, ".", ms=1.5, label="PD voltage after ADC")
+    ax[3].set_ylabel("PD out (mV)")
+    ax[3].legend()
+    ax[4].plot(r["nu_das"], r["das"], ".", ms=2, label=f"DAS ({m['edge']})")
+    ax[4].set_ylabel("absorbance")
+    ax[4].set_xlabel(r"wavenumber (cm$^{-1}$)")
+    ax[4].legend()
+    for a_ in ax:
+        a_.set_xlabel(a_.get_xlabel() or "time (ms)")
+        a_.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=150)
+    return out_png
+
+
+# ══════════════════ 9. 绘图 ══════════════════
 
 def plot(r, out_png):
     import matplotlib
