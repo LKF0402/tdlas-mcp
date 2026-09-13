@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -32,6 +33,29 @@ SERVER_INFO = {"name": "tdlas", "version": "0.2.0",
                "protocolVersion": PROTOCOL_VERSION,
                "capabilities": {"tools": {}}}
 OUT_DIR = _ROOT / "tmp" / "mcp_out"
+
+# 远端直链隐私：MCP 返回值（尤其 tools/call 的 log 字段）会被序列化发给远端客户端，
+# 其中可能含本地绝对路径（如 HITRAN 缓存目录 Hitran_Data、PNG 输出目录 tmp/mcp_out）。
+# 在返回边界统一脱敏：递归把用户目录/工作区绝对路径替换成中性标记，避免泄露服务器目录结构。
+# 注意：不硬编码任何真实路径字符串（符合 push 前安全扫描规则），改用 Path.home() 动态获取。
+_HOME = str(Path.home())
+_WS_ROOT = str(_ROOT.parent)
+
+
+def _sanitize_paths(obj):
+    """递归把绝对路径（用户目录/工作区）替换成中性标记，避免远端返回值泄露服务器目录结构。"""
+    if isinstance(obj, str):
+        s = obj
+        if _WS_ROOT and _WS_ROOT.lower() in s.lower():
+            s = re.sub(re.escape(_WS_ROOT), "<workspace>", s, flags=re.IGNORECASE)
+        if _HOME and _HOME.lower() in s.lower():
+            s = re.sub(re.escape(_HOME), "<home>", s, flags=re.IGNORECASE)
+        return s
+    if isinstance(obj, list):
+        return [_sanitize_paths(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _sanitize_paths(v) for k, v in obj.items()}
+    return obj
 
 # 对话状态机：跨会话记住用户已确认的工况参数（存 JSON，MCP 重启/换会话仍保留）
 # 存仓库根目录隐藏文件（中性命名，不暴露宿主工具/IDE）
@@ -507,7 +531,7 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
            "n_lines_in_window": r["meta"]["n_lines_in_window"],
            "table": r["meta"]["table"],
            "assumptions": assumed, "needs_confirm": bool(assumed),
-           "log": g.getvalue().splitlines()}
+           "log": _sanitize_paths(g.getvalue()).splitlines()}
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"tdlas_{str(species).upper()}_{float(wn0):g}cm-1_x{float(x):g}.png"
@@ -545,7 +569,7 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
             "peak_2f1f_in": float(peak_2f1f), "sensitivity_k": float(k),
             "k_source": k_src, "x_ref": float(x_ref), "T_K": float(T), "P_atm": float(P),
             "path_cm": float(L), "assumptions": assumed, "needs_confirm": bool(assumed),
-            "log": g.getvalue().splitlines()}
+            "log": _sanitize_paths(g.getvalue()).splitlines()}
 
 
 def t_detection_limit(species="H2O", wn0=7185.596, T=None, P=None, L=None,
@@ -571,7 +595,7 @@ def t_detection_limit(species="H2O", wn0=7185.596, T=None, P=None, L=None,
             "x_true": float(x_true), "NEC": float(dl["NEC"]), "LOD": float(dl["LOD"]),
             "n_sigma": float(n_sigma), "n_trials": int(dl["n_trials"]),
             "sensitivity_k": float(dl["k"]), "assumptions": assumed,
-            "needs_confirm": bool(assumed), "log": g.getvalue().splitlines()}
+            "needs_confirm": bool(assumed), "log": _sanitize_paths(g.getvalue()).splitlines()}
 
 
 def t_detection_limit_scan(species="CH4", wn0=2968.5, T=296.0, P=1.01325, a=0.10,
@@ -603,7 +627,7 @@ def t_detection_limit_scan(species="CH4", wn0=2968.5, T=296.0, P=1.01325, a=0.10
            "n_sigma": res["n_sigma"],
            "physical_note": ("弱吸收下 LOD ∝ 1/L（光程加倍、LOD 减半），且 LOD 与参考浓度 x "
                              "基本无关；αL≳0.1 进入非线性区后 LOD 略升。"),
-           "log": g.getvalue().splitlines()}
+           "log": _sanitize_paths(g.getvalue()).splitlines()}
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"detection_limit_scan_{res['species']}_{res['wn0']:g}cm-1.png"
@@ -673,7 +697,7 @@ def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
                            "请先向用户确认（尤其浓度 / 光程 / 温度 / 取哪一段沿），再解读结果。",
            "warnings": r["meta"]["warnings"],
            "edge_note": EDGE_TECH_NOTE,
-           "log": g.getvalue().splitlines()}
+           "log": _sanitize_paths(g.getvalue()).splitlines()}
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"das_chain_{str(species).upper()}_{float(wn0):g}cm-1_x{x:g}.png"
@@ -761,7 +785,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "必要时引导现场标定；保留默认时须在结论中明确注明。",
            "warnings": m["warnings"],
            "edge_note": EDGE_TECH_NOTE,
-           "log": g.getvalue().splitlines()}
+           "log": _sanitize_paths(g.getvalue()).splitlines()}
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"das_instr_{str(species).upper()}_{float(wn_center):g}cm-1.png"
@@ -902,7 +926,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "interaction_rule": "MCP 必须**多与用户交互**：主动告知以上 must_disclose 四项，"
                                                "并在解读结果前先向用户确认工况（物种/波段/T/P/浓度/光程）。"},
            "warnings": m["warnings"], "edge_note": EDGE_TECH_NOTE,
-           "log": g.getvalue().splitlines()}
+           "log": _sanitize_paths(g.getvalue()).splitlines()}
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"wms_instr_{str(species).upper()}_{float(wn_center):g}cm-1.png"
@@ -1061,7 +1085,7 @@ def t_selftest():
     """全链路自检（有线 / 2f 形状 / 弱场线性 / 反演闭环 / 检测限 / 时域交叉验证 / DAS 链路）。"""
     with _quiet() as g:
         ts.selftest()
-    return {"ok": True, "log": g.getvalue().splitlines()}
+    return {"ok": True, "log": _sanitize_paths(g.getvalue()).splitlines()}
 
 
 DISPATCH = {"tdlas_simulate": t_simulate,
@@ -1525,7 +1549,7 @@ def _run_http(host, port, token):
                 self._send({"jsonrpc": "2.0", "id": None,
                             "error": {"code": -32700, "message": f"解析失败：{e}"}})
                 return
-            self._send(handle_request(req))
+            self._send(_sanitize_paths(handle_request(req)))
 
     sys.stderr.write(f"[tdlas-mcp] HTTP 模式已启动：http://{host}:{port}/mcp\n")
     ThreadingHTTPServer((host, port), _Handler).serve_forever()
@@ -1539,7 +1563,7 @@ def main():
         except Exception:
             pass
     if "--selftest" in sys.argv:
-        print(json.dumps(t_selftest(), ensure_ascii=False, indent=2))
+        print(json.dumps(_sanitize_paths(t_selftest()), ensure_ascii=False, indent=2))
         return
     if "--http" in sys.argv:
         host = _arg("--host", "127.0.0.1")
@@ -1555,7 +1579,7 @@ def main():
         if not line:
             continue
         try:
-            resp = handle_request(json.loads(line))
+            resp = _sanitize_paths(handle_request(json.loads(line)))
         except Exception as e:
             resp = {"jsonrpc": "2.0", "id": None,
                     "error": {"code": -32700, "message": f"解析失败：{e}"}}

@@ -59,3 +59,4 @@
 - MCP 服务器 12 工具（新增 `tdlas_device`）；配置示例 + README + SKILL 文档
 - HTTP 传输（MCP Streamable HTTP）：`--http --host --port --token`，端点 `/mcp`，远端 URL 直链；默认仍 stdio，纯标准库零新增依赖
 - 远程直链：`tools/remote_link.py` 一键 cloudflared 隧道暴露（127.0.0.1 绑定 + 强制 Bearer token，经代理自动 http2）；修复 chunked 传输编码读取 bug（cloudflared 转发不再 501 `Unsupported method`）
+- 安全修复：MCP 返回值（尤其 tools/call 的 log 字段，HAPI 会打印 Hitran_Data 绝对路径）统一在**返回边界 + 源头**脱敏，绝对路径替换为 `<workspace>`/`<home>`，避免远端直链泄露服务器目录结构；不硬编码真实路径（`Path.home()` 动态获取）
