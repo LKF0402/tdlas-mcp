@@ -92,6 +92,24 @@ python tools/tdlas_mcp.py --http --host 0.0.0.0 --port 8000 --token <你的密�
 
 > 远端要能连上，还需该端口在防火墙/路由器放行，或经反向隧道（如 cloudflared / ngrok）暴露；公网部署务必配合 `--token`。
 
+### 公网暴露（cloudflared 隧道，推荐）
+
+若要让**公网/异网**客户端直链，最隐私的做法是用 cloudflared 隧道——不出防火墙端口、Cloudflare 替你挡源 IP、流量加密。`tools/remote_link.py` 已封装「本地起服务 + 建隧道 + 输出 URL/Token」：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:7892 python tools/remote_link.py
+# 或固定 token / 端口：
+# TDLAS_TOKEN=你的密钥 TDLAS_PORT=8000 python tools/remote_link.py
+```
+
+- 服务器**仅监听 127.0.0.1**，隧道在本地连接，外部无法直连你本机端口（最小暴露面）
+- 强制 **Bearer token** 鉴权（随机生成或取 `TDLAS_TOKEN`）；无 token 一律 401
+- 首次建隧道后 Cloudflare 边缘证书签发需 ~60–90s，客户端重试即可（**不要频繁建/杀隧道**，会触发边缘限流导致 TLS 握手失败）
+- 出口经 HTTP 代理时脚本自动用 `HTTPS_PROXY` 并切 `--protocol http2`（HTTP 代理只能代理 TCP）
+- 停止：Ctrl+C（同时关服务器与隧道）
+
+> 安全：公网 URL 本身公开，但必须有 Bearer token 才能调用工具；不要把 token 写进仓库。需要稳定 URL 请用 Cloudflare 账号 named tunnel + 固定 token。
+
 ## 依赖
 
 - 自包含 HITRAN 取数（`tools/tdlas_hitran.py`，HAPI 1.x，免 key，首次运行自动下载线表缓存到 `Hitran_Data/`）

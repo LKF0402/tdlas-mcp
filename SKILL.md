@@ -81,6 +81,7 @@ description: TDLAS/WMS spectroscopic simulation MCP server. Use when the user me
 
 - 本项目是 MCP 服务器，无桌面 GUI
 - 默认 stdio；加 `--http --host 0.0.0.0 --port 8000 --token <密钥>` 可起 HTTP 服务，远端填 `http://<host>:8000/mcp` 直链（MCP Streamable HTTP）。**远程暴露务必加 `--token`**
+- 公网直链：`python tools/remote_link.py`（cloudflared 隧道，仅本地 127.0.0.1 监听 + 强制 Bearer token；建隧道后等 ~60–90s 边缘证书就绪，勿频繁建/杀否则触发限流）
 - 数据基于 HITRAN，结果可复现
 - 首次使用下载线表，后续复用缓存
 

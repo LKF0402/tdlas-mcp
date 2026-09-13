@@ -1457,6 +1457,41 @@ def _run_http(host, port, token):
                 self.end_headers()
                 self.wfile.write(body)
 
+        def _read_body(self):
+            """可靠读取请求体：同时支持 Content-Length 与 chunked 传输编码。
+
+            cloudflared 等反向代理常发 chunked（无 Content-Length），若只按
+            Content-Length 读会漏读，残留字节污染连接复用 → 501 'Unsupported method'。
+            """
+            te = (self.headers.get("Transfer-Encoding", "") or "").lower()
+            if "chunked" in te:
+                return self._read_chunked()
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                n = 0
+            return self.rfile.read(n) if n > 0 else b""
+
+        def _read_chunked(self):
+            buf = b""
+            while True:
+                line = self.rfile.readline().strip()
+                if not line:
+                    line = self.rfile.readline().strip()
+                try:
+                    size = int(line.split(b";")[0], 16)
+                except ValueError:
+                    break
+                if size == 0:
+                    while True:
+                        h = self.rfile.readline()
+                        if h in (b"\r\n", b""):
+                            break
+                    break
+                buf += self.rfile.read(size)
+                self.rfile.readline()  # 消费块尾 \r\n
+            return buf
+
         def do_OPTIONS(self):
             self.send_response(204)
             self._cors()
@@ -1485,8 +1520,7 @@ def _run_http(host, port, token):
                 self.wfile.write(err)
                 return
             try:
-                n = int(self.headers.get("Content-Length", 0))
-                req = json.loads(self.rfile.read(n) or b"{}")
+                req = json.loads(self._read_body() or b"{}")
             except Exception as e:
                 self._send({"jsonrpc": "2.0", "id": None,
                             "error": {"code": -32700, "message": f"解析失败：{e}"}})

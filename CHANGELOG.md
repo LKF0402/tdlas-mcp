@@ -58,3 +58,4 @@
 - 自包含 HITRAN 取数（HAPI 1.x，免 key），不依赖 Hitran MCP
 - MCP 服务器 12 工具（新增 `tdlas_device`）；配置示例 + README + SKILL 文档
 - HTTP 传输（MCP Streamable HTTP）：`--http --host --port --token`，端点 `/mcp`，远端 URL 直链；默认仍 stdio，纯标准库零新增依赖
+- 远程直链：`tools/remote_link.py` 一键 cloudflared 隧道暴露（127.0.0.1 绑定 + 强制 Bearer token，经代理自动 http2）；修复 chunked 传输编码读取 bug（cloudflared 转发不再 501 `Unsupported method`）

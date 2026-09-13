@@ -45,3 +45,10 @@ id_rsa*
 id_ed25519*
 id_dsa*
 id_ecdsa*
+
+# Tunnel binary (downloaded at runtime, not source)
+cloudflared.exe
+cloudflared
+
+# Runtime logs (may contain ephemeral token, never commit)
+_link*.log
