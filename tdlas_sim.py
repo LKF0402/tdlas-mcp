@@ -1400,17 +1400,16 @@ def validate_wms_result(r):
     else:
         add("孤立单线", "warn", f"窗口内 {nl} 条线：2f 是多线叠加，非标准双峰（DAS 包络更直观）")
 
-    # 5. 调制系数 m（经典 2.2 对孤立单线最优；密集多线区最优偏小）
+    # 5. 调制系数 m（最优值按谱线密度：孤立 2.2 / 中等 1.8 / 密集 1.25）
     mm = m["mod_coeff_m"]
-    if 2.0 <= mm <= 2.6:
-        if nl > 10:
-            add("调制系数 m", "warn",
-                f"m={mm:.2f}；但本窗口为密集谱区（{nl} 线），实测最优 m 偏小"
-                f"（CH4≈1.25、C2H6≈1.8），建议用 m_opt 调低以提升 2f 灵敏度（可达 ~15%）")
-        else:
-            add("调制系数 m", "pass", f"m={mm:.2f} 接近最优 2.2（孤立单线实测最优）")
+    m_ref = 2.2 if nl <= 10 else (1.8 if nl <= 50 else 1.25)
+    if m.get("auto_mod"):
+        add("调制系数 m", "pass", f"m={mm:.2f}（自适应，该谱线密度最优≈{m_ref}）")
+    elif 0.85 * m_ref <= mm <= 1.15 * m_ref:
+        add("调制系数 m", "pass", f"m={mm:.2f} 接近该谱线密度最优 {m_ref}")
     else:
-        add("调制系数 m", "warn", f"m={mm:.2f} 偏离 2.2（2f 灵敏度非最优）")
+        add("调制系数 m", "warn", f"m={mm:.2f} 偏离该谱线密度最优 {m_ref}"
+            f"（孤立≈2.2 / 中等≈1.8 / 密集≈1.25）")
 
     # 6. 采样率
     fsr = m["fs"] / m["mod_freq_Hz"]
