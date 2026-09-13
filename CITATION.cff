@@ -1,0 +1,16 @@
+# 引用元数据（Zenodo 归档时读取，用于生成规范引用条目）
+# TODO: 把 authors.name 改成你论文署名的真实姓名（可选补 orcid）；
+# TODO: 首次打 GitHub release 时，在此加一行 version（如 "1.0.0"）与 tag 保持一致。
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite it as below."
+title: "tdlas-mcp: instrument-level TDLAS/WMS spectral simulation MCP server"
+authors:
+  - name: "LKF0402"
+license: GPL-3.0
+keywords:
+  - TDLAS
+  - wavelength modulation spectroscopy
+  - HITRAN
+  - MCP
+repository-code: "https://github.com/LKF0402/tdlas-mcp"
+url: "https://github.com/LKF0402/tdlas-mcp"
