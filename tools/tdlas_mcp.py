@@ -624,8 +624,10 @@ _INSTR_KEYS = ("scan_span_cm", "amp_V", "freq_Hz", "offset_V", "phase_deg", "eta
                "wn_ref", "i_ref", "i_th", "eta_IP", "fs", "n_samples", "adc_bits",
                "v_range", "throughput", "resp", "gain", "bw", "rin")
 
-# amp_V / offset_V 由 wn_center + scan_span_cm 经电压—波数关系自动反算，无需用户确认
-_AUTO_DERIVED = {"amp_V", "offset_V"}
+# 以下参数有明确默认值或自动反算，无需用户确认：
+#   amp_V / offset_V 由 wn_center + scan_span_cm 经 V-ν 关系反算；
+#   background_subtract 是诊断开关（默认 True，仅诊断原始基线时关闭）。
+_NO_CONFIRM = {"amp_V", "offset_V", "background_subtract"}
 _SCENE_DEFAULTS = {"T": 296.0, "P": 1.01325, "x": 1e-3, "L_cm": 50.0,
                    "edge": "rising", "fit_order": 3, "fit_frac": 0.3}
 
@@ -645,7 +647,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     assumed = [k for k, v in given_scene.items() if v is None]
 
     given_inst = {k: kw.get(k) for k in _INSTR_KEYS}
-    assumed += [k for k, v in given_inst.items() if v is None and k not in _AUTO_DERIVED]
+    assumed += [k for k, v in given_inst.items() if v is None and k not in _NO_CONFIRM]
     inst = {k: v for k, v in given_inst.items() if v is not None}
 
     if not (species and str(species).strip()):
@@ -734,7 +736,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     assumed = [k for k, v in given_scene.items() if v is None and k not in confirmed]
 
     given_inst = {k: kw.get(k) for k in _INSTR_KEYS_WMS}
-    assumed += [k for k, v in given_inst.items() if v is None and k not in _AUTO_DERIVED]
+    assumed += [k for k, v in given_inst.items() if v is None and k not in _NO_CONFIRM]
     inst = {k: v for k, v in given_inst.items() if v is not None}
     if not (species and str(species).strip()):
         raise ValueError("species 不能为空")
