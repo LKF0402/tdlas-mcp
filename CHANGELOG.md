@@ -34,6 +34,7 @@
 ### AI 交互层
 - `AI_INTERACTION_GUIDE`：正向 SOP、参数索取优先级、术语表、DAS/WMS 选型
 - 主动澄清机制：`clarify` 字段 + 带选项问句（先问再出图，硬约束）
+- 澄清提问改用**原生结构化提问工具**（AskUserQuestion 类点击式选择框），禁止纯文字列表；1 次 1–4 题、按优先级分批多轮
 - 自动校验：9 项（DAS-理论一致、2f 峰位、αL 弱吸收、采样率…）+ `tdlas_review`
 - 跨会话状态机：`tdlas_session` 记住已确认参数，多轮补全
 - 工况自适应：`SPECIES_PROFILES` 按物种推荐波段/浓度/光程

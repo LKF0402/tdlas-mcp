@@ -353,11 +353,14 @@ AI_INTERACTION_GUIDE = {
     },
     "clarify_protocol": {
         "触发": "返回的 clarify.needed=True（有缺省参数）时，必须进入澄清流程。",
-        "流程": "① 按 clarify.questions 逐条向用户提问（带选项，减少用户负担）；"
-                "② 收到回答后填入对应参数重跑；③ 用户明确说'用默认值'才可跳过该项；"
-                "④ 全部确认后才出图/下结论。",
+        "流程": "① 按 clarify.questions 向用户提问；② 收到回答后填入对应参数重跑；"
+                "③ 用户明确说'用默认值'才可跳过该项；④ 全部确认后才出图/下结论。",
         "强制": "clarify.instruction 明确要求'先问再出结果'，这是硬约束，不是建议。",
         "多轮": "支持多轮：每次用户补充一个参数，就少问一个（questions 会随 assumed 缩小）。",
+        "提问工具": "AI 必须用**原生结构化提问工具**（AskUserQuestion 类，点击式选择框）"
+                    "把 clarify.questions 渲染成选择题，**禁止用纯文字列表让用户打字回答**；"
+                    "1 次 1–4 题、每题 2–4 个固定选项 + '其他'自由输入；"
+                    "超过 4 题时按优先级分批多轮：波段 > 浓度/光程 > T/P > 器件 > 噪声。",
     },
     "noise_and_interaction": {
         "默认": "**默认不加任何噪声**（理想仿真：rin=0, drift_frac=0, flicker_frac=0）。",
@@ -790,7 +793,9 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            "needs_input": bool(requests),
            "clarify": {"needed": bool(requests),
                        "instruction": "needed=True 时：**先向用户提出 questions 里的澄清问题，"
-                                      "收到回答前不要直接出图/下结论**。用户明确说'用默认值'才可跳过。",
+                                      "收到回答前不要直接出图/下结论**。用户明确说'用默认值'才可跳过。"
+                                      "**用原生结构化提问工具（AskUserQuestion 类点击式选择框）渲染，"
+                                      "禁止纯文字列表**；1 次 1–4 题，超过 4 题按优先级分批多轮。",
                        "questions": _clarify_qs},
            "ai_guidance": {"role": AI_INTERACTION_GUIDE["role"],
                            "priority": AI_INTERACTION_GUIDE["priority"],

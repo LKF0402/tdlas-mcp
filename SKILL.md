@@ -50,6 +50,8 @@ description: TDLAS/WMS spectroscopic simulation MCP server. Use when the user me
 
 返回的 `clarify.needed=True` 时，**先向用户提出 `clarify.questions` 里的澄清问题，收到回答前不要直接出图/下结论**。用户说"用默认值"才可跳过。
 
+提问必须用**原生结构化提问工具**（AskUserQuestion 类，点击式选择框）渲染，**禁止纯文字列表让用户打字**：1 次 1–4 题、每题 2–4 个固定选项 + "其他"；超过 4 题按优先级分批多轮（波段 > 浓度/光程 > T/P > 器件 > 噪声）。
+
 参数索取优先级：① 实测值 → ② 器件型号（AI 检索规格书）→ ③ 现场标定 → ④ 默认值并显式标注。
 
 **器件型号 → 联网检索规格书**：用户给出器件型号（如 `NI USB-6211`、`Thorlabs PDA10D2`、`ILX Lightwave LDX-3220`）时，AI **必须联网搜索该型号官方 datasheet** 提取参数（按器件类别查：DAQ→采样率/分辨率/量程；激光器驱动→V→I 跨导/带宽/噪声；DFB→中心波数/调谐系数 dν/dI/阈值电流；PD→响应度/带宽/跨阻增益/NEP），填进仿真并在 `assumptions` 标注「来源：<型号> datasheet」。查不到或无网络则退回现场标定/默认值，**不得编造规格书数值**。
