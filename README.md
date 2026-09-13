@@ -74,6 +74,14 @@ python tools/tdlas_mcp.py --selftest   # MCP 服务器自检
 - 自包含 HITRAN 取数（`tools/tdlas_hitran.py`，HAPI 1.x，免 key，首次运行自动下载线表缓存到 `Hitran_Data/`）
 - **不依赖 Hitran MCP server**，可独立部署运行
 
+## 文档
+
+| 文档 | 定位 |
+|------|------|
+| [TECHNICAL.md](./TECHNICAL.md) | **技术文档**：物理原理、逐级链路实现、关键算法、默认参数表、已知近似、**实现陷阱（踩坑记录）** |
+| [SKILL.md](./SKILL.md) | AI 使用规范（触发条件、工具列表、必须遵守的交互规则） |
+| [CHANGELOG.md](./CHANGELOG.md) | 功能演进记录 |
+
 ## 许可证
 
 GPLv3
