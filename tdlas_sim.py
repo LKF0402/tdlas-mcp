@@ -485,7 +485,9 @@ MOD_DEFAULTS = {
     "mod_amp_V": None,       # 正弦调制幅值 V；None = 自动按 m_opt 优化
     "mod_freq_Hz": 30e3,     # 调制频率 Hz
     "mod_phase_deg": 0.0,    # 调制相位°
-    "m_opt": 2.2,            # 最优调制系数 m = a/HWHM（2f 峰值最大处）
+    "m_opt": 2.2,            # 目标调制系数 m = a/HWHM。经典 2.2 = 洛伦兹线型纯 FM 的理论最优。
+                             # 本项目实测：孤立单线(H2O 7185.6)最优≈2.2；密集多线区最优明显偏小
+                             # （CH4 221 线最优≈1.25、C2H6 158 线≈1.8），可用 m_opt 调低以提升灵敏度。
     "lockin_avg": 1,         # 锁相滑动平均的调制周期数（>1 会模糊线形且不降残留）
     "lockin_stages": 2,      # 低通级联级数：2 级把残留从 4.1% 降到 1.6%（再高收益小）
     "trim_frac": 0.12,       # 剔除扫描两端比例：三角波转折点导数不连续，
@@ -764,6 +766,9 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     if fs < fs_min:
         warnings.append(f"采样率 {fs / 1e3:.0f} kHz 不足以准确解调 {fm / 1e3:.0f} kHz 调制的 2f"
                         f"（建议 ≥ {fs_min / 1e3:.0f} kS/s，即每调制周期 ≥8 点）→ 已自动提升")
+        # 提升 fs 时按比例增加 n_samples，保持总采集时间不变
+        # （否则总时间缩短 → 扫描周期数减少 → 锁相平均的有效周期数不足）
+        cfg["n_samples"] = int(round(float(cfg["n_samples"]) * fs_min / fs))
         fs = fs_min
     if fs > 250e3:
         warnings.append(f"所需采样率 {fs / 1e3:.0f} kS/s 超过 NI USB-6211 上限（250 kS/s）→ "
@@ -782,12 +787,13 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     alpha_pure_mix = alpha_pure * float(x)
     auto_mod = cfg["mod_amp_V"] is None
     if auto_mod:
+        # 用纯 alpha（未乘浓度）：HWHM 是谱线形状属性，与浓度无关，语义更清晰
         mod_amp_V, a_cm1, hwhm, m_act = optimal_mod_amp_V(
-            nu_grid, alpha_pure_mix, cfg["eta_VI"], cfg["dnu_dI"], cfg["m_opt"])
+            nu_grid, alpha_pure, cfg["eta_VI"], cfg["dnu_dI"], cfg["m_opt"])
     else:
         mod_amp_V = float(cfg["mod_amp_V"])
         a_cm1 = mod_amp_V * abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
-        hwhm = estimate_hwhm(nu_grid, alpha_pure_mix)
+        hwhm = estimate_hwhm(nu_grid, alpha_pure)
         m_act = a_cm1 / hwhm if hwhm > 0 else float("nan")
     v_drive = v_scan + mod_amp_V * v_mod_sig
 
@@ -903,6 +909,10 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
                                              cfg["gain"], cfg["rin"], T)
     s_d = float(np.sqrt(s_sh_d ** 2 + s_th_d ** 2 + s_rin_d ** 2))
     v_das_all = i_das * float(cfg["gain"]) + rng.normal(0.0, s_d * float(cfg["gain"]), i_das.shape)
+    # 与 WMS 链路一致地过 ADC（量化+限幅），保证 DAS/WMS 公平对比
+    # （此前 DAS 跳过量化，使"DAS-理论一致"校验偏乐观）
+    v_das_all = np.clip(np.round(v_das_all / lsb) * lsb,
+                        -float(cfg["v_range"]), float(cfg["v_range"]))
     v_das_cyc = v_das_all[idx]
     das_cyc = -np.log(np.maximum(v_das_cyc, 1e-12) / np.maximum(v_das_I0[idx], 1e-12))
 
@@ -979,10 +989,9 @@ def validate_wms_result(r):
     让非专业用户也能一眼看出"哪些可信、哪些要复核"。
     """
     m = r["meta"]
-    nu, v, off = r["nu_axis"], r["valid_mask"], r["offband_mask"]
+    nu, v = r["nu_axis"], r["valid_mask"]
     das = r["das_cyc"][v]
     th = r["alphaL_cyc"][v]
-    S2 = np.abs(r["S2f_cyc"])[v]
     checks = []
 
     def add(name, status, detail):
@@ -1024,10 +1033,15 @@ def validate_wms_result(r):
     else:
         add("孤立单线", "warn", f"窗口内 {nl} 条线：2f 是多线叠加，非标准双峰（DAS 包络更直观）")
 
-    # 5. 调制系数 m
+    # 5. 调制系数 m（经典 2.2 对孤立单线最优；密集多线区最优偏小）
     mm = m["mod_coeff_m"]
     if 2.0 <= mm <= 2.6:
-        add("调制系数 m", "pass", f"m={mm:.2f} 接近最优 2.2")
+        if nl > 10:
+            add("调制系数 m", "warn",
+                f"m={mm:.2f}；但本窗口为密集谱区（{nl} 线），实测最优 m 偏小"
+                f"（CH4≈1.25、C2H6≈1.8），建议用 m_opt 调低以提升 2f 灵敏度（可达 ~15%）")
+        else:
+            add("调制系数 m", "pass", f"m={mm:.2f} 接近最优 2.2（孤立单线实测最优）")
     else:
         add("调制系数 m", "warn", f"m={mm:.2f} 偏离 2.2（2f 灵敏度非最优）")
 
