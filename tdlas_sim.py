@@ -453,6 +453,17 @@ def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=1e-3, L=50.0,
         baseline = np.full_like(It, float(np.mean(It[mask])))
     das_full = -np.log(np.maximum(It, 1e-12) / np.maximum(baseline, 1e-12))
 
+    # ★ 密集谱区基线拟合失效回退：两端"无吸收区"不干净时，多项式把吸收线拟合进基线，
+    #   使 das 峰值被放大数十万倍。拟合后校验，异常则改用已知 I0（无吸收基线）。
+    baseline_fallback = False
+    _bmax = float(np.max(baseline))
+    _ratio = (float(np.max(It)) / _bmax) if _bmax > 0 else 0.0
+    _aL_th = float(np.max(alpha_wn) * float(L))
+    if _ratio < 0.9 or abs(float(np.max(das_full)) - _aL_th) > 0.5 * max(_aL_th, 1e-30):
+        baseline_fallback = True
+        baseline = I0                                       # 已知无吸收基线（不含吸收/噪声）
+        das_full = -np.log(np.maximum(It, 1e-12) / np.maximum(I0, 1e-12))
+
     # 按 edge 选取最终 DAS（三角波：前半周期上升、后半周期下降）
     edge = str(edge).strip().lower()
     if edge not in ("rising", "falling", "both", "average"):
@@ -470,6 +481,8 @@ def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=1e-3, L=50.0,
 
     # 替用户主动考虑：参数是否落在合理区间（不合理时明确提示，而非静默给错结果）
     warnings = []
+    if baseline_fallback:
+        warnings.append("baseline fallback: dense spectrum, used known I0")
     aL = float(alpha_wn.max()) * float(L)
     if aL > 0.1:
         warnings.append(f"αL ≈ {aL:.3g} 偏大（>0.1）：DAS 进入非线性区、峰形被压低，"
@@ -485,6 +498,7 @@ def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=1e-3, L=50.0,
             "x": float(x), "L": float(L), "span": float(span), "fscan": float(fscan),
             "fs": float(fs), "baseline_slope": float(baseline_slope), "sigma": float(sigma),
             "fit_order": int(fit_order), "fit_frac": float(fit_frac), "edge": edge,
+            "baseline_fallback": baseline_fallback,
             "alpha_L_peak": aL, "warnings": warnings,
             "n_lines_in_window": info["n_lines_in_window"], "table": info["table"]}
     return {"t": t, "wn": wn, "tri": tri, "I0": I0, "It": It, "baseline": baseline,
@@ -930,6 +944,24 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         baseline = np.full_like(v_cyc, float(np.mean(v_cyc[mask])))
     das_full = -np.log(np.maximum(v_cyc, 1e-12) / np.maximum(baseline, 1e-12))
 
+    # ★ 密集谱区基线拟合失效回退：两端"无吸收区"不干净时，多项式把吸收线拟合进基线，
+    #   使 das 峰值被放大数十万倍。拟合后校验，异常则改用已知 I0（τ≡1 走同一条 PD/ADC 链路）。
+    alphaL_cyc = np.interp(wn_cyc, nu_grid, alpha_pure) * float(x) * float(L_cm)
+    baseline_fallback = False
+    _bmax = float(np.max(baseline))
+    _ratio = (float(np.max(v_cyc)) / _bmax) if _bmax > 0 else 0.0
+    _aL_th = float(np.max(alphaL_cyc))
+    if _ratio < 0.9 or abs(float(np.max(das_full)) - _aL_th) > 0.5 * max(_aL_th, 1e-30):
+        baseline_fallback = True
+        p_opt_bg = p_laser * float(cfg["throughput"])          # 无吸收光功率（τ≡1）
+        v_pd_bg = pd_lowpass(p_opt_bg * 1e-3 * float(cfg["resp"]) * float(cfg["gain"]),
+                             cfg["bw"], fs)
+        v_bg_adc = np.clip(np.round(v_pd_bg / lsb) * lsb,
+                           -float(cfg["v_range"]), float(cfg["v_range"]))
+        I0_das = v_bg_adc[sl]
+        baseline = I0_das
+        das_full = -np.log(np.maximum(v_cyc, 1e-12) / np.maximum(I0_das, 1e-12))
+
     # 按 edge 选取：电压前半周期为"上升沿"（注意 dν/dI<0 → 波长是先降后升，故需注明）
     edge = str(edge).strip().lower()
     if edge not in ("rising", "falling", "both", "average"):
@@ -947,6 +979,8 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
 
     # 主动检查：吸收强弱、ADC 饱和、动态范围、噪声量级
     warnings = []
+    if baseline_fallback:
+        warnings.append("baseline fallback: dense spectrum, used known I0")
     if not (0.0 <= cfg["offset_V"] <= 5.0):
         raise ValueError(f"反算 offset_V={cfg['offset_V']:.3g} V 越出驱动器典型 0–5 V 范围："
                          f"wn_center={wn_center:g} cm⁻¹ 不在此 DFB 调谐范围内"
@@ -973,6 +1007,7 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "P": float(P), "x": float(x), "L_cm": float(L_cm), "edge": edge,
             "span_cm-1": span, "scan_lo": float(nu_laser.min()),
             "scan_hi": float(nu_laser.max()), "alpha_L_peak": aL_peak,
+            "baseline_fallback": baseline_fallback,
             "v_pd_mean": float(np.mean(v_pd)), "lsb_V": lsb, "n_sat": n_sat,
             "sigma_v_noise": v_noise_rms, "sigma_shot": s_shot * cfg["gain"],
             "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
@@ -1267,7 +1302,12 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     alpha_das = np.interp(nu_das, nu_grid, alpha_pure) * float(x)
     # ★ DAS 基线必须用"无吸收光强 I0"（仿真里可精确给出）。之前的"非吸收区多项式拟合"
     #   在密集谱区（如 C2H6 159 条线，无非吸收区）会失效，导致 DAS 基线错、吸光度失真。
-    v_das_I0 = (p_das * float(cfg["throughput"]) * 1e-3 * float(cfg["resp"]) * float(cfg["gain"]))
+    # ★ I0 也必须过同一条低通 + ADC 量化链路，否则与含吸收的 v_das_all 相位不对齐、
+    #   在斜坡上产生系统性偏差（弱吸收下偏差可达 100%+）。噪声不加（I0 是理想无吸收基线）。
+    v_das_I0 = np.clip(np.round(pd_lowpass(p_das * float(cfg["throughput"]) * 1e-3
+                                           * float(cfg["resp"]) * float(cfg["gain"]),
+                                           cfg["bw"], fs) / lsb) * lsb,
+                       -float(cfg["v_range"]), float(cfg["v_range"]))
     p_das_opt = (p_das * float(cfg["throughput"]) * np.exp(-alpha_das * float(L_cm)))
     i_das = p_das_opt * 1e-3 * float(cfg["resp"])
     # 同源噪声模型（与 WMS 完全一致，公平对比）
