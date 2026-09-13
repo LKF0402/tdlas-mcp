@@ -32,4 +32,14 @@ Thumbs.db
 # Secrets
 *.key
 *.pem
+*.ppk
 config.local.json
+.env
+.env.*
+*.token
+*.secret
+credentials*.json
+id_rsa*
+id_ed25519*
+id_dsa*
+id_ecdsa*
