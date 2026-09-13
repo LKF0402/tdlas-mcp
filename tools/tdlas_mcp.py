@@ -455,26 +455,32 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
 
 
 def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
-             a=0.10, x_ref=None, i0=0.1671, i2=2.48e-3,
+             a=0.10, x_ref=None, k=None, i0=0.1671, i2=2.48e-3,
              psi1_pi=1.9356, psi2_pi=4.4138, span=0.8, session_id="default"):
-    """免标定浓度反演：由测得的 2f/1f 峰高求摩尔分数。
+    """免标定浓度反演：由测得的归一化 2f 峰高求摩尔分数 x = peak / k。
 
-    用参考浓度 x_ref 的仿真定出单位浓度灵敏度 k，再 x = peak_2f1f / k。
-    **仅适用弱吸收（αL ≪ 1）**：吸收过强时 2f/1f 呈超线性，反演结果偏高。
-    建议先用 tdlas_simulate 核验 alpha_peak × L；若 αL 超过约 0.05 需改用完整仿真迭代反演。
-    T/P/x_ref/L 未给出时按「会话已确认 > 默认」取值。
+    k 是**完整链路**灵敏度：优先用调用方传入的 k（来自 tdlas_wms_instrument 返回的
+    results.sensitivity_k）；未给 k 时，内部跑一遍**完整仪器链路**在参考浓度 x_ref 下重算 k。
+    **勿用解析版 simulate() 的灵敏度**——它与完整链路的 S2f/1f 差 ~6×，混用会严重偏差。
+    仅适用弱吸收（αL ≪ 1）。a/i0/i2/psi/span 为解析版遗留参数，完整链路下不再使用。
     """
     _xd, _Ld = _species_defaults(species)
     T, P, x_ref, L, assumed = _resolve_conditions(T, P, x_ref, L, session_id, x_default=_xd, L_default=_Ld)
-    i0, i2, p1, p2 = _common(species, wn0, T, P, x_ref, L, a, i0, i2, psi1_pi, psi2_pi, span)
+    if not 0.0 < float(x_ref) <= 1.0:
+        raise ValueError(f"x_ref 必须在 (0, 1]，收到 {x_ref}")
     with _quiet() as g:
-        k = ts.sensitivity_2f1f(species, float(wn0), float(T), float(P), float(L), float(a),
-                                x_ref=float(x_ref), i0=i0, i2=i2, psi1=p1, psi2=p2,
-                                span=float(span))
+        if k is not None:
+            k = float(k)
+            k_src = "调用方提供（tdlas_wms_instrument.sensitivity_k）"
+        else:
+            r = ts.simulate_wms_instrument(str(species), wn_center=float(wn0), T=float(T),
+                                           P=float(P), x=float(x_ref), L_cm=float(L))
+            k = float(r["meta"]["sensitivity_k"])
+            k_src = "完整链路重算（@x_ref）"
         x_est = ts.invert_concentration(float(peak_2f1f), k)
     return {"species": str(species).upper(), "mole_frac": float(x_est),
             "peak_2f1f_in": float(peak_2f1f), "sensitivity_k": float(k),
-            "x_ref": float(x_ref), "T_K": float(T), "P_atm": float(P),
+            "k_source": k_src, "x_ref": float(x_ref), "T_K": float(T), "P_atm": float(P),
             "path_cm": float(L), "assumptions": assumed, "needs_confirm": bool(assumed),
             "log": g.getvalue().splitlines()}
 
@@ -778,6 +784,9 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                        "S2f_norm_peak": float(np.abs(r["S2f_norm_cyc"])[valid_i].max())
                        if valid_i.any() else None,
                        "S2f1f_peak": float(s2f1f[kpk]),
+                       "sensitivity_k": m["sensitivity_k"],
+                       "sensitivity_note": "sensitivity_k = S2f_norm_peak / x（完整链路），"
+                                           "供 tdlas_invert 的 k 参数直接复用，勿用解析版灵敏度",
                        "S2f1f_peak_nu_cm-1": float(r["nu_axis"][kpk]),
                        "v_pd_mean_V": m["v_pd_mean"], "saturated_points": m["n_sat"],
                        "noise_breakdown_mV": {"shot": m["sigma_shot"] * 1e3,
@@ -1096,15 +1105,18 @@ TOOLS = [
                          "topic": {"type": "string",
                                    "description": "可选：查询特定术语（如 m / RIN / 2f1f / LOD）"}}}},
     {"name": "tdlas_invert",
-     "description": "免标定浓度反演：给定测得的 WMS-2f/1f 峰高，返回摩尔分数（用仿真灵敏度 k，无需标气标定）。"
+     "description": "免标定浓度反演：给定测得的归一化 2f 峰高，返回摩尔分数（x = peak / k）。"
+                    "优先用 k（来自 tdlas_wms_instrument 返回的 results.sensitivity_k）；"
+                    "未给 k 时内部跑完整仪器链路在 x_ref 下重算，保证与测量同模型。"
                     "仅适用弱吸收（αL≪1），强吸收时结果偏高。",
      "inputSchema": {"type": "object",
                      "properties": {
-                         "peak_2f1f": {"type": "number", "description": "测得的 2f/1f 峰高"},
+                         "peak_2f1f": {"type": "number", "description": "测得的归一化 2f 峰高"},
                          "species": {"type": "string"}, "wn0": {"type": "number"},
                          "T": {"type": "number"}, "P": {"type": "number"},
                          "L": {"type": "number"}, "a": {"type": "number"},
-                         "x_ref": {"type": "number", "description": "参考浓度；缺省=会话已确认或 1e-3"},
+                         "x_ref": {"type": "number", "description": "参考浓度；缺省=会话已确认或按物种推荐"},
+                         "k": {"type": "number", "description": "完整链路灵敏度（来自 tdlas_wms_instrument.sensitivity_k）；不给则内部重算"},
                          "session_id": {"type": "string", "description": "会话标识，默认 default（复用已确认 T/P/x/L）"},
                          "i0": {"type": "number"}, "i2": {"type": "number"},
                          "psi1_pi": {"type": "number"}, "psi2_pi": {"type": "number"}},

@@ -1323,6 +1323,11 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     warnings.append("已做 **背景扣除**：用无吸收参考谱（τ≡1，含相同 RAM/AM 与慢漂移，无白/粉红噪声）"
                     "复减 2f/1f 与 2f/I0 的 RAM 基线（L-I 二阶非线性残留）")
 
+    # 免标定灵敏度：k = 归一化 2f 峰值 ÷ 浓度（弱吸收下与浓度无关）。
+    # 这是**完整链路**的 k，供 tdlas_invert 复用；勿与解析版 simulate() 混用（两路 S2f/1f 差 ~6×）。
+    k_sens = (float(np.max(np.abs(S2f_norm[valid]))) / float(x)
+              if (valid.any() and float(x) > 0) else 0.0)
+
     meta = {"species": str(species).upper(), "wn_center": float(wn_center), "T": float(T),
             "P": float(P), "x": float(x), "L_cm": float(L_cm), "fs": fs,
             "fscan_Hz": fscan, "mod_freq_Hz": fm, "mod_amp_V": mod_amp_V, "auto_mod": auto_mod,
@@ -1333,7 +1338,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
             "drift_frac": drift_frac, "flicker_frac": flicker_frac,
             "bg_subtracted": True, "norm_method": norm_method, "onef_valid": onef_valid, "I0_pd_V": I0_pd,
-            "offband_leak_1f": off_1f, "peak_2f_1f": pk_1f,
+            "offband_leak_1f": off_1f, "peak_2f_1f": pk_1f, "sensitivity_k": k_sens,
             "onef_min_over_median": onef_min / max(onef_med, 1e-30),
             "trim_frac": float(cfg["trim_frac"]), "n_trim": n_keep, "edge": edge,
             "cfg": dict(cfg), "warnings": warnings,

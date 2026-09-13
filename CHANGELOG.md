@@ -29,6 +29,7 @@
 - 2f/I0 背景扣除（RAM 基线）：用 τ≡1 无吸收参考谱复减 L-I 二阶非线性残留
 - m 警告不再硬编码 2.2：按谱线密度修正（孤立 2.2 / 中等 1.8 / 密集 1.25），且仅在手动指定 m 时提示（自适应优化不再误报"偏离最优"）
 - 默认浓度按物种推荐：GAS_DEFAULTS x 1e-3→1e-4；t_simulate/t_invert/t_detection_limit 读 SPECIES_PROFILES 的 x_typ/L_cm（强吸收 CH4@3.3μm 避免 αL 饱和）
+- `tdlas_invert` 与 `tdlas_wms_instrument` 模型对齐：wms_instrument 返回完整链路 `sensitivity_k`，invert 优先复用该 k、否则内部跑完整链路重算；不再用解析版 `simulate()` 的灵敏度（两路 S2f/1f 差 ~6×，曾致 501% 反演误差）
 - edge 语义：电压上升沿 = 波数下降（dν/dI<0）
 
 ### AI 交互层
