@@ -465,10 +465,18 @@ SCAN_DEFAULTS = {
 LASER_DEFAULTS = {
     "eta_VI": 24.0,          # V→I 跨导 mA/V（驱动器线性估算：Vop 5 V / Iop 120 mA）
     "dnu_dI": -0.088,        # I→波数 调谐系数 cm⁻¹/mA（官方 0.10 nm/mA @3373 nm 换算）
+    "d2nu_dI2": 0.0,         # I→波数 二阶调谐系数 cm⁻¹/mA²（调谐非线性，默认 0=线性）
     "wn_ref": 2964.7,        # 参考波数 cm⁻¹（10⁷/3373 nm）
     "i_ref": 120.0,          # 参考电流 mA（Iop max）
     "i_th": 30.0,            # 阈值电流 mA（低于此无激光输出）
     "eta_IP": 0.15,          # I→P 斜率效率 mW/mA（工作点 71 mA→6.4 mW 反推）
+    # 残余幅度调制 RAM：激光**固有**强度调制（与频率调制 FM 存在相位差）。
+    # 此前仪器链路的 AM 仅来自 L-I 斜率（与 FM 同相），缺少真实 DFB 的 RAM。
+    # 0 = 纯 FM（默认，保持原行为）；非零时叠加 I0(t)=1+i0·cos(ωt+ψ1)+i2·cos(2ωt+ψ2)。
+    "am_i0": 0.0,            # 1f 强度调制幅度（相对光强）
+    "am_i2": 0.0,            # 2f 强度调制幅度
+    "am_psi1": 0.0,          # AM 相对 FM 的相位差（rad）
+    "am_psi2": 0.0,
 }
 OPTICS_DEFAULTS = {"throughput": 0.90}   # 光学元件总透过率（窗片/镜片）
 PD_DEFAULTS = {
@@ -579,8 +587,8 @@ def adaptive_modulation_index(nu_grid, alpha_pure, hwhm, cfg, t, v_scan, v_mod_s
         """给定 m 跑无噪声链路，返回 (2f 峰值, 归一化波形)"""
         amp_V = (m_val * hwhm) / dnu_dV if dnu_dV > 0 else 0.0
         v_d = v_scan_s + amp_V * v_mod_s
-        _, nu_l, p_l = voltage_to_laser(v_d, eta_VI, dnu_dI, cfg["wn_ref"],
-                                        cfg["i_ref"], cfg["i_th"], cfg["eta_IP"])
+        _, nu_l, p_l = voltage_to_laser(v_d, eta_VI, dnu_dI, cfg["wn_ref"], cfg["i_ref"],
+                                        cfg["i_th"], cfg["eta_IP"], cfg.get("d2nu_dI2", 0.0))
         alpha = np.interp(nu_l, nu_grid, alpha_pure) * float(x)
         p_opt = p_l * float(cfg["throughput"]) * np.exp(-alpha * float(L_cm))
         v_pd = p_opt * 1e-3 * float(cfg["resp"]) * float(cfg["gain"])
@@ -651,10 +659,15 @@ def daq_triangle(t, amp_V, freq_Hz, phase_deg=0.0, offset_V=0.0):
 
 
 def voltage_to_laser(v, eta_VI=24.0, dnu_dI=-0.088, wn_ref=2964.7, i_ref=120.0,
-                     i_th=30.0, eta_IP=0.15):
-    """驱动电压 → 激光器电流 / 波数 / 输出功率。返回 (i_mA, nu_cm-1, p_mW)。"""
+                     i_th=30.0, eta_IP=0.15, d2nu_dI2=0.0):
+    """驱动电压 → 激光器电流 / 波数 / 输出功率。返回 (i_mA, nu_cm-1, p_mW)。
+
+    波数用二阶泰勒：ν = wn_ref + di·(dν/dI) + ½·di²·(d²ν/dI²)，di = i - i_ref。
+    `d2nu_dI2` 建模**调谐非线性**（真实 DFB 的电流-波长响应并非严格线性），默认 0。
+    """
     i = float(eta_VI) * np.asarray(v, dtype=float)
-    nu = float(wn_ref) + (i - float(i_ref)) * float(dnu_dI)
+    di = i - float(i_ref)
+    nu = float(wn_ref) + di * float(dnu_dI) + 0.5 * di ** 2 * float(d2nu_dI2)
     p = np.maximum(float(eta_IP) * (i - float(i_th)), 0.0)   # 低于阈值电流无输出
     return i, nu, p
 
@@ -683,6 +696,18 @@ def noise_currents(i_mean_A, bw_Hz, gain_V_per_A, rin_per_sqrtHz, T=296.0):
     return shot, thermal, rin
 
 
+def pd_lowpass(v, bw_Hz, fs):
+    """探测器 + 前放的**带宽限制**（一阶 RC 低通）。
+
+    真实 PD 有响应时间，会削掉高于带宽的信号分量（此前 bw 只参与噪声计算，
+    对信号完全无作用 → 参数定义了却不生效）。截止取 min(bw, 0.45·fs) 避免越 Nyquist。
+    """
+    from scipy import signal as _sg
+    fc = min(float(bw_Hz), 0.45 * float(fs))
+    alpha = 1.0 - np.exp(-2.0 * np.pi * fc / float(fs))
+    return _sg.lfilter([alpha], [1.0, -(1.0 - alpha)], np.asarray(v, dtype=float))
+
+
 def simulate_das_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
                             x=1e-3, L_cm=50.0, edge="rising", fit_order=3,
                             fit_frac=0.3, seed=None, **kw):
@@ -708,7 +733,9 @@ def simulate_das_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     # ★ 同 WMS：让激光波数轴中心落在 wn_center，否则与吸收谱错位
     if kw.get("wn_ref") is None:
         i_mid = float(cfg["eta_VI"]) * float(cfg["offset_V"])
-        cfg["wn_ref"] = float(wn_center) - (i_mid - float(cfg["i_ref"])) * float(cfg["dnu_dI"])
+        _di = i_mid - float(cfg["i_ref"])
+        cfg["wn_ref"] = (float(wn_center) - _di * float(cfg["dnu_dI"])
+                         - 0.5 * _di ** 2 * float(cfg.get("d2nu_dI2", 0.0)))
 
     fs = float(cfg["fs"])
     n_samples = int(cfg["n_samples"])
@@ -721,7 +748,7 @@ def simulate_das_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     # ② V → I → 波数 / 功率
     i_laser, nu_laser, p_laser = voltage_to_laser(
         v_drive, cfg["eta_VI"], cfg["dnu_dI"], cfg["wn_ref"], cfg["i_ref"],
-        cfg["i_th"], cfg["eta_IP"])
+        cfg["i_th"], cfg["eta_IP"], cfg.get("d2nu_dI2", 0.0))
 
     # ③ 光路：光学损耗 + 气体吸收
     span = float(cfg["amp_V"]) * abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
@@ -732,9 +759,9 @@ def simulate_das_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     tau = np.exp(-alpha * float(L_cm))
     p_opt = p_laser * float(cfg["throughput"]) * tau          # 到达 PD 的光功率 mW
 
-    # ④ PD：光功率 → 光电流 → 跨阻电压
+    # ④ PD：光功率 → 光电流 → 跨阻电压（含带宽低通）
     i_pd = p_opt * 1e-3 * float(cfg["resp"])                  # A
-    v_pd = i_pd * float(cfg["gain"])                          # V
+    v_pd = pd_lowpass(i_pd * float(cfg["gain"]), cfg["bw"], fs)   # V
 
     # ⑤ 噪声
     rng = np.random.default_rng(seed)
@@ -873,7 +900,9 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     #   激光却在 wn_ref 附近 → 两者错位，锁相输出全是噪声/伪影（严重假信号）。
     if kw.get("wn_ref") is None:
         i_mid = float(cfg["eta_VI"]) * float(cfg["offset_V"])
-        cfg["wn_ref"] = float(wn_center) - (i_mid - float(cfg["i_ref"])) * float(cfg["dnu_dI"])
+        _di = i_mid - float(cfg["i_ref"])
+        cfg["wn_ref"] = (float(wn_center) - _di * float(cfg["dnu_dI"])
+                         - 0.5 * _di ** 2 * float(cfg.get("d2nu_dI2", 0.0)))
 
     warnings = []
     fm = float(cfg["mod_freq_Hz"])
@@ -930,7 +959,7 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     # ② V → I → 波数 / 功率
     i_laser, nu_laser, p_laser = voltage_to_laser(
         v_drive, cfg["eta_VI"], cfg["dnu_dI"], cfg["wn_ref"], cfg["i_ref"],
-        cfg["i_th"], cfg["eta_IP"])
+        cfg["i_th"], cfg["eta_IP"], cfg.get("d2nu_dI2", 0.0))
 
     # 1/f 噪声：慢漂移（正弦）+ 粉红噪声（1/f RIN）。WMS 锁相是高通、天然抑制；
     # DAS 直接测 DC 光强、受害于它——这是 WMS 通常强于 DAS 的物理来源。
@@ -941,15 +970,21 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
         p_laser = p_laser * (1.0 + drift_frac * np.sin(2 * np.pi * 1.0 * t + 0.3))
     if flicker_frac > 0:
         p_laser = p_laser * (1.0 + flicker_frac * pink_noise(len(t), fs, rng))
+    # 残余幅度调制（RAM）：激光**固有**强度调制，与 FM 存在相位差
+    _am_i0, _am_i2 = float(cfg.get("am_i0", 0.0)), float(cfg.get("am_i2", 0.0))
+    if _am_i0 != 0.0 or _am_i2 != 0.0:
+        _wm = 2.0 * np.pi * fm
+        p_laser = p_laser * (1.0 + _am_i0 * np.cos(_wm * t + float(cfg.get("am_psi1", 0.0)))
+                             + _am_i2 * np.cos(2.0 * _wm * t + float(cfg.get("am_psi2", 0.0))))
 
     # ③ 光路
     alpha = np.interp(nu_laser, nu_grid, alpha_pure) * float(x)
     tau = np.exp(-alpha * float(L_cm))
     p_opt = p_laser * float(cfg["throughput"]) * tau
 
-    # ④ PD
+    # ④ PD：光电流 → 跨阻电压 → 带宽低通（真实 PD 有响应时间）
     i_pd = p_opt * 1e-3 * float(cfg["resp"])
-    v_pd = i_pd * float(cfg["gain"])
+    v_pd = pd_lowpass(i_pd * float(cfg["gain"]), cfg["bw"], fs)
 
     # ⑤ 噪声（白噪声：散粒 + 热 + RIN）
     s_shot, s_therm, s_rin = noise_currents(float(np.mean(i_pd)), cfg["bw"],
@@ -986,8 +1021,9 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     n_sel = int(idx.size)
     # ★ 横轴必须用"扫描波数"（不含调制），不能用瞬时波数 nu_laser[idx] ——
     #   后者带 ±a 的摆动，每个点在横轴上来回平移，会把曲线折成"水平条纹"乱麻。
-    _, nu_scan_all, _ = voltage_to_laser(v_scan, cfg["eta_VI"], cfg["dnu_dI"],
-                                         cfg["wn_ref"], cfg["i_ref"], cfg["i_th"], cfg["eta_IP"])
+    _, nu_scan_all, _ = voltage_to_laser(v_scan, cfg["eta_VI"], cfg["dnu_dI"], cfg["wn_ref"],
+                                         cfg["i_ref"], cfg["i_th"], cfg["eta_IP"],
+                                         cfg.get("d2nu_dI2", 0.0))
     nu_cyc = nu_scan_all[idx]
     S1f_cyc, S2f_cyc, v_cyc = S1f[idx], S2f[idx], v_adc[idx]
     alphaL_cyc = np.interp(nu_cyc, nu_grid, alpha_pure) * float(x) * float(L_cm)
@@ -1022,8 +1058,9 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     # ⑨ DAS 对照：DAS 是**不带调制**的直接吸收技术，所以不能用"对含调制信号做平均"
     #    来伪造 —— 那样平均窗口内波数仍在摆动，会折出锯齿。这里把调制置零、
     #    走同一条链路重算一次 PD 信号，才是真正的 DAS。
-    _, nu_das, p_das = voltage_to_laser(v_scan, cfg["eta_VI"], cfg["dnu_dI"],
-                                        cfg["wn_ref"], cfg["i_ref"], cfg["i_th"], cfg["eta_IP"])
+    _, nu_das, p_das = voltage_to_laser(v_scan, cfg["eta_VI"], cfg["dnu_dI"], cfg["wn_ref"],
+                                        cfg["i_ref"], cfg["i_th"], cfg["eta_IP"],
+                                        cfg.get("d2nu_dI2", 0.0))
     if drift_frac > 0:
         p_das = p_das * (1.0 + drift_frac * np.sin(2 * np.pi * 1.0 * t + 0.3))
     if flicker_frac > 0:
@@ -1038,7 +1075,8 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     s_sh_d, s_th_d, s_rin_d = noise_currents(float(np.mean(i_das)), cfg["bw"],
                                              cfg["gain"], cfg["rin"], T)
     s_d = float(np.sqrt(s_sh_d ** 2 + s_th_d ** 2 + s_rin_d ** 2))
-    v_das_all = i_das * float(cfg["gain"]) + rng.normal(0.0, s_d * float(cfg["gain"]), i_das.shape)
+    v_das_all = (pd_lowpass(i_das * float(cfg["gain"]), cfg["bw"], fs)
+                 + rng.normal(0.0, s_d * float(cfg["gain"]), i_das.shape))
     # 与 WMS 链路一致地过 ADC（量化+限幅），保证 DAS/WMS 公平对比
     # （此前 DAS 跳过量化，使"DAS-理论一致"校验偏乐观）
     v_das_all = np.clip(np.round(v_das_all / lsb) * lsb,

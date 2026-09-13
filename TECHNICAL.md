@@ -126,10 +126,13 @@ $$\mathrm{tri}(t) = 1 - 4\left|\left(\frac{t}{T_{\rm scan}} + \frac{\phi}{360}\r
 ### 3.2 激光器调谐 V→I→ν/P
 
 ```python
-i   = eta_VI * v                      # mA
-nu  = wn_ref + (i - i_ref) * dnu_dI   # cm⁻¹
-P   = max(eta_IP * (i - i_th), 0)     # mW，低于阈值无输出
+i   = eta_VI * v                                              # mA
+di  = i - i_ref
+nu  = wn_ref + di * dnu_dI + 0.5 * di**2 * d2nu_dI2           # cm⁻¹（二阶泰勒）
+P   = max(eta_IP * (i - i_th), 0)                             # mW，低于阈值无输出
 ```
+
+**调谐非线性** `d2nu_dI2`（cm⁻¹/mA²，默认 0）：真实 DFB 的电流-波长响应并非严格线性，该项建模二阶弯曲，会使扫描窗口相对中心**非对称**扩展/收缩。
 
 **关键符号**：默认 `dnu_dI = -0.088 < 0`（真实 DFB 激光：电流↑ → 结温↑ → 波长红移 → 波数↓）。
 
@@ -148,9 +151,27 @@ p_opt = p_laser * throughput * tau
 ### 3.4 探测器 PD
 
 ```python
-i_pd = p_opt * 1e-3 * resp     # p_opt 单位 mW → W
-v_pd = i_pd * gain             # 跨阻放大 → V
+i_pd = p_opt * 1e-3 * resp                      # p_opt 单位 mW → W
+v_pd = pd_lowpass(i_pd * gain, bw, fs)          # 跨阻 + 带宽低通 → V
 ```
+
+**带宽低通**（`pd_lowpass`）：一阶 RC 模型，$f_c=\min(f_{\rm bw},0.45f_s)$
+
+$$\alpha = 1-e^{-2\pi f_c/f_s},\qquad y[n]=y[n-1]+\alpha\,(x[n]-y[n-1])$$
+
+**要点**：真实 PD 有响应时间，会削掉高于带宽的信号分量。若 $f_{\rm bw}$ 接近或低于 $2f_m$，2f 会被明显衰减（实测 bw 1 MHz→40 kHz，2f 从 0.0881 削到 0.0574）。
+
+> 此前 `bw` **只参与噪声计算、对信号无作用**，属模型不自洽，已修正。
+
+### 3.4b 残余幅度调制（RAM）
+
+激光的**固有**强度调制（与 FM 存在相位差）：
+
+$$I_0(t) = 1 + i_0\cos(\omega_m t+\psi_1) + i_2\cos(2\omega_m t+\psi_2)$$
+
+- 参数 `am_i0` / `am_i2` / `am_psi1` / `am_psi2`，**默认 0（纯 FM）**
+- 仪器链路的 AM 原本只来自 L-I 斜率（与 FM 同相），缺少真实 DFB 的 RAM
+- RAM 会显著改变 1f（实测 am_i0=0→0.05，1f 峰从 0.177 升到 0.304），进而影响 2f/1f 归一化
 
 ### 3.5 噪声模型（白 + 1/f）
 
@@ -287,6 +308,9 @@ DAS 同样**过 ADC 量化**，保证与 WMS 公平对比。
 | | `offset_V` | 3.20 V | → I=76.8 mA → 2968.5 cm⁻¹ |
 | 激光 | `eta_VI` | 24.0 mA/V | V→I 跨导 |
 | | `dnu_dI` | −0.088 cm⁻¹/mA | **负**（DFB 红移） |
+| | `d2nu_dI2` | 0 | 调谐二阶非线性 cm⁻¹/mA² |
+| | `am_i0`/`am_i2` | 0 / 0 | RAM 强度调制幅度（0=纯 FM） |
+| | `am_psi1`/`am_psi2` | 0 / 0 | AM 相对 FM 的相位差 rad |
 | | `wn_ref` / `i_ref` | 2964.7 / 120.0 | 参考点（wn_ref 会按 wn_center 自动对齐） |
 | | `i_th` / `eta_IP` | 30.0 mA / 0.15 mW/mA | 阈值电流 / I→P 斜率 |
 | 光路 | `throughput` | 0.90 | 光学总透过率 |
@@ -302,9 +326,9 @@ DAS 同样**过 ADC 量化**，保证与 WMS 公平对比。
 
 ## 6. 已知近似与局限
 
-1. **激光调谐线性**：`nu = wn_ref + (i-i_ref)·dnu_dI` 为**线性近似**；真实 DFB 有非线性与热迟滞
+1. **激光调谐**：用二阶泰勒（含 `d2nu_dI2`，默认 0）；三阶以上与**热迟滞**未建模
 2. **L-I 线性**：`P = eta_IP·(i-i_th)`，忽略效率随温度/老化变化
-3. **无 RAM 显式建模**：残余幅度调制仅通过 L-I 斜率隐式体现；未独立参数化 `i0/i2/psi`
+3. **RAM**：已支持显式参数（`am_i0/am_i2/am_psi1/am_psi2`，默认 0=纯 FM）；未建模其温度/频率依赖
 4. **Voigt 近似**：用 HAPI 的 `absorptionCoefficient_Voigt`，非逐线精确 Voigt 数值积分
 5. **单次扫描**：默认取单一扫描方向，未做多周期平均
 6. **DAS 基线为理想 $I_0$**：真实实验需背景扣除，精度低于此
