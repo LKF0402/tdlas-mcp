@@ -35,20 +35,20 @@ python tools/tdlas_mcp.py --selftest
 # 将 mcp.config.example.json 中 args 路径改为实际路径即可
 ```
 
-> **推荐同时安装 [SKILL.md](./SKILL.md)** 作为独立 Skill：AI 可读取交互协议、参数优先级与出图规范，避免选错工具或瞎编参数。
+> 推荐同时安装 [SKILL.md](./SKILL.md) 作为独立 Skill，AI 可读取交互协议、参数优先级与出图规范。
 
 ## 工具一览（12 个）
 
 | 工具 | 用途 |
 |------|------|
-| **tdlas_wms_instrument** | **画 WMS 图首选**：仪器级全链路，标准 6 子图输出 |
+| **tdlas_wms_instrument** | **WMS 仿真首选**：仪器级全链路，标准 6 子图输出 |
 | tdlas_das_instrument | 仪器级 DAS 仿真 |
-| tdlas_simulate | 简化解析模型，快速算峰高数值（非画图工具） |
+| tdlas_simulate | 简化解析模型，快速计算峰高数值 |
 | tdlas_das_chain | 三角波 DAS 链路：PD 信号 → 基线扣除 → 吸光度 |
 | tdlas_review | 结果二次审核（9 项校验，不画图） |
 | tdlas_invert | 2f/1f 峰高 → 摩尔分数反演 |
 | tdlas_detection_limit | 噪声 → NEC / LOD 计算 |
-| tdlas_detection_limit_scan | LOD 随光程/浓度网格扫描（选型用） |
+| tdlas_detection_limit_scan | LOD 随光程/浓度网格扫描（系统选型用） |
 | tdlas_session | 跨会话工况参数持久化 |
 | tdlas_device | 硬件参数库（激光器/PD/DAQ/光学） |
 | tdlas_guide | AI 交互协议与术语表 |
@@ -60,16 +60,11 @@ python tools/tdlas_mcp.py --selftest
 # HTTP 模式
 python tools/tdlas_mcp.py --http --host 0.0.0.0 --port 8000 --token <密钥>
 
-# 公网隧道（cloudflared，推荐）
+# 公网隧道（cloudflared）
 python tools/remote_link.py
 ```
 
 详见 [mcp.config.example.json](./mcp.config.example.json)。
-
-## 说明
-
-- **无多次扫描平均**：N 次平均仅对白噪声（散粒/热/RIN）按 √N 降，1/f 漂移与粉红噪声不降。模拟时白噪声参数按 1/√N 减小即可。
-- 不依赖其他 MCP 服务，可独立部署。
 
 ## 文档
 
