@@ -83,6 +83,21 @@ python tools/tdlas_mcp.py --selftest   # MCP 服务器自检
 | [SKILL.md](./SKILL.md) | AI 使用规范（触发条件、工具列表、必须遵守的交互规则） |
 | [CHANGELOG.md](./CHANGELOG.md) | 功能演进记录 |
 
+## 引用（Citing）
+
+若你在论文或研究中使用了本工具，请：
+
+1. **声明代码可用性**（可粘贴到论文的 Code availability 段）：
+
+   > The TDLAS/WMS instrument-level simulations were performed using the open-source package **tdlas-mcp** (https://github.com/LKF0402/tdlas-mcp, GPLv3).
+
+2. **引用底层数据与方法**（必须，否则学术不规范）：
+
+   - **HAPI**：R.V. Kochanov, I.E. Gordon, L.S. Rothman, P. Wcislo, C. Hill, J.S. Wilzewski, *J. Quant. Spectrosc. Radiat. Transfer* 177, 15–30 (2016). DOI: 10.1016/j.jqsrt.2016.03.005
+   - **HITRAN2024**：I.E. Gordon et al., *J. Quant. Spectrosc. Radiat. Transfer* (2026). DOI: 10.1016/j.jqsrt.2026.109807
+
+3. **作者身份**：本仓库由 GitHub 账号 `LKF0402` 维护。若论文署名与该账号名不一致，请在论文脚注或本仓库注明对应关系，便于审稿人确认。
+
 ## 许可证
 
 GPLv3
