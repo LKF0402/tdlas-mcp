@@ -703,7 +703,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
 
 
 _INSTR_KEYS_WMS = _INSTR_KEYS + ("mod_freq_Hz", "mod_amp_V", "m_opt", "lockin_avg", "lockin_stages",
-                                 "drift_frac", "flicker_frac")
+                                 "drift_frac", "flicker_frac", "background_subtract")
 
 
 def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
@@ -773,7 +773,8 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            "modulation_adaptive": m["modulation"],
            "adc": {"fs_Hz": m["fs"], "n_per_scan": r["n_per"], "bits": cfg["adc_bits"],
                    "v_range_V": cfg["v_range"], "lsb_V": m["lsb_V"]},
-           "normalization": {"method": m["norm_method"], "onef_valid": m["onef_valid"],
+           "normalization": {"method": m["norm_method"], "background_subtracted": m["bg_subtracted"],
+                             "onef_valid": m["onef_valid"],
                              "I0_pd_V": m["I0_pd_V"],
                              "offband_leak_1f": m["offband_leak_1f"],
                              "peak_2f_1f": m["peak_2f_1f"],
@@ -1042,6 +1043,8 @@ TOOLS = [
                                         "description": "锁相平均调制周期数，默认 1（>1 模糊线形且不降残留）"},
                          "lockin_stages": {"type": "integer",
                                            "description": "低通级联级数，默认 2（sinc² 抑制旁瓣，残留 4%→1.5%）"},
+                         "background_subtract": {"type": "boolean",
+                                                   "description": "是否以无吸收参考谱扣除 RAM 2f 基线，默认 True；False 仅用于诊断原始基线"},
                          "trim_frac": {"type": "number",
                                        "description": "剔除扫描两端比例，默认 0.12（三角波转折点高频谐波会泄漏进 2f）"},
                          "edge": {"type": "string",

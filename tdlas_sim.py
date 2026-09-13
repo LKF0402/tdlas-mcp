@@ -588,6 +588,7 @@ MOD_DEFAULTS = {
                              # （CH4 221 线最优≈1.25、C2H6 158 线≈1.8），可用 m_opt 调低以提升灵敏度。
     "lockin_avg": 1,         # 锁相滑动平均的调制周期数（>1 会模糊线形且不降残留）
     "lockin_stages": 2,      # 低通级联级数：2 级把残留从 4.1% 降到 1.6%（再高收益小）
+    "background_subtract": True,  # 以无吸收参考谱复减 RAM 2f 基线；关闭仅用于诊断原始基线
     "trim_frac": 0.12,       # 剔除扫描两端比例：三角波转折点导数不连续，
                             # 其高频谐波会泄漏进 2f，必须丢弃（WMS 标准做法）
 }
@@ -1222,7 +1223,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         valid[-n_keep:] = False
     off = (alphaL_cyc < 0.02 * float(np.max(alphaL_cyc) + 1e-30)) & valid   # 非吸收区
     I0_pd = float(np.mean(np.abs(v_cyc[off]))) if off.any() else float(np.mean(np.abs(v_cyc[valid])))
-    # ★ 背景扣除（RAM 基线）：2f/1f 与 2f/I0 都要减"无吸收参考谱"的复分量。
+    # ★ 背景扣除（RAM 基线）：默认以无吸收参考谱复减；关闭仅用于诊断原始基线。
     #   · 2f/1f：复分量先各除以 1f 幅度、再复减背景（与解析 wms_calibration_free 同式）
     #   · 2f/I0：复分量直接相减再取模、除 I0（I0 是标量，减法顺序无歧义）
     R1f_c = np.hypot(X1f_c, Y1f_c); R1f_bg = np.hypot(X1f_bg_c, Y1f_bg_c)
@@ -1230,8 +1231,13 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     _Y2f1f = np.divide(Y2f_c, R1f_c, out=np.zeros_like(Y2f_c), where=R1f_c > 1e-15)
     _X2f1f_bg = np.divide(X2f_bg_c, R1f_bg, out=np.zeros_like(X2f_bg_c), where=R1f_bg > 1e-15)
     _Y2f1f_bg = np.divide(Y2f_bg_c, R1f_bg, out=np.zeros_like(Y2f_bg_c), where=R1f_bg > 1e-15)
-    S2f_1f = np.hypot(_X2f1f - _X2f1f_bg, _Y2f1f - _Y2f1f_bg)
-    S2f_I0 = np.hypot(X2f_c - X2f_bg_c, Y2f_c - Y2f_bg_c) / max(I0_pd, 1e-30)
+    bg_subtracted = bool(cfg.get("background_subtract", True))
+    if bg_subtracted:
+        S2f_1f = np.hypot(_X2f1f - _X2f1f_bg, _Y2f1f - _Y2f1f_bg)
+        S2f_I0 = np.hypot(X2f_c - X2f_bg_c, Y2f_c - Y2f_bg_c) / max(I0_pd, 1e-30)
+    else:
+        S2f_1f = np.hypot(_X2f1f, _Y2f1f)
+        S2f_I0 = np.hypot(X2f_c, Y2f_c) / max(I0_pd, 1e-30)
     # 2f/1f 适用性判据（只在有效区内）：
     #   真正让 2f/1f 不好用的是"1f 基线随扫描漂移"（AM 即 dP/dV 非线性），
     #   表现为**真无吸收处** 2f/1f 背景不平（泄漏接近峰值）。
@@ -1244,6 +1250,8 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     onef_valid = bool(pk_1f > 0 and off_1f <= 0.30 * pk_1f)
     S2f_norm = S2f_1f if onef_valid else S2f_I0
     norm_method = "2f/1f" if onef_valid else "2f/I0（PD 非吸收区光强均值）"
+    if not bg_subtracted:
+        norm_method += "（未背景扣除）"
     S2f1f = S2f_1f                     # 保留原名以向后兼容（始终输出，供用户自行判断）
 
     # ⑨ DAS 对照：DAS 是**不带调制**的直接吸收技术，所以不能用"对含调制信号做平均"
@@ -1320,8 +1328,12 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         warnings.append(f"⚠ **2f/1f 不可用 → 已自动改用 2f/I0（PD 非吸收区光强均值 I0={I0_pd:.4g} V）**。"
                         f"原因：非吸收区 2f/1f 泄漏 {off_1f:.3g} 占峰值 "
                         f"{100 * off_1f / max(pk_1f, 1e-30):.0f}%（>30%，1f 基线随扫描漂移）")
-    warnings.append("已做 **背景扣除**：用无吸收参考谱（τ≡1，含相同 RAM/AM 与慢漂移，无白/粉红噪声）"
-                    "复减 2f/1f 与 2f/I0 的 RAM 基线（L-I 二阶非线性残留）")
+    if bg_subtracted:
+        warnings.append("已做 **背景扣除**：用无吸收参考谱（τ≡1，含相同 RAM/AM 与慢漂移，无白/粉红噪声）"
+                        "复减 2f/1f 与 2f/I0 的 RAM 基线（L-I 二阶非线性残留）")
+    else:
+        warnings.append("未做背景扣除：归一化 2f 保留 L-I 非线性与 RAM 的物理基线；"
+                        "仅供诊断，不应用于浓度反演或检测限结论")
 
     # 免标定灵敏度：k = 归一化 2f 峰值 ÷ 浓度（弱吸收下与浓度无关）。
     # 这是**完整链路**的 k，供 tdlas_invert 复用；勿与解析版 simulate() 混用（两路 S2f/1f 差 ~6×）。
@@ -1337,7 +1349,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "n_sat": n_sat, "sigma_shot": s_shot * cfg["gain"],
             "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
             "drift_frac": drift_frac, "flicker_frac": flicker_frac,
-            "bg_subtracted": True, "norm_method": norm_method, "onef_valid": onef_valid, "I0_pd_V": I0_pd,
+            "bg_subtracted": bg_subtracted, "norm_method": norm_method, "onef_valid": onef_valid, "I0_pd_V": I0_pd,
             "offband_leak_1f": off_1f, "peak_2f_1f": pk_1f, "sensitivity_k": k_sens,
             "onef_min_over_median": onef_min / max(onef_med, 1e-30),
             "trim_frac": float(cfg["trim_frac"]), "n_trim": n_keep, "edge": edge,
@@ -1432,7 +1444,10 @@ def validate_wms_result(r):
         add("ADC 动态范围", "pass", "无饱和，动态范围合理")
 
     # 8. 归一化方法
-    add("归一化方法", "pass", f"采用 {m['norm_method']}（1f 有效={m['onef_valid']}）")
+    if m["bg_subtracted"]:
+        add("归一化方法", "pass", f"采用 {m['norm_method']}（1f 有效={m['onef_valid']}；已背景扣除）")
+    else:
+        add("归一化方法", "warn", f"采用 {m['norm_method']}（1f 有效={m['onef_valid']}；未背景扣除，仅供诊断）")
 
     # 9. 噪声告知（1/f 默认关，须向用户说明）
     if m["drift_frac"] == 0 and m["flicker_frac"] == 0 and m["cfg"]["rin"] == 0:
@@ -1533,7 +1548,8 @@ def plot_wms_instrument(r, out_png):
 
     # ⑤ 归一化 2f（标注方法）
     if ok:
-        seg(ax[5], r["S2f_norm_cyc"], "C2", "2f/1f", 1.6)
+        label = "2f/1f" if m["bg_subtracted"] else "2f/1f（未扣背景）"
+        seg(ax[5], r["S2f_norm_cyc"], "C2", label, 1.6)
     else:
         seg(ax[5], r["S2f_norm_cyc"], "C2",
             f"2f/I0（I0={m['I0_pd_V']:.3g} V）", 1.6)
