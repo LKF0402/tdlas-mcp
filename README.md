@@ -13,66 +13,66 @@ DAQ → 激光 → 光路 → PD → ADC → 数字锁相 · 自然语言驱动<
 
 ---
 
-## 是什么
+## 概述
 
-对 TDLAS 实验全链路逐级建模，通过 MCP 协议让 AI 助手用自然语言完成 WMS/DAS 仿真：
+tdlas-mcp 是基于 MCP（Model Context Protocol）的可调谐二极管激光吸收光谱（TDLAS）仿真服务器，对实验全链路进行仪器系统级建模：
 
 ```
-DAQ 电压(三角波+正弦) → 激光调谐 → HITRAN 吸收 → PD → ADC → 锁相 → 1f/2f/2f1f
+DAQ 电压(三角波+正弦调制) → 激光器调谐 → HITRAN 气体吸收 → 光电探测 → ADC 量化 → 数字锁相 → 1f/2f/2f1f 谐波提取
 ```
 
-自包含，无需 API key，首次运行自动下载线表缓存。
+服务器自包含 HITRAN 线表获取与吸收谱计算模块（基于 HAPI 1.x，无需 API key），通过 MCP 协议接入 AI 助手，以自然语言完成波长调制光谱（WMS）与直接吸收光谱（DAS）仿真。
 
 ## 快速上手
 
 ```bash
 pip install -r requirements.txt
 
-# 自检
+# 服务器自检
 python tools/tdlas_mcp.py --selftest
 
 # 接入 MCP 客户端（stdio）
-# 将 mcp.config.example.json 中 args 路径改为实际路径即可
+# 将 mcp.config.example.json 中 args 路径改为实际安装路径即可
 ```
 
-> 推荐同时安装 [SKILL.md](./SKILL.md) 作为独立 Skill，AI 可读取交互协议、参数优先级与出图规范。
+> 建议同时将 [SKILL.md](./SKILL.md) 作为独立 Skill 安装至 AI Agent，使其读取完整交互协议与出图规范。
 
-## 工具一览（12 个）
+## 工具列表
 
-| 工具 | 用途 |
+| 工具 | 功能 |
 |------|------|
-| **tdlas_wms_instrument** | **WMS 仿真首选**：仪器级全链路，标准 6 子图输出 |
-| tdlas_das_instrument | 仪器级 DAS 仿真 |
-| tdlas_simulate | 简化解析模型，快速计算峰高数值 |
-| tdlas_das_chain | 三角波 DAS 链路：PD 信号 → 基线扣除 → 吸光度 |
-| tdlas_review | 结果二次审核（9 项校验，不画图） |
-| tdlas_invert | 2f/1f 峰高 → 摩尔分数反演 |
-| tdlas_detection_limit | 噪声 → NEC / LOD 计算 |
-| tdlas_detection_limit_scan | LOD 随光程/浓度网格扫描（系统选型用） |
+| **tdlas_wms_instrument** | **WMS 仪器级仿真首选**：全链路建模，输出标准 3×2 六子图 |
+| tdlas_das_instrument | 仪器级 DAS 仿真（DAQ→激光→光路→PD→ADC） |
+| tdlas_simulate | 解析模型正向计算：DAS 透过率、1f/2f 峰高 |
+| tdlas_das_chain | 三角波 DAS 链路：PD 原始信号 → 多项式基线拟合 → 吸光度 |
+| tdlas_review | 结果自动校验（9 项检查，不绘图） |
+| tdlas_invert | 免标定浓度反演：2f/1f 峰高 → 摩尔分数 |
+| tdlas_detection_limit | 噪声等效浓度（NEC）与检测限（LOD）计算 |
+| tdlas_detection_limit_scan | LOD 随光程与参考浓度的二维扫描（系统选型） |
 | tdlas_session | 跨会话工况参数持久化 |
-| tdlas_device | 硬件参数库（激光器/PD/DAQ/光学） |
+| tdlas_device | 硬件参数库管理（激光器/探测器/DAQ/光学） |
 | tdlas_guide | AI 交互协议与术语表 |
 | tdlas_selftest | 全链路自检 |
 
-## 远程调用
+## 远程部署
 
 ```bash
 # HTTP 模式
-python tools/tdlas_mcp.py --http --host 0.0.0.0 --port 8000 --token <密钥>
+python tools/tdlas_mcp.py --http --host 0.0.0.0 --port 8000 --token <鉴权密钥>
 
 # 公网隧道（cloudflared）
 python tools/remote_link.py
 ```
 
-详见 [mcp.config.example.json](./mcp.config.example.json)。
+配置示例见 [mcp.config.example.json](./mcp.config.example.json)。
 
-## 文档
+## 相关文档
 
-| 文件 | 内容 |
+| 文档 | 内容 |
 |------|------|
 | [TECHNICAL.md](./TECHNICAL.md) | 物理原理、算法实现、参数表、已知近似 |
-| [SKILL.md](./SKILL.md) | AI 交互规范 |
-| [CHANGELOG.md](./CHANGELOG.md) | 版本记录 |
+| [SKILL.md](./SKILL.md) | AI 交互规范与工具使用协议 |
+| [CHANGELOG.md](./CHANGELOG.md) | 版本更新记录 |
 
 ## 引用
 
@@ -83,6 +83,6 @@ The TDLAS/WMS instrument-level simulations were performed using tdlas-mcp
 
 底层数据：HAPI (Kochanov et al., JQSRT 2016, DOI: 10.1016/j.jqsrt.2016.03.005) · HITRAN2024 (Gordon et al., JQSRT 2026, DOI: 10.1016/j.jqsrt.2026.109807)
 
-## License
+## 许可证
 
 GPLv3
