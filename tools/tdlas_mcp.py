@@ -880,8 +880,11 @@ TOOLS = [
                          "i_ref": {"type": "number", "description": "参考电流 mA，默认 120"},
                          "i_th": {"type": "number", "description": "阈值电流 mA，默认 30"},
                          "eta_IP": {"type": "number", "description": "功率斜率效率 mW/mA，默认 0.15"},
-                         "fs": {"type": "number", "description": "采样率 Hz，默认 1e5（USB-6211 上限 2.5e5）"},
-                         "n_samples": {"type": "integer", "description": "采样点数，默认 1e5"},
+                         "fs": {"type": "number",
+                                "description": "采样率 Hz，默认 2.4e5（= 8×fm；USB-6211 上限 2.5e5）。"
+                                               "必须为 fm 的整数倍且 ≥8 点/周期，否则自动吸附"},
+                         "n_samples": {"type": "integer",
+                                       "description": "采样点数，默认 1.2e5（= fs × 0.5 s）"},
                          "adc_bits": {"type": "integer", "description": "ADC 位数，默认 16"},
                          "v_range": {"type": "number", "description": "ADC 输入量程 ±V，默认 10"},
                          "throughput": {"type": "number", "description": "光学总透过率，默认 0.90"},
@@ -899,7 +902,9 @@ TOOLS = [
      "description": "WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相，"
                     "输出 2f/1f（免标定归一化）。**调制幅值默认按最优调制系数 m≈2.2 自动优化**"
                     "（2f 峰值最大处，可用 mod_amp_V 手动覆盖）。默认 fm=30 kHz、fscan=100 Hz。"
-                    "采样率不足时会自动提升并提示（30 kHz 调制需 ≥240 kS/s）。"
+                    "采样率须为 fm 的整数倍且每调制周期 ≥8 点（30 kHz 调制即 240 kS/s，"
+                    "默认 fs=240 kS/s、n_samples=120 k）；不满足时自动吸附到最近整数倍并同步"
+                    "放大采样点数以保持总采集时间。"
                     "缺省参数列入 param_requests，AI 须按 ai_guidance 主动向用户澄清。",
      "inputSchema": {"type": "object",
                      "properties": {

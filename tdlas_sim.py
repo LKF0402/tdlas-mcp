@@ -451,8 +451,8 @@ def plot_das_td(r, out_png):
 # 参数缺省时的索取优先级：① 用户给实测值 → ② 用户给器件型号（由 AI 检索规格书）
 # → ③ 用户现场标定（如"电压变化 ΔV → 波数变化 Δν"）→ ④ 用下列默认值并明确标注。
 DAQ_DEFAULTS = {
-    "fs": 100e3,             # 采样率 Hz（DAQ 助手默认 100 kHz）
-    "n_samples": 100_000,    # 采样点数（100k）
+    "fs": 240e3,             # 采样率 Hz = 8×fm(30 kHz)：每调制周期整数 8 点（锁相要求）
+    "n_samples": 120_000,    # 采样点数 = 240 kS/s × 0.5 s → 50 个扫描周期 @100 Hz
     "adc_bits": 16,          # ADC 位数（USB-6211：16-bit）
     "v_range": 10.0,         # ADC 输入量程 ±V（USB-6211：±10 V）
 }
@@ -907,14 +907,27 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     warnings = []
     fm = float(cfg["mod_freq_Hz"])
     fs = float(cfg["fs"])
-    fs_min = 8.0 * fm                       # 每调制周期 ≥8 点，数字锁相才有足够精度
-    if fs < fs_min:
-        warnings.append(f"采样率 {fs / 1e3:.0f} kHz 不足以准确解调 {fm / 1e3:.0f} kHz 调制的 2f"
-                        f"（建议 ≥ {fs_min / 1e3:.0f} kS/s，即每调制周期 ≥8 点）→ 已自动提升")
-        # 提升 fs 时按比例增加 n_samples，保持总采集时间不变
-        # （否则总时间缩短 → 扫描周期数减少 → 锁相平均的有效周期数不足）
-        cfg["n_samples"] = int(round(float(cfg["n_samples"]) * fs_min / fs))
-        fs = fs_min
+    # ★ 数字锁相要求采样率是调制频率的**整数倍**，且每调制周期 ≥8 点。
+    #   整数倍：滑动平均窗口恰为一个调制周期，正交解调完备（DC/调制分量泄漏 ~1e-13）；
+    #   非整数倍：泄漏可达 ~3e-3（差 10 个数量级），并使 m 自适应扫描判断失真。
+    #   不满足时吸附到最近的合法整数倍，并同步放大 n_samples 保持总采集时间不变。
+    r_ratio = fs / fm
+    if r_ratio < 8.0 - 1e-9:
+        n_req = 8
+        why = f"每调制周期仅 {r_ratio:.2f} 点（<8），正交解调不完备"
+    elif abs(r_ratio - round(r_ratio)) > 1e-9:
+        n_req = int(round(r_ratio))
+        why = f"每调制周期 {r_ratio:.3f} 点（非整数），采样与调制不同步"
+    else:
+        n_req = None
+    if n_req is not None:
+        fs_new = n_req * fm
+        warnings.append(f"采样率 {fs / 1e3:.1f} kHz 与调制频率 fm={fm / 1e3:g} kHz 不匹配：{why}"
+                        f" → 已吸附到 {fs_new / 1e3:.1f} kHz（= {n_req}×fm）")
+        # 否则总时间缩短 → 扫描周期数减少 → 锁相平均的有效周期数不足
+        cfg["n_samples"] = int(round(float(cfg["n_samples"]) * fs_new / fs))
+        fs = fs_new
+        cfg["fs"] = fs_new                   # 同步回写，供下游（自适应 m 扫描等）读取
     if fs > 250e3:
         warnings.append(f"所需采样率 {fs / 1e3:.0f} kS/s 超过 NI USB-6211 上限（250 kS/s）→ "
                         f"实际采集需更高采样率的 DAQ，或降低调制频率 fm")
