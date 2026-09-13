@@ -1103,9 +1103,10 @@ DISPATCH = {"tdlas_simulate": t_simulate,
 
 TOOLS = [
     {"name": "tdlas_simulate",
-     "description": "TDLAS/WMS 正向仿真：给定分子、目标线、工况与调制参数，返回 DAS 透过率、"
-                    "1f/2f 谐波峰高与线表信息。数据经 HAPI 实时取自 HITRAN（免 API key）。"
-                    "未说明 T/P/浓度/光程时应先向用户确认。",
+     "description": "【数值计算，不是画图工具】TDLAS/WMS 简化解析模型：返回 DAS 透过率、1f/2f 峰高等数值。"
+                    "save_png=True 仅出 3 子图简图（DAS/2f/2f1f），无仪器链路。"
+                    "⚠️ 用户要画 WMS 图、要看 2f/1f 曲线、要仪器级仿真时，必须改用 tdlas_wms_instrument（标准6子图）。"
+                    "本工具仅用于快速算峰高数值或解析对照。",
      "inputSchema": {"type": "object",
                      "properties": {
                          "species": {"type": "string", "description": "分子式，如 H2O / CO2 / CO"},
@@ -1205,13 +1206,7 @@ TOOLS = [
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                      "required": ["species", "wn_center"]}},
     {"name": "tdlas_wms_instrument",
-     "description": "WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相，"
-                    "输出 2f/1f（免标定归一化）。**调制幅值默认按最优调制系数 m≈2.2 自动优化**"
-                    "（2f 峰值最大处，可用 mod_amp_V 手动覆盖）。默认 fm=30 kHz、fscan=100 Hz。"
-                    "采样率须为 fm 的整数倍且每调制周期 ≥8 点（30 kHz 调制即 240 kS/s，"
-                    "默认 fs=240 kS/s、n_samples=120 k）；不满足时自动吸附到最近整数倍并同步"
-                    "放大采样点数以保持总采集时间。"
-                    "缺省参数列入 param_requests，AI 须按 ai_guidance 主动向用户澄清。",
+     "description": "【默认首选：画 WMS 图就用这个】WMS 仪器级全链路：三角波+正弦调制→激光→光路→PD→ADC→数字锁相，输出标准6子图（V(t)/PD原始/DAS+理论/1f/2f/2f归一化）。**用户说画WMS图/2f曲线/波长调制时默认调本工具，不要调 tdlas_simulate**。调制幅值按 m≈2.2 自动优化，fm=30kHz，fscan=100Hz。采样率自动适配硬件（USB-6211上限250kS/s）。缺省参数列入 param_requests，AI 须主动澄清工况。",
      "inputSchema": {"type": "object",
                      "properties": {
                          "species": {"type": "string", "description": "分子式，默认 CH4"},
