@@ -18,6 +18,7 @@
 - 采样率整数倍铁律：fs 必须 = fm 整数倍且 ≥8 点/周期（自动吸附 + 同步放大 n_samples）
 - 电压自适应波数：amp_V/offset_V 由 wn_center + scan_span_cm 经 V→I→ν 关系反算
 - GAS_DEFAULTS 工况默认表（species/wn_center/T/P/x/L_cm）
+- WMS 背景扣除可开关（`background_subtract`，默认 True；关闭仅用于诊断原始 RAM 基线）
 
 ### 关键修复（踩坑沉淀）
 - 波数轴错位：`wn_ref` 自动对齐 `wn_center`（消除"伪影"）
@@ -36,6 +37,7 @@
 - `AI_INTERACTION_GUIDE`：正向 SOP、参数索取优先级、术语表、DAS/WMS 选型
 - 主动澄清机制：`clarify` 字段 + 带选项问句（先问再出图，硬约束）
 - 澄清提问改用**原生结构化提问工具**（AskUserQuestion 类点击式选择框），禁止纯文字列表；1 次 1–4 题、按优先级分批多轮
+- 自动反算/诊断开关参数（amp_V/offset_V/background_subtract）不进 param_requests，不再让用户确认
 - 自动校验：9 项（DAS-理论一致、2f 峰位、αL 弱吸收、采样率…）+ `tdlas_review`
 - 跨会话状态机：`tdlas_session` 记住已确认参数，多轮补全
 - 工况自适应：`SPECIES_PROFILES` 按物种推荐波段/浓度/光程
@@ -48,4 +50,4 @@
 
 ### 工程
 - 自包含 HITRAN 取数（HAPI 1.x，免 key），不依赖 Hitran MCP
-- MCP 服务器 10 工具；配置示例 + README + SKILL 文档
+- MCP 服务器 11 工具；配置示例 + README + SKILL 文档

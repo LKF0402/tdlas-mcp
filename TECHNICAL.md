@@ -40,7 +40,7 @@ tools/tdlas_hitran.py   HITRAN 取数层（HAPI 1.x 封装，自包含、免 key
         ↓
 tdlas_sim.py            仿真核心（链路建模、锁相、算法、绘图）
         ↓
-tools/tdlas_mcp.py      MCP 服务器（10 工具，stdio JSON-RPC）
+tools/tdlas_mcp.py      MCP 服务器（11 工具，stdio JSON-RPC）
 ```
 
 **设计纪律**：三层严格分离。取数层不依赖 MCP；仿真核心不依赖 MCP 协议；MCP 层只做参数编排与结果封装。
@@ -268,7 +268,7 @@ das      = -log(v_das / v_das_I0)                       # = αL
 | **2f/1f** | $\dfrac{X_{2f}}{R_{1f}}-\dfrac{X_{2f}^{bg}}{R_{1f}^{bg}}$ 复减后的模 | 1f 与光强成正比（AM 主导）且基线平稳 |
 | **2f/I0** | $\dfrac{\left|S_{2f}-S_{2f}^{bg}\right|}{I_0}$，$I_0$=PD 非吸收区均值 | 1f 不可用时退化方案 |
 
-**背景扣除**：两条归一化都先用「无吸收参考谱」（$\tau\equiv1$，含相同 RAM/AM 与慢漂移、无白/粉红噪声）走同一条链路算出 $S_{1f}^{bg},S_{2f}^{bg}$，再**复减**。它消除的是 L-I 二阶非线性产生的 RAM 基线（非吸收区 2f 残余），只能靠背景扣除去除，降噪 / 提采样率都压不掉。
+**背景扣除**：两条归一化都先用「无吸收参考谱」（$\tau\equiv1$，含相同 RAM/AM 与慢漂移、无白/粉红噪声）走同一条链路算出 $S_{1f}^{bg},S_{2f}^{bg}$，再**复减**。它消除的是 L-I 二阶非线性产生的 RAM 基线（非吸收区 2f 残余），只能靠背景扣除去除，降噪 / 提采样率都压不掉。背景扣除可开关（`background_subtract`，默认 `True`）：设为 `False` 时保留原始 RAM 基线，**仅供诊断**原始基线，不应用于浓度反演或检测限结论。
 
 **失效判据（唯一）**：非吸收区 $2f/1f$ 泄漏 > 峰值的 30%（说明 1f 基线随扫描漂移）→ 自动退化为 2f/I0。
 
@@ -281,7 +281,7 @@ das      = -log(v_das / v_das_I0)                       # = αL
 
 ### 4.5 浓度反演与检测限
 
-- **反演**：`tdlas_invert` 用仿真灵敏度 $k$（2f/1f 峰高 ↔ 摩尔分数），仅弱吸收 $\alpha L\ll1$ 成立，闭环误差 <1%
+- **反演**：`tdlas_invert` 用灵敏度 $k$（= 归一化 2f 峰高 ÷ 摩尔分数）反演 $x=\text{peak}/k$。$k$ 必须来自**完整链路**（`tdlas_wms_instrument` 返回的 `sensitivity_k`，或 invert 内部跑完整链路重算）——解析版 `simulate()` 的灵敏度与完整链路 S2f/1f 差 ~6×，不可混用。仅弱吸收 $\alpha L\ll1$ 成立，闭环误差 <1%
 - **检测限**：`tdlas_detection_limit` 蒙特卡洛，由等效透过率噪声 $\sigma_\tau$ → NEC / LOD（默认 3σ）
 - **检测限扫描**：`tdlas_detection_limit_scan` 扫 LOD 随光程 $L$ / 参考浓度 $x$ 的网格——弱吸收下 LOD $\propto 1/L$（光程加倍、LOD 减半），且与 $x$ 基本无关；$\alpha L\gtrsim0.1$ 进入非线性区后 LOD 回升，据此选最优光程。
 
