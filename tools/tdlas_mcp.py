@@ -34,7 +34,8 @@ SERVER_INFO = {"name": "tdlas", "version": "0.2.0",
 OUT_DIR = _ROOT / "tmp" / "mcp_out"
 
 # 对话状态机：跨会话记住用户已确认的工况参数（存 JSON，MCP 重启/换会话仍保留）
-_SESSION_FILE = _ROOT / ".tdlas_session" / "memory" / "tdlas_session.json"
+# 存仓库根目录隐藏文件（中性命名，不暴露宿主工具/IDE）
+_SESSION_FILE = _ROOT / ".tdlas_session.json"
 
 
 def _load_sessions():
@@ -866,7 +867,7 @@ def t_session(action="view", session_id="default", **fields):
       view  — 查看当前会话状态（已确认参数 / 待确认 / 阶段）
       set   — 记录已确认的参数（fields 为键值，None 值跳过）
       reset — 清空该会话
-    持久化在 .tdlas_session.json，MCP 重启/换会话仍保留。
+    持久化在仓库根目录 .tdlas_session.json（隐藏文件，中性命名），MCP 重启/换会话仍保留。
     """
     sessions = _load_sessions()
     sess = sessions.get(session_id, {"confirmed": {}, "pending": [], "stage": "clarify"})

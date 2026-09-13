@@ -24,6 +24,7 @@ Hitran_Data/
 tmp/
 xsc_data/
 *.log
+.tdlas_session.json    # 会话状态（运行时数据，含仿真工况，不入库）
 
 # OS
 .DS_Store
