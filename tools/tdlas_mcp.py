@@ -31,7 +31,7 @@ import tdlas_sim as ts  # noqa: E402
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"protocolVersion": PROTOCOL_VERSION,
                "capabilities": {"tools": {}},
-               "serverInfo": {"name": "tdlas", "version": "0.2.0"}}
+               "serverInfo": {"name": "tdlas", "version": "0.1.0"}}
 OUT_DIR = _ROOT / "tmp" / "mcp_out"
 
 # 远端直链隐私：MCP 返回值（尤其 tools/call 的 log 字段）会被序列化发给远端客户端，

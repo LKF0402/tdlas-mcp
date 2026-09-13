@@ -5,6 +5,8 @@ description: TDLAS/WMS 光谱仿真 MCP 服务器。触发词：TDLAS、WMS、�
 
 # tdlas-mcp：TDLAS/WMS 仪器级仿真 MCP 服务器
 
+**版本 v0.1.0**
+
 通过 MCP 协议接入 AI 助手，以自然语言完成 TDLAS 实验仿真。对实验全链路逐级建模：DAQ 驱动电压 → 激光调谐 → HITRAN 气体吸收 → 光电探测 → ADC 量化 → 数字锁相 → 谐波提取与归一化。
 
 ## 触发条件
