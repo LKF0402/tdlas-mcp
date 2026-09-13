@@ -296,20 +296,25 @@ das      = -log(v_das / v_das_I0)                       # = αL
 
 | 模块 | 参数 | 默认值 | 说明 |
 |---|---|---|---|
-| DAQ | `fs` | 100 kHz | 采样率（不足时自动提升至 ≥8×fm） |
-| | `n_samples` | 100 000 | fs 提升时**同步放大**以保持总时间 |
+| DAQ | `fs` | 240 kHz | = 8×fm(30 kHz)；须为 fm 整数倍且 ≥8 点/周期，否则自动吸附 |
+| | `n_samples` | 120 000 | = fs×0.5 s（50 个扫描周期 @100 Hz）；fs 变化时同步放大以保持总时间 |
 | | `adc_bits` / `v_range` | 16 / ±10 V | USB-6211 规格 |
-| 扫描 | `amp_V` | 0.71 V | 扫描半宽 ≈1.5 cm⁻¹ |
+| 扫描 | `scan_span_cm` | 1.5 cm⁻¹ | 三角波扫描**波数半宽**；`amp_V = scan_span_cm/(η_VI·\|dν/dI\|)` |
 | | `freq_Hz` | 100 Hz | 三角波频率 |
-| | `offset_V` | 3.20 V | → I=76.8 mA → 2968.5 cm⁻¹ |
+| | `amp_V` / `offset_V` | **自动反算** | 由 `wn_center`+`scan_span_cm` 经电压—波数关系反算（一般无需手填；显式给则优先） |
 | 激光 | `eta_VI` | 24.0 mA/V | V→I 跨导 |
 | | `dnu_dI` | −0.088 cm⁻¹/mA | **负**（DFB 红移） |
 | | `d2nu_dI2` | 0 | 调谐二阶非线性 cm⁻¹/mA² |
 | | `am_i0`/`am_i2` | 0 / 0 | RAM 强度调制幅度（0=纯 FM） |
 | | `am_psi1`/`am_psi2` | 0 / 0 | AM 相对 FM 的相位差 rad |
-| | `wn_ref` / `i_ref` | 2964.7 / 120.0 | 参考点（wn_ref 会按 wn_center 自动对齐） |
+| | `wn_ref` / `i_ref` | 2964.7 / 120.0 | 激光**固定参考点**（不随 wn_center 变） |
 | | `i_th` / `eta_IP` | 30.0 mA / 0.15 mW/mA | 阈值电流 / I→P 斜率 |
-| 光路 | `throughput` | 0.90 | 光学总透过率 |
+| 工况 | `species` | CH4 | 待测气体（HITRAN 分子式，如 CH4 / H2O / CO2） |
+| | `wn_center` | 2968.5 cm⁻¹ | 目标吸收线中心（决定激光调谐到哪条线；`offset_V` 由此反算） |
+| | `T` / `P` | 296 K / 1.01325 atm | 温度 / 气压 |
+| | `x` | 1e-3 | 摩尔分数（= 1000 ppm） |
+| | `L_cm` | 50.0 cm | 有效光程（气室；多通池 ≈ 增大 L） |
+| 光路 | `throughput` | 0.90 | 光学总透过率（窗片/镜片/光纤/连接器**统一折成一个数**）；有效光程见上 `L_cm` |
 | PD | `resp` / `gain` | 0.9 A/W / 1e3 V/A | InGaAs / 跨阻 |
 | | `bw` | 1 MHz | 带宽 |
 | | `rin` / `drift_frac` / `flicker_frac` | **0 / 0 / 0** | 噪声默认全关 |
@@ -317,6 +322,10 @@ das      = -log(v_das / v_das_I0)                       # = αL
 | | `m_opt` | **"auto"** | 自适应调制深度 |
 | | `lockin_avg` / `lockin_stages` | 1 / 2 | 低通参数 |
 | | `trim_frac` | 0.12 | 剔除转折点比例 |
+
+> **电压是波数的从变量**：`scan_span_cm`（用户给的波数半宽）与 `wn_center`（目标线）才是自然坐标；
+> `amp_V`、`offset_V` 由它们的电压—波数关系（`V→I→ν`）反算，**不写死**。`wn_center` 不填则按上表默认 2968.5；
+> 若选了不在此 DFB 调谐范围内的线，反算出的 `offset_V` 会越出驱动器 0–5 V 范围 → 仿真直接报错提示换激光参数。
 
 ---
 

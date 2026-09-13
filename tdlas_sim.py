@@ -457,10 +457,11 @@ DAQ_DEFAULTS = {
     "v_range": 10.0,         # ADC 输入量程 ±V（USB-6211：±10 V）
 }
 SCAN_DEFAULTS = {
-    "amp_V": 0.71,           # 三角波幅值 V → 扫描半宽 ≈ amp_V × |η_VI·dν/dI| ≈ 1.5 cm⁻¹
-    "freq_Hz": 100.0,        # 三角波频率 Hz
-    "offset_V": 3.20,        # 三角波偏置 V → I=76.8 mA → 2968.5 cm⁻¹（对齐 CH4 目标线）
-    "phase_deg": 0.0,        # 起始相位°（三角波中心对称、先上升后下降）
+    "scan_span_cm": 1.5,     # 三角波扫描的波数**半宽**（cm⁻¹）；amp_V = scan_span_cm/(η_VI·|dν/dI|)
+    "freq_Hz": 100.0,        # 三角波频率 Hz（= 扫描速率）
+    "phase_deg": 0.0,        # 起始相位°（中心对称、先上升后下降）
+    # amp_V / offset_V 不写死：由 wn_center + scan_span_cm 经电压—波数关系反算（见 _resolve_scan）；
+    # 用户显式给出 amp_V / offset_V 时尊重用户、不反算。
 }
 LASER_DEFAULTS = {
     "eta_VI": 24.0,          # V→I 跨导 mA/V（驱动器线性估算：Vop 5 V / Iop 120 mA）
@@ -478,7 +479,9 @@ LASER_DEFAULTS = {
     "am_psi1": 0.0,          # AM 相对 FM 的相位差（rad）
     "am_psi2": 0.0,
 }
-OPTICS_DEFAULTS = {"throughput": 0.90}   # 光学元件总透过率（窗片/镜片）
+OPTICS_DEFAULTS = {"throughput": 0.90}   # 光学元件总透过率（窗片/镜片/光纤/连接器，统一折成一个数）
+# 说明：throughput 已将光路中所有透过率（镜片反射/镀膜/窗片/光纤耦合）折叠成单一标量；
+# 有效光程 L（气体吸收路径）是**独立参数**，见 GAS_DEFAULTS["L_cm"]（多通池≈增大 L、并相应调 throughput）。
 PD_DEFAULTS = {
     "resp": 0.9,             # 响应度 A/W（InGaAs）
     "gain": 1e3,             # 跨阻增益 V/A（适配 mW 光功率与 ±10 V 量程）
@@ -500,7 +503,17 @@ MOD_DEFAULTS = {
     "lockin_avg": 1,         # 锁相滑动平均的调制周期数（>1 会模糊线形且不降残留）
     "lockin_stages": 2,      # 低通级联级数：2 级把残留从 4.1% 降到 1.6%（再高收益小）
     "trim_frac": 0.12,       # 剔除扫描两端比例：三角波转折点导数不连续，
-                             # 其高频谐波会泄漏进 2f，必须丢弃（WMS 标准做法）
+                            # 其高频谐波会泄漏进 2f，必须丢弃（WMS 标准做法）
+}
+
+# 工况（气体 / 气室 / 环境）默认参数：用户最常改的就是这些，集中于此方便统一修改
+GAS_DEFAULTS = {
+    "species": "CH4",        # 待测气体（HITRAN 分子式，如 CH4 / H2O / CO2）
+    "wn_center": 2968.5,     # 目标吸收线中心波数 cm⁻¹（决定激光调谐到哪条线）
+    "T": 296.0,              # 温度 K
+    "P": 1.01325,            # 气压 atm（标准大气压 ≈ 1.01325）
+    "x": 1e-3,               # 摩尔分数（= 1000 ppm）
+    "L_cm": 50.0,            # 有效光程 cm（气室光程；多通池 ≈ 几十~几百 cm，等效增大 L）
 }
 
 
@@ -611,6 +624,9 @@ def adaptive_modulation_index(nu_grid, alpha_pure, hwhm, cfg, t, v_scan, v_mod_s
     ms, pk = ms[o], pk[o]
 
     pmax = float(pk.max())
+    if pmax <= 0:
+        raise ValueError("2f 峰值全为 0（扫描区间激光无有效输出）：请检查 wn_center 与激光 "
+                         "wn_ref/dν/dI 是否匹配（可能选了不在此 DFB 调谐范围内的线）。")
     ok = pk >= tol * pmax
     m_best = float(ms[ok][np.argmin(ms[ok])])
 
@@ -672,6 +688,35 @@ def voltage_to_laser(v, eta_VI=24.0, dnu_dI=-0.088, wn_ref=2964.7, i_ref=120.0,
     return i, nu, p
 
 
+def _resolve_scan(cfg, wn_center, user_keys):
+    """由「目标波数 + 扫描半宽」经电压—波数关系反算三角波幅值/偏置。
+
+    物理量级关系：电压→电流→波数是线性（或二阶）映射，而**波数才是用户的自然坐标**，
+    电压是其从变量。故 amp_V / offset_V 不写死，而由 wn_center + scan_span_cm 反算：
+      · amp_V    = scan_span_cm / |η_VI·dν/dI|   （半宽 → 电压幅值）
+      · offset_V 解 wn_center = wn_ref + (i−i_ref)·dν/dI + ½(i−i_ref)²·d²ν/dI²，再 V=(i+i_ref)/η_VI
+    若用户显式给了 amp_V / offset_V（在 user_keys 中），则尊重用户、不反算。
+    """
+    eta_VI = float(cfg["eta_VI"]); dnu_dI = float(cfg["dnu_dI"])
+    d2 = float(cfg.get("d2nu_dI2", 0.0)); i_ref = float(cfg["i_ref"]); wn_ref = float(cfg["wn_ref"])
+    dnu_dV = abs(eta_VI * dnu_dI)
+
+    if "amp_V" not in user_keys:
+        cfg["amp_V"] = float(cfg["scan_span_cm"]) / dnu_dV if dnu_dV > 0 else 0.0
+
+    if "offset_V" not in user_keys:
+        c = wn_ref - float(wn_center)
+        if abs(d2) < 1e-15:
+            di = -c / dnu_dI if abs(dnu_dI) > 1e-15 else 0.0
+        else:
+            # 0.5·d2·di² + dν/dI·di + (wn_ref − wn_center) = 0
+            disc = max(dnu_dI * dnu_dI - 2.0 * d2 * c, 0.0)
+            r1 = (-dnu_dI + np.sqrt(disc)) / d2
+            r2 = (-dnu_dI - np.sqrt(disc)) / d2
+            di = r1 if abs(r1) <= abs(r2) else r2     # 取离 0 近的根（更合理驱动电流）
+        cfg["offset_V"] = (di + i_ref) / eta_VI if eta_VI > 0 else 0.0
+
+
 def pink_noise(n, fs, rng, f_lo=1.0):
     """生成 1/f（粉红）噪声序列：频域给白噪声加权 1/sqrt(f)，再逆变换。
 
@@ -708,8 +753,9 @@ def pd_lowpass(v, bw_Hz, fs):
     return _sg.lfilter([alpha], [1.0, -(1.0 - alpha)], np.asarray(v, dtype=float))
 
 
-def simulate_das_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
-                            x=1e-3, L_cm=50.0, edge="rising", fit_order=3,
+def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAULTS["wn_center"],
+                            T=GAS_DEFAULTS["T"], P=GAS_DEFAULTS["P"], x=GAS_DEFAULTS["x"],
+                            L_cm=GAS_DEFAULTS["L_cm"], edge="rising", fit_order=3,
                             fit_frac=0.3, seed=None, **kw):
     """完整仪器链路 DAS 仿真：DAQ 电压 → 激光 → 光路 → PD → ADC → 基线扣除。
 
@@ -728,14 +774,16 @@ def simulate_das_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
                 nu_das, das, das_full, baseline, meta
     """
     cfg = {**DAQ_DEFAULTS, **SCAN_DEFAULTS, **LASER_DEFAULTS,
-           **OPTICS_DEFAULTS, **PD_DEFAULTS}
+           **OPTICS_DEFAULTS, **PD_DEFAULTS, **GAS_DEFAULTS}
+    user_keys = set(kw)
     cfg.update({k: v for k, v in kw.items() if v is not None})
-    # ★ 同 WMS：让激光波数轴中心落在 wn_center，否则与吸收谱错位
-    if kw.get("wn_ref") is None:
-        i_mid = float(cfg["eta_VI"]) * float(cfg["offset_V"])
-        _di = i_mid - float(cfg["i_ref"])
-        cfg["wn_ref"] = (float(wn_center) - _di * float(cfg["dnu_dI"])
-                         - 0.5 * _di ** 2 * float(cfg.get("d2nu_dI2", 0.0)))
+    # 显式位置参数覆盖默认（不传则用 GAS_DEFAULTS）
+    cfg["species"], cfg["wn_center"] = species, wn_center
+    cfg["T"], cfg["P"], cfg["x"], cfg["L_cm"] = T, P, x, L_cm
+    species = cfg["species"]; wn_center = cfg["wn_center"]
+    T, P, x, L_cm = cfg["T"], cfg["P"], cfg["x"], cfg["L_cm"]
+    # 由 wn_center + scan_span_cm 反算 amp_V / offset_V（电压是波数的从变量）
+    _resolve_scan(cfg, wn_center, user_keys)
 
     fs = float(cfg["fs"])
     n_samples = int(cfg["n_samples"])
@@ -749,9 +797,13 @@ def simulate_das_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     i_laser, nu_laser, p_laser = voltage_to_laser(
         v_drive, cfg["eta_VI"], cfg["dnu_dI"], cfg["wn_ref"], cfg["i_ref"],
         cfg["i_th"], cfg["eta_IP"], cfg.get("d2nu_dI2", 0.0))
+    if float(np.max(p_laser)) <= 0.0:
+        raise ValueError(f"扫描区间内激光功率≤0：offset_V={cfg['offset_V']:.3g} V 可能越出驱动器 0–5 V 范围，"
+                         f"或 wn_center 与激光 wn_ref/dν/dI 不匹配（选了不在此 DFB 调谐范围内的线）。"
+                         f"请改用对应激光器参数（wn_ref/dν/dI/eta_VI）或手填 offset_V。")
 
     # ③ 光路：光学损耗 + 气体吸收
-    span = float(cfg["amp_V"]) * abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
+    span = float(cfg["scan_span_cm"])
     nu_grid, alpha_pure, info = th.absorption(
         species, wn_center - span - 0.2, wn_center + span + 0.2, T=T, P=P,
         step=min(5e-4, span / 500.0), wingHW=max(10.0, 5.0 * span))
@@ -808,6 +860,10 @@ def simulate_das_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
 
     # 主动检查：吸收强弱、ADC 饱和、动态范围、噪声量级
     warnings = []
+    if not (0.0 <= cfg["offset_V"] <= 5.0):
+        warnings.append(f"算得 offset_V={cfg['offset_V']:.3g} V 超出驱动器典型 0–5 V 范围："
+                        f"请确认 wn_center 与该激光 wn_ref/dν/dI 匹配（可能选了不在此激光调谐范围内的线）；"
+                        f"必要时手填 offset_V 或改 wn_ref")
     aL_peak = float(alpha.max()) * float(L_cm)
     if aL_peak > 0.1:
         warnings.append(f"αL≈{aL_peak:.3g} 偏大（>0.1）：DAS 进入非线性区、峰形被压低，"
@@ -880,8 +936,9 @@ def plot_das_instrument(r, out_png, n_show_periods=2):
     return out_png
 
 
-def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
-                            x=1e-3, L_cm=50.0, seed=None, **kw):
+def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAULTS["wn_center"],
+                            T=GAS_DEFAULTS["T"], P=GAS_DEFAULTS["P"], x=GAS_DEFAULTS["x"],
+                            L_cm=GAS_DEFAULTS["L_cm"], seed=None, **kw):
     """WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相。
 
     与 DAS 的差别：驱动电压叠加**高频正弦调制** fm，探测器信号被编码到 fm 及其谐波，
@@ -894,17 +951,22 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
                 v_adc, S1f, S2f, S2f1f, meta；另有全局序列供局部放大查看。
     """
     cfg = {**DAQ_DEFAULTS, **SCAN_DEFAULTS, **MOD_DEFAULTS, **LASER_DEFAULTS,
-           **OPTICS_DEFAULTS, **PD_DEFAULTS}
+           **OPTICS_DEFAULTS, **PD_DEFAULTS, **GAS_DEFAULTS}
+    user_keys = set(kw)
     cfg.update({k: v for k, v in kw.items() if v is not None})
-    # ★ 关键：让激光波数轴的中心落在 wn_center。否则吸收谱算在 wn_center、
-    #   激光却在 wn_ref 附近 → 两者错位，锁相输出全是噪声/伪影（严重假信号）。
-    if kw.get("wn_ref") is None:
-        i_mid = float(cfg["eta_VI"]) * float(cfg["offset_V"])
-        _di = i_mid - float(cfg["i_ref"])
-        cfg["wn_ref"] = (float(wn_center) - _di * float(cfg["dnu_dI"])
-                         - 0.5 * _di ** 2 * float(cfg.get("d2nu_dI2", 0.0)))
+    # 显式位置参数覆盖默认（不传则用 GAS_DEFAULTS）
+    cfg["species"], cfg["wn_center"] = species, wn_center
+    cfg["T"], cfg["P"], cfg["x"], cfg["L_cm"] = T, P, x, L_cm
+    species = cfg["species"]; wn_center = cfg["wn_center"]; T = cfg["T"]
+    P = cfg["P"]; x = cfg["x"]; L_cm = cfg["L_cm"]
+    # 由 wn_center + scan_span_cm 反算 amp_V / offset_V（电压是波数的从变量）
+    _resolve_scan(cfg, wn_center, user_keys)
 
     warnings = []
+    if not (0.0 <= cfg["offset_V"] <= 5.0):
+        warnings.append(f"算得 offset_V={cfg['offset_V']:.3g} V 超出驱动器典型 0–5 V 范围："
+                        f"请确认 wn_center 与该激光 wn_ref/dν/dI 匹配（可能选了不在此激光调谐范围内的线）；"
+                        f"必要时手填 offset_V 或改 wn_ref")
     fm = float(cfg["mod_freq_Hz"])
     fs = float(cfg["fs"])
     # ★ 数字锁相要求采样率是调制频率的**整数倍**，且每调制周期 ≥8 点。
@@ -938,7 +1000,7 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     v_scan = daq_triangle(t, cfg["amp_V"], fscan, cfg["phase_deg"], cfg["offset_V"])
     v_mod_sig = np.cos(2 * np.pi * fm * t + np.deg2rad(float(cfg["mod_phase_deg"])))
 
-    span_scan = float(cfg["amp_V"]) * abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
+    span_scan = float(cfg["scan_span_cm"])
     nu_grid, alpha_pure, info = th.absorption(
         species, wn_center - span_scan - 0.3, wn_center + span_scan + 0.3, T=T, P=P,
         step=min(2e-4, span_scan / 2000.0), wingHW=max(10.0, 5.0 * span_scan))
@@ -973,6 +1035,10 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
     i_laser, nu_laser, p_laser = voltage_to_laser(
         v_drive, cfg["eta_VI"], cfg["dnu_dI"], cfg["wn_ref"], cfg["i_ref"],
         cfg["i_th"], cfg["eta_IP"], cfg.get("d2nu_dI2", 0.0))
+    if float(np.max(p_laser)) <= 0.0:
+        raise ValueError(f"扫描区间内激光功率≤0：offset_V={cfg['offset_V']:.3g} V 可能越出驱动器 0–5 V 范围，"
+                         f"或 wn_center 与激光 wn_ref/dν/dI 不匹配（选了不在此 DFB 调谐范围内的线）。"
+                         f"请改用对应激光器参数（wn_ref/dν/dI/eta_VI）或手填 offset_V。")
 
     # 1/f 噪声：慢漂移（正弦）+ 粉红噪声（1/f RIN）。WMS 锁相是高通、天然抑制；
     # DAS 直接测 DC 光强、受害于它——这是 WMS 通常强于 DAS 的物理来源。

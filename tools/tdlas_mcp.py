@@ -72,8 +72,11 @@ EDGE_TECH_NOTE = (
 # → ③ 引导用户现场测量（如"驱动电压变化 ΔV → 波数变化 Δν"）
 # → ④ 保留内置默认值并在返回中明确标注（assumptions）
 PARAM_ACQ_GUIDE = {
-    "amp_V": ("三角波幅值", "V", "决定扫描波数半宽 Δν = amp_V·|η_VI·dν/dI|"),
-    "offset_V": ("三角波偏置", "V", "决定扫描中心波数（即落在哪条吸收线上）"),
+    "species": ("待测气体", "—", "HITRAN 分子式（CH4 / H2O / CO2 / CO / C2H2 …）"),
+    "wn_center": ("目标波数", "cm⁻¹", "要测的吸收线中心；决定激光调谐到哪条线"),
+    "scan_span_cm": ("三角波扫描半宽", "cm⁻¹", "扫描覆盖的波数半宽；amp_V = scan_span_cm/(η_VI·|dν/dI|)，不填用默认 1.5"),
+    "amp_V": ("三角波幅值", "V", "**通常无需手填**：由 wn_center + scan_span_cm 自动反算；仅需固定电压时覆盖"),
+    "offset_V": ("三角波偏置", "V", "**通常无需手填**：由 wn_center 经电压—波数关系自动反算"),
     "freq_Hz": ("三角波频率", "Hz", "扫描速率；与采样率共同决定每周期采样点数"),
     "phase_deg": ("三角波相位", "°", "起始相位（默认中心对称、先上升后下降）"),
     "eta_VI": ("驱动器跨导 η_VI", "mA/V", "电压—电流转换，取决于驱动器电路"),
@@ -513,7 +516,7 @@ def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
     return out
 
 
-_INSTR_KEYS = ("amp_V", "freq_Hz", "offset_V", "phase_deg", "eta_VI", "dnu_dI",
+_INSTR_KEYS = ("scan_span_cm", "amp_V", "freq_Hz", "offset_V", "phase_deg", "eta_VI", "dnu_dI",
                "wn_ref", "i_ref", "i_th", "eta_IP", "fs", "n_samples", "adc_bits",
                "v_range", "throughput", "resp", "gain", "bw", "rin")
 _SCENE_DEFAULTS = {"T": 296.0, "P": 1.01325, "x": 1e-3, "L_cm": 50.0,
@@ -870,9 +873,10 @@ TOOLS = [
                          "P": {"type": "number", "description": "气压 atm，默认 1.01325"},
                          "x": {"type": "number", "description": "摩尔分数，默认 1e-3（1000 ppm）"},
                          "L_cm": {"type": "number", "description": "光程 cm，默认 50"},
-                         "amp_V": {"type": "number", "description": "三角波幅值 V，默认 0.71（→±1.5 cm⁻¹）"},
+                         "scan_span_cm": {"type": "number", "description": "三角波扫描半宽 cm⁻¹，默认 1.5（amp_V 由它自动反算，一般无需手填）"},
+                         "amp_V": {"type": "number", "description": "三角波幅值 V（**通常无需手填**：由 wn_center+scan_span_cm 自动反算；需固定电压时覆盖）"},
                          "freq_Hz": {"type": "number", "description": "三角波频率 Hz，默认 100"},
-                         "offset_V": {"type": "number", "description": "三角波偏置 V，默认 3.20"},
+                         "offset_V": {"type": "number", "description": "三角波偏置 V（**通常无需手填**：由 wn_center 自动反算）"},
                          "phase_deg": {"type": "number", "description": "三角波相位 °，默认 0"},
                          "eta_VI": {"type": "number", "description": "驱动器跨导 mA/V，默认 24"},
                          "dnu_dI": {"type": "number", "description": "激光器调谐系数 cm⁻¹/mA，默认 −0.088"},
@@ -913,6 +917,7 @@ TOOLS = [
                          "T": {"type": "number"}, "P": {"type": "number"},
                          "x": {"type": "number", "description": "摩尔分数，默认 1e-3"},
                          "L_cm": {"type": "number", "description": "光程 cm，默认 50"},
+                         "scan_span_cm": {"type": "number", "description": "三角波扫描半宽 cm⁻¹，默认 1.5（amp_V 由它自动反算，一般无需手填）"},
                          "mod_freq_Hz": {"type": "number", "description": "正弦调制频率 Hz，默认 30000"},
                          "mod_amp_V": {"type": "number",
                                        "description": "调制幅值 V；缺省=按 m≈2.2 自动优化"},
@@ -926,7 +931,7 @@ TOOLS = [
                                        "description": "剔除扫描两端比例，默认 0.12（三角波转折点高频谐波会泄漏进 2f）"},
                          "edge": {"type": "string",
                                   "description": "扫描方向 rising/falling/both，默认 rising（避免往返重叠）"},
-                         "amp_V": {"type": "number", "description": "三角波幅值 V"},
+                         "amp_V": {"type": "number", "description": "三角波幅值 V（**通常无需手填**：由 wn_center+scan_span_cm 自动反算）"},
                          "freq_Hz": {"type": "number", "description": "三角波频率 Hz，默认 100"},
                          "offset_V": {"type": "number"}, "phase_deg": {"type": "number"},
                          "eta_VI": {"type": "number"}, "dnu_dI": {"type": "number"},
