@@ -135,7 +135,7 @@ P   = max(eta_IP * (i - i_th), 0)     # mW，低于阈值无输出
 
 这导致一个**重要的方向耦合**（见 §7 陷阱）：
 
-$$\text{波数递增} \iff \text{电流递减} \iff \text{光强递减}$$
+> **波数递增 ⟺ 电流递减 ⟺ 光强递减**（三者由 $d\nu/dI<0$ 与 $P\propto I$ 耦合）
 
 ### 3.3 光路与吸收
 
@@ -166,7 +166,7 @@ v_pd = i_pd * gain             # 跨阻放大 → V
 
 **1/f 噪声**（可选，默认关）：
 
-- **慢漂移**：$P \leftarrow P\,(1 + d\cdot\sin(2\pi\cdot 1\,{\rm Hz}\cdot t))$，$d=\texttt{drift\_frac}$
+- **慢漂移**：$P \leftarrow P\,(1 + d\cdot\sin(2\pi\cdot 1\,\mathrm{Hz}\cdot t))$，其中 $d$ 即参数 `drift_frac`
 - **粉红噪声**（`pink_noise`）：频域给白噪声加权 $1/\sqrt{f}$ 再逆 FFT → 功率谱 $\propto 1/f$
 
 > **默认全部噪声关闭**（理想仿真）。MCP 会主动询问用户是否注入（见 `noise_and_interaction`）。
@@ -215,7 +215,7 @@ $$S_{nf} = \sqrt{X^2 + Y^2}$$
 
 **选择策略「98% 幅值的最小 m」**：
 
-$$m^\* = \min\{\,m \mid \mathrm{peak}(m) \ge 0.98\cdot \mathrm{peak}_{\max}\}$$
+$$m^{*} = \min\{\,m \mid \mathrm{peak}(m) \ge 0.98\cdot \mathrm{peak}_{\max}\}$$
 
 理由：2f 峰值附近是**平顶**，牺牲 ≤2% 灵敏度可换取更小的 $m$ → 更好的 2f 轮廓、更低过调制风险、更小邻线干扰。
 
