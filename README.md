@@ -71,6 +71,9 @@ python tools/tdlas_mcp.py --selftest   # MCP 服务器自检
 
 接入 AI 助手：把 `mcp.config.example.json` 的 `args` 路径改成你的实际路径，加入 MCP 客户端配置。
 
+> ⚡ **强烈建议同时安装 SKILL.md**：把仓库根目录的 [`SKILL.md`](./SKILL.md) 作为独立 Skill 安装到你的 AI Agent（如 Claude Code / CodeBuddy / 豆包）。
+> 仅靠 MCP 工具描述，AI 只能知道"有哪些工具"；装上 SKILL.md 后 AI 还能读到**主动交互协议、参数索取优先级、澄清流程、出图规范、物理常识**，输出质量显著提升（不会再选错工具、不会瞎编参数）。
+
 ## HTTP 模式（远程直链）
 
 默认是 stdio（本机 MCP 客户端用）。若要让**远端** MCP 客户端通过 URL 直链调用，加 `--http` 起一个 HTTP 服务：
@@ -114,6 +117,10 @@ HTTPS_PROXY=http://127.0.0.1:7892 python tools/remote_link.py
 
 - 自包含 HITRAN 取数（`tools/tdlas_hitran.py`，HAPI 1.x，免 key，首次运行自动下载线表缓存到 `Hitran_Data/`）
 - **不依赖 Hitran MCP server**，可独立部署运行
+
+## 说明
+
+- **无多次扫描算术平均功能**：多次扫描取平均等效于将白噪声幅值除以 √N，直接把噪声参数（如 `sigma_tau`、`rin`、`flicker_frac`）按 1/√N 调小即可，无需额外实现平均逻辑。
 
 ## 文档
 
