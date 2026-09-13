@@ -43,6 +43,12 @@
 - 工况自适应：`SPECIES_PROFILES` 按物种推荐波段/浓度/光程
 - 器件型号 → AI 联网检索官方 datasheet 提取参数（按器件类别列明要查项）
 
+### 设备管理（新增）
+- `tdlas_device` 工具：命名保存/查看/删除激光器·探测器·采集卡·光学四类设备，打包整机配置 `save_setup`，设默认设备 `set_default`
+- 仿真工具（`tdlas_wms_instrument` / `tdlas_das_instrument`）支持 `setup=`（整机）/`laser=`/`pd=`/`daq=`/`optics=`（单设备）/ 默认设备 三级引用
+- 参数解析优先级：显式参数 > 单设备 > setup 整机 > 默认设备；被设备库覆盖的硬件参数不再列入 `assumptions`
+- 设备库持久化于 `.tdlas_devices.json`（已 gitignore），与 `tdlas_session`（记工况）互补
+
 ### 绘图
 - 统一 3×2 六子图：驱动电压 / PD 原始 / DAS+理论 / 1f / 2f / 归一化
 - 线型约定：实线=实测、虚线=理论、点线=剔除区（图例必标）
@@ -50,4 +56,4 @@
 
 ### 工程
 - 自包含 HITRAN 取数（HAPI 1.x，免 key），不依赖 Hitran MCP
-- MCP 服务器 11 工具；配置示例 + README + SKILL 文档
+- MCP 服务器 12 工具（新增 `tdlas_device`）；配置示例 + README + SKILL 文档

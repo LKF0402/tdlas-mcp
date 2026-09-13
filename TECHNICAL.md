@@ -40,7 +40,7 @@ tools/tdlas_hitran.py   HITRAN 取数层（HAPI 1.x 封装，自包含、免 key
         ↓
 tdlas_sim.py            仿真核心（链路建模、锁相、算法、绘图）
         ↓
-tools/tdlas_mcp.py      MCP 服务器（11 工具，stdio JSON-RPC）
+tools/tdlas_mcp.py      MCP 服务器（12 工具，stdio JSON-RPC）
 ```
 
 **设计纪律**：三层严格分离。取数层不依赖 MCP；仿真核心不依赖 MCP 协议；MCP 层只做参数编排与结果封装。
@@ -292,6 +292,17 @@ das      = -log(v_das / v_das_I0)                       # = αL
 波数轴对齐 · DAS-理论一致 · αL 弱吸收区 · 是否孤立线 · 调制系数 m · 采样率 · ADC 动态范围 · 归一化方法 · 噪声
 
 `overall = pass/warn/fail`；fail 时不得下结论。
+
+### 4.7 设备库引用（MCP 层）
+
+仪器基本固定时，可在 MCP 层用 `tdlas_device` 把激光器/探测器/DAQ/光学四类设备命名保存，仿真时直接引用，**省去每次手填硬件参数**：
+
+- 保存：`tdlas_device action=save device_type=laser name="我的1653nmDFB" eta_VI=24 dnu_dI=-0.088 wn_ref=2964.7 …`
+- 整机：`tdlas_device action=save_setup name="实验室A套" laser=… pd=… daq=… optics=…`
+- 默认：`tdlas_device action=set_default device_type=laser name=…`（不指定设备时自动用默认）
+- 引用：`tdlas_wms_instrument` / `tdlas_das_instrument` 支持 `setup=`（整机）、`laser=`/`pd=`/`daq=`/`optics=`（单设备）
+
+**参数解析优先级**：本次显式参数 > 单设备引用 > setup 整机 > 默认设备。设备库提供的硬件参数在返回里**不再列入 `assumptions`**（默认可信、无需重复确认）。设备库持久化于仓库根 `.tdlas_devices.json`（已 gitignore），MCP 重启/换会话仍保留，与 `tdlas_session`（记工况 T/P/x/L）互补。
 
 ---
 

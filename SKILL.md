@@ -24,7 +24,7 @@ description: TDLAS/WMS spectroscopic simulation MCP server. Use when the user me
 
 > HITRAN 取数仅用 HAPI 1.x（官方接口，免 key）；**不依赖 Hitran MCP server**。
 
-## 工具列表（11 个）
+## 工具列表（12 个）
 
 | 工具 | 说明 |
 |------|------|
@@ -34,6 +34,7 @@ description: TDLAS/WMS spectroscopic simulation MCP server. Use when the user me
 | `tdlas_wms_instrument` | **WMS 仪器链路**（核心）：扫描+调制 → 锁相 → 1f/2f/归一化（含背景扣除） |
 | `tdlas_review` | 二次审核：自动校验报告（9 项，不画图） |
 | `tdlas_session` | 对话状态机：跨会话记住已确认参数 |
+| `tdlas_device` | 设备库管理：命名保存/引用固定仪器（setup=整机 / laser=pd=daq=optics=单设备 / 默认设备） |
 | `tdlas_guide` | AI 主动指导协议（SOP/优先级/术语表/参数指南/器件检索） |
 | `tdlas_invert` | 免标定浓度反演：2f/1f 峰高 → 摩尔分数 |
 | `tdlas_detection_limit` | 检测限：噪声 → NEC / LOD |
@@ -55,6 +56,8 @@ description: TDLAS/WMS spectroscopic simulation MCP server. Use when the user me
 参数索取优先级：① 实测值 → ② 器件型号（AI 检索规格书）→ ③ 现场标定 → ④ 默认值并显式标注。
 
 **器件型号 → 联网检索规格书**：用户给出器件型号（如 `NI USB-6211`、`Thorlabs PDA10D2`、`ILX Lightwave LDX-3220`）时，AI **必须联网搜索该型号官方 datasheet** 提取参数（按器件类别查：DAQ→采样率/分辨率/量程；激光器驱动→V→I 跨导/带宽/噪声；DFB→中心波数/调谐系数 dν/dI/阈值电流；PD→响应度/带宽/跨阻增益/NEP），填进仿真并在 `assumptions` 标注「来源：<型号> datasheet」。查不到或无网络则退回现场标定/默认值，**不得编造规格书数值**。
+
+**设备库优先引用**：用户若已用 `tdlas_device` 保存过仪器（如 `laser="我的1653nmDFB"`、`setup="实验室A套"`），仿真工具（`tdlas_wms_instrument` / `tdlas_das_instrument`）应直接传对应引用名，**不再逐项索要硬件参数**。引用解析优先级：本次显式参数 > 单设备引用 > setup 整机 > 默认设备；被设备库覆盖的硬件参数不再列入 `assumptions`（无需重复确认）。
 
 ### 3. 二次审核（硬约束）
 
