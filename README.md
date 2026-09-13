@@ -38,8 +38,8 @@ python tools/tdlas_mcp.py --selftest
 > 💡 **一键配置**：将以下内容复制粘贴给你的 AI 助手，即可自动完成 MCP 接入：
 >
 > ```
-> 请帮我配置 tdlas-mcp MCP 服务器，本地路径 D:/software/skills/tdlas-mcp，
-> Python 解释器路径 C:/Users/16565/AppData/Local/Programs/Python/Python310/python.exe，
+> 请帮我配置 tdlas-mcp MCP 服务器，本地路径 <你的 tdlas-mcp 安装路径>，
+> Python 解释器路径 <你的 python.exe 路径>，
 > 入口文件 tools/tdlas_mcp.py。
 > ```
 >
