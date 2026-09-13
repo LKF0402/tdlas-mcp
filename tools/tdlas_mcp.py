@@ -56,6 +56,26 @@ def _get_session(session_id="default"):
     return _load_sessions().get(session_id,
                                 {"confirmed": {}, "pending": [], "stage": "clarify"})
 
+
+def _resolve_conditions(T, P, x, L_cm, session_id="default", x_default=1e-3, L_default=30.0):
+    """工况参数优先级：本次显式给 > 会话已确认 > 默认。
+
+    会话里存的是 T/P/x/L_cm（与 tdlas_wms_instrument 一致）。返回 (T, P, x, L_cm, assumed)；
+    assumed 为「既非本次显式给、也非会话确认、因此用了默认值」的键列表，供返回 assumptions 字段。
+    """
+    confirmed = _get_session(session_id).get("confirmed", {})
+    res, assumed = {}, []
+    for k, v, dflt in (("T", T, 296.0), ("P", P, 1.0), ("x", x, x_default), ("L_cm", L_cm, L_default)):
+        if v is not None:
+            res[k] = v
+        elif k in confirmed:
+            res[k] = confirmed[k]
+        else:
+            res[k] = dflt
+            assumed.append(k)
+    return res["T"], res["P"], res["x"], res["L_cm"], assumed
+
+
 # 技术知识：随工具返回，供 AI 向用户解释真实实验要点（而非只给数字）
 EDGE_TECH_NOTE = (
     "真实实验中三角波上升沿与下降沿常不重合，成因："
@@ -382,15 +402,17 @@ def _common(species, wn0, T, P, x, L, a, i0, i2, psi1_pi, psi2_pi, span):
 
 # ───────────────────────── 工具 ─────────────────────────
 
-def t_simulate(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
+def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
                a=0.10, i0=0.1671, i2=2.48e-3, psi1_pi=1.9356, psi2_pi=4.4138,
                span=0.8, n_scan=401, n_mod=96, sigma_tau=0.0, seed=None,
-               save_png=False):
+               save_png=False, session_id="default"):
     """DAS + 免标定 WMS 正向仿真：返回 1f/2f 峰高、DAS 最小透过率、线表信息。
 
-    wn0 为目标线中心（cm^-1）；x 为摩尔分数；L 为光程 cm；a 为调制深度 cm^-1。
-    sigma_tau 为等效透过率噪声（默认 0=理想无噪）。save_png=True 时同时出图。
+    wn0 为目标线中心（cm^-1）；x 为摩尔分数（默认 1e-3 = 1000 ppm，弱吸收）；L 为光程 cm；
+    a 为调制深度 cm^-1。sigma_tau 为等效透过率噪声（默认 0=理想无噪）。save_png=True 时出图。
+    T/P/x/L 未给出时按「会话已确认 > 默认」取值（复用 tdlas_session 已确认的工况）。
     """
+    T, P, x, L, assumed = _resolve_conditions(T, P, x, L, session_id, x_default=1e-3, L_default=30.0)
     i0, i2, p1, p2 = _common(species, wn0, T, P, x, L, a, i0, i2, psi1_pi, psi2_pi, span)
     with _quiet() as g:
         r = ts.simulate(species, wn0, float(T), float(P), float(x), float(L), float(a),
@@ -408,6 +430,7 @@ def t_simulate(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
            "wms_2f1f_peak": float(r["S2f1f"].max()),
            "n_lines_in_window": r["meta"]["n_lines_in_window"],
            "table": r["meta"]["table"],
+           "assumptions": assumed, "needs_confirm": bool(assumed),
            "log": g.getvalue().splitlines()}
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -418,15 +441,17 @@ def t_simulate(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
     return out
 
 
-def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=296.0, P=1.0, L=30.0,
-             a=0.10, x_ref=1e-3, i0=0.1671, i2=2.48e-3,
-             psi1_pi=1.9356, psi2_pi=4.4138, span=0.8):
+def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
+             a=0.10, x_ref=None, i0=0.1671, i2=2.48e-3,
+             psi1_pi=1.9356, psi2_pi=4.4138, span=0.8, session_id="default"):
     """免标定浓度反演：由测得的 2f/1f 峰高求摩尔分数。
 
     用参考浓度 x_ref 的仿真定出单位浓度灵敏度 k，再 x = peak_2f1f / k。
     **仅适用弱吸收（αL ≪ 1）**：吸收过强时 2f/1f 呈超线性，反演结果偏高。
     建议先用 tdlas_simulate 核验 alpha_peak × L；若 αL 超过约 0.05 需改用完整仿真迭代反演。
+    T/P/x_ref/L 未给出时按「会话已确认 > 默认」取值。
     """
+    T, P, x_ref, L, assumed = _resolve_conditions(T, P, x_ref, L, session_id, x_default=1e-3, L_default=30.0)
     i0, i2, p1, p2 = _common(species, wn0, T, P, x_ref, L, a, i0, i2, psi1_pi, psi2_pi, span)
     with _quiet() as g:
         k = ts.sensitivity_2f1f(species, float(wn0), float(T), float(P), float(L), float(a),
@@ -436,18 +461,21 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=296.0, P=1.0, L=30.0,
     return {"species": str(species).upper(), "mole_frac": float(x_est),
             "peak_2f1f_in": float(peak_2f1f), "sensitivity_k": float(k),
             "x_ref": float(x_ref), "T_K": float(T), "P_atm": float(P),
-            "path_cm": float(L), "log": g.getvalue().splitlines()}
+            "path_cm": float(L), "assumptions": assumed, "needs_confirm": bool(assumed),
+            "log": g.getvalue().splitlines()}
 
 
-def t_detection_limit(species="H2O", wn0=7185.596, T=296.0, P=1.0, L=30.0,
-                      a=0.10, sigma_tau=1e-5, x_true=1e-3, n_trials=30,
+def t_detection_limit(species="H2O", wn0=7185.596, T=None, P=None, L=None,
+                      a=0.10, sigma_tau=1e-5, x_true=None, n_trials=30,
                       n_sigma=3.0, seed=0, i0=0.1671, i2=2.48e-3,
-                      psi1_pi=1.9356, psi2_pi=4.4138, span=0.8):
+                      psi1_pi=1.9356, psi2_pi=4.4138, span=0.8, session_id="default"):
     """检测极限 LOD（最小可测摩尔分数）—— 蒙特卡洛。
 
     sigma_tau 为等效透过率噪声（RIN / 散粒 / 探测器 / 电路的综合，工程上由无吸收基线实测给出）。
     返回噪声等效浓度 NEC 与 LOD = n_sigma × NEC。
+    T/P/x_true/L 未给出时按「会话已确认 > 默认」取值。
     """
+    T, P, x_true, L, assumed = _resolve_conditions(T, P, x_true, L, session_id, x_default=1e-3, L_default=30.0)
     i0, i2, p1, p2 = _common(species, wn0, T, P, x_true, L, a, i0, i2, psi1_pi, psi2_pi, span)
     with _quiet() as g:
         dl = ts.detection_limit(species, float(wn0), float(T), float(P), float(L), float(a),
@@ -458,7 +486,8 @@ def t_detection_limit(species="H2O", wn0=7185.596, T=296.0, P=1.0, L=30.0,
             "path_cm": float(L), "sigma_tau": float(sigma_tau),
             "x_true": float(x_true), "NEC": float(dl["NEC"]), "LOD": float(dl["LOD"]),
             "n_sigma": float(n_sigma), "n_trials": int(dl["n_trials"]),
-            "sensitivity_k": float(dl["k"]), "log": g.getvalue().splitlines()}
+            "sensitivity_k": float(dl["k"]), "assumptions": assumed,
+            "needs_confirm": bool(assumed), "log": g.getvalue().splitlines()}
 
 
 def t_detection_limit_scan(species="CH4", wn0=2968.5, T=296.0, P=1.01325, a=0.10,
@@ -870,10 +899,11 @@ TOOLS = [
                      "properties": {
                          "species": {"type": "string", "description": "分子式，如 H2O / CO2 / CO"},
                          "wn0": {"type": "number", "description": "目标线中心 cm^-1"},
-                         "T": {"type": "number", "description": "温度 K，默认 296"},
-                         "P": {"type": "number", "description": "气压 atm，默认 1.01325"},
-                         "x": {"type": "number", "description": "摩尔分数 (0,1]，默认 0.1"},
-                         "L": {"type": "number", "description": "光程 cm，默认 30"},
+                         "T": {"type": "number", "description": "温度 K；缺省=会话已确认或 296"},
+                         "P": {"type": "number", "description": "气压 atm；缺省=会话已确认或 1.0"},
+                         "x": {"type": "number", "description": "摩尔分数 (0,1]；缺省=会话已确认或 1e-3（1000 ppm）"},
+                         "L": {"type": "number", "description": "光程 cm；缺省=会话已确认或 30"},
+                         "session_id": {"type": "string", "description": "会话标识，默认 default（复用 tdlas_session 已确认工况）"},
                          "a": {"type": "number", "description": "调制深度 cm^-1，默认 0.1"},
                          "i0": {"type": "number"}, "i2": {"type": "number"},
                          "psi1_pi": {"type": "number"}, "psi2_pi": {"type": "number"},
@@ -1054,7 +1084,8 @@ TOOLS = [
                          "species": {"type": "string"}, "wn0": {"type": "number"},
                          "T": {"type": "number"}, "P": {"type": "number"},
                          "L": {"type": "number"}, "a": {"type": "number"},
-                         "x_ref": {"type": "number", "description": "参考浓度，默认 1e-3"},
+                         "x_ref": {"type": "number", "description": "参考浓度；缺省=会话已确认或 1e-3"},
+                         "session_id": {"type": "string", "description": "会话标识，默认 default（复用已确认 T/P/x/L）"},
                          "i0": {"type": "number"}, "i2": {"type": "number"},
                          "psi1_pi": {"type": "number"}, "psi2_pi": {"type": "number"}},
                      "required": ["peak_2f1f", "species", "wn0"]}},
@@ -1066,9 +1097,10 @@ TOOLS = [
                          "T": {"type": "number"}, "P": {"type": "number"},
                          "L": {"type": "number"}, "a": {"type": "number"},
                          "sigma_tau": {"type": "number", "description": "等效透过率噪声，默认 1e-5"},
-                         "x_true": {"type": "number", "description": "用于统计的真值浓度，默认 1e-3"},
+                         "x_true": {"type": "number", "description": "用于统计的真值浓度；缺省=会话已确认或 1e-3"},
                          "n_trials": {"type": "integer", "description": "蒙特卡洛次数，默认 30"},
                          "n_sigma": {"type": "number", "description": "倍数，默认 3"},
+                         "session_id": {"type": "string", "description": "会话标识，默认 default（复用已确认 T/P/x/L）"},
                          "seed": {"type": "integer"}},
                      "required": ["species", "wn0"]}},
     {"name": "tdlas_detection_limit_scan",
