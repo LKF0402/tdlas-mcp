@@ -13,6 +13,14 @@
       "type": "stdio",
       "timeout": 60000,
       "disabled": false
+    },
+    "tdlas-http": {
+      "_comment": "HTTP/远程直链模式：先用 `python tools/tdlas_mcp.py --http --host 0.0.0.0 --port 8000 --token <密钥>` 起服务，再填下面 url",
+      "type": "http",
+      "url": "http://<host>:8000/mcp",
+      "headers": { "Authorization": "Bearer <密钥>" },
+      "timeout": 60000,
+      "disabled": true
     }
   }
 }

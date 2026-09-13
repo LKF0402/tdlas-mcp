@@ -1393,6 +1393,110 @@ def handle_request(req):
             "error": {"code": -32601, "message": f"未知方法：{method}"}}
 
 
+def _arg(name, default=""):
+    """读取 `--name value` 形式的命令行参数。"""
+    if name in sys.argv:
+        i = sys.argv.index(name)
+        if i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    return default
+
+
+def _run_http(host, port, token):
+    """HTTP 传输（MCP Streamable HTTP）：把同一套 handle_request 暴露为 URL。
+
+    远端 MCP 客户端直接填 http://<host>:<port>/mcp 即可直链，调用全部 12 个工具。
+    - POST /mcp  客户端→服务器 JSON-RPC（支持 application/json 或 text/event-stream）
+    - GET  /mcp  服务器→客户端推送通道（本工具服务器无主动推送，返回 405）
+    - 可选 --token 做 Bearer 鉴权（远程暴露强烈建议）
+    """
+    import uuid
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    SESSION_ID = uuid.uuid4().hex
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):  # 协议日志不污染 stdout
+            pass
+
+        def _cors(self):
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers",
+                              "Content-Type, Authorization, Mcp-Session-Id, Accept")
+            self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+
+        def _auth_ok(self):
+            if not token:
+                return True
+            a = self.headers.get("Authorization", "")
+            return a == f"Bearer {token}" or a == token
+
+        def _send(self, resp):
+            if resp is None:  # 通知：无响应体
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self._cors()
+                self.end_headers()
+                return
+            body = json.dumps(resp, ensure_ascii=False).encode("utf-8")
+            use_sse = "text/event-stream" in self.headers.get("Accept", "")
+            self.send_response(200)
+            self.send_header("Mcp-Session-Id", SESSION_ID)
+            self._cors()
+            if use_sse:
+                payload = b"data: " + body + b"\n\n"
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            else:
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self._cors()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self):
+            self.send_response(405)
+            self.send_header("Allow", "POST")
+            self._cors()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_POST(self):
+            if self.path not in ("/mcp", "/"):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if not self._auth_ok():
+                err = b'{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"unauthorized"}}'
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+                return
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                req = json.loads(self.rfile.read(n) or b"{}")
+            except Exception as e:
+                self._send({"jsonrpc": "2.0", "id": None,
+                            "error": {"code": -32700, "message": f"解析失败：{e}"}})
+                return
+            self._send(handle_request(req))
+
+    sys.stderr.write(f"[tdlas-mcp] HTTP 模式已启动：http://{host}:{port}/mcp\n")
+    ThreadingHTTPServer((host, port), _Handler).serve_forever()
+
+
 def main():
     # Windows 控制台默认 GBK：协议流必须强制 UTF-8，否则中文会破坏 JSON-RPC
     for _s in (sys.stdin, sys.stdout, sys.stderr):
@@ -1402,6 +1506,15 @@ def main():
             pass
     if "--selftest" in sys.argv:
         print(json.dumps(t_selftest(), ensure_ascii=False, indent=2))
+        return
+    if "--http" in sys.argv:
+        host = _arg("--host", "127.0.0.1")
+        port = int(_arg("--port", "8000"))
+        token = _arg("--token", "")
+        if host in ("0.0.0.0", "") and not token:
+            sys.stderr.write("[警告] 监听 0.0.0.0 且未设置 --token：任何能访问该端口的客户端都可调用仿真，"
+                             "远程暴露请务必加 --token。\n")
+        _run_http(host, port, token)
         return
     for line in sys.stdin:                            # stdio 协议循环
         line = line.strip()

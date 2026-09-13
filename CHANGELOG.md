@@ -57,3 +57,4 @@
 ### 工程
 - 自包含 HITRAN 取数（HAPI 1.x，免 key），不依赖 Hitran MCP
 - MCP 服务器 12 工具（新增 `tdlas_device`）；配置示例 + README + SKILL 文档
+- HTTP 传输（MCP Streamable HTTP）：`--http --host --port --token`，端点 `/mcp`，远端 URL 直链；默认仍 stdio，纯标准库零新增依赖

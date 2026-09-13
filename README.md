@@ -71,6 +71,27 @@ python tools/tdlas_mcp.py --selftest   # MCP 服务器自检
 
 接入 AI 助手：把 `mcp.config.example.json` 的 `args` 路径改成你的实际路径，加入 MCP 客户端配置。
 
+## HTTP 模式（远程直链）
+
+默认是 stdio（本机 MCP 客户端用）。若要让**远端** MCP 客户端通过 URL 直链调用，加 `--http` 起一个 HTTP 服务：
+
+```bash
+python tools/tdlas_mcp.py --http --host 0.0.0.0 --port 8000 --token <你的密钥>
+```
+
+- 端点固定为 `http://<host>:<port>/mcp`，远端客户端填这个 URL 即可（MCP Streamable HTTP，兼容 `application/json` 与 `text/event-stream`）
+- `--host 0.0.0.0` 监听所有网卡（暴露到局域网/公网）；仅本机测试用 `127.0.0.1`
+- `--token` 为 Bearer 鉴权，**远程暴露强烈建议加上**；不设则任何人可调用
+- 仍支持 `--selftest`；不加 `--http` 时行为与原来完全一致（stdio）
+
+客户端配置示例（见 `mcp.config.example.json` 的 `tdlas-http` 项）：
+
+```json
+{ "mcpServers": { "tdlas": { "type": "http", "url": "http://<host>:8000/mcp" } } }
+```
+
+> 远端要能连上，还需该端口在防火墙/路由器放行，或经反向隧道（如 cloudflared / ngrok）暴露；公网部署务必配合 `--token`。
+
 ## 依赖
 
 - 自包含 HITRAN 取数（`tools/tdlas_hitran.py`，HAPI 1.x，免 key，首次运行自动下载线表缓存到 `Hitran_Data/`）
