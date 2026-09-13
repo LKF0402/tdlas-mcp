@@ -485,7 +485,8 @@ MOD_DEFAULTS = {
     "mod_amp_V": None,       # 正弦调制幅值 V；None = 自动按 m_opt 优化
     "mod_freq_Hz": 30e3,     # 调制频率 Hz
     "mod_phase_deg": 0.0,    # 调制相位°
-    "m_opt": 2.2,            # 目标调制系数 m = a/HWHM。经典 2.2 = 洛伦兹线型纯 FM 的理论最优。
+    "m_opt": "auto",         # 目标调制系数 m = a/HWHM。"auto" = 自适应（粗扫+细扫，兼顾幅值与轮廓）；
+                             # 也可给数值（如 2.2）禁用自适应。经典 2.2 = 洛伦兹线型纯 FM 的理论最优。
                              # 本项目实测：孤立单线(H2O 7185.6)最优≈2.2；密集多线区最优明显偏小
                              # （CH4 221 线最优≈1.25、C2H6 158 线≈1.8），可用 m_opt 调低以提升灵敏度。
     "lockin_avg": 1,         # 锁相滑动平均的调制周期数（>1 会模糊线形且不降残留）
@@ -524,6 +525,121 @@ def optimal_mod_amp_V(nu, alpha, eta_VI, dnu_dI, m_target=2.2):
     if dnu_dV <= 0:
         raise ValueError("dν/dV 为零，无法换算调制电压")
     return a / dnu_dV, a, hwhm, float(m_target)
+
+
+def adaptive_modulation_index(nu_grid, alpha_pure, hwhm, cfg, t, v_scan, v_mod_sig,
+                              x, L_cm, n_lines=1, m_lo=1.0, m_hi=2.6, tol=0.98):
+    """自适应调制系数 m（等价自适应正弦调制幅值）。
+
+    三路并行：
+      A 解析  —— 经典 Lorentz 2.2 基准，按谱线密度修正（密集区最优 m 偏小）
+      D 模型  —— 对扫描曲线做二次拟合，取连续域峰值（模型化最优）
+      B 扫描  —— 完整时域链路（无噪声，确定性）粗扫 + 细扫，实测最优 ← 采用
+
+    选择策略「tol(95%) 幅值的最小 m」：2f 峰值附近是平顶，牺牲少量幅值换更小的 m，
+    从而得到更好的 2f 轮廓、更低过调制风险、更小的邻线干扰。
+    """
+    fs = float(cfg["fs"])
+    fm = float(cfg["mod_freq_Hz"])
+    fscan = float(cfg["freq_Hz"])
+    # ★ 扫描须在足够采样率下进行：fs/fm<16 时锁相正交不完备，直流/RAM 会泄漏进 2f，
+    #   使"2f 峰值"主要反映强度调制 AM 而非真实吸收 2f（实测会让最优 m 判断完全相反）。
+    fs_s = fs
+    n_s = int(cfg["n_samples"])
+    if fs / fm < 16.0:
+        fs_s = 16.0 * fm
+        n_s = int(round(n_s * fs_s / fs))          # 保持总采集时间不变
+    t_s = np.arange(n_s, dtype=float) / fs_s
+    v_scan_s = daq_triangle(t_s, cfg["amp_V"], fscan, cfg["phase_deg"], cfg["offset_V"])
+    v_mod_s = np.cos(2.0 * np.pi * fm * t_s + np.deg2rad(float(cfg["mod_phase_deg"])))
+
+    n_per = int(round(fs_s / fscan))
+    if n_per < 16:
+        raise ValueError(f"每扫描周期采样点太少（fs/fscan = {fs_s / fscan:.1f}）")
+    half = n_per // 2
+    edge = str(cfg.get("edge") or "rising").strip().lower()
+    idx = (np.arange(half)[::-1] if edge == "rising"
+           else np.arange(n_per) if edge == "both" else np.arange(half, n_per))
+    n_sel = int(idx.size)
+    n_keep = int(round(float(cfg["trim_frac"]) * n_sel))
+    valid = np.ones(n_sel, dtype=bool)
+    if n_keep > 0:
+        valid[:n_keep] = False
+        valid[-n_keep:] = False
+
+    eta_VI = float(cfg["eta_VI"])
+    dnu_dI = float(cfg["dnu_dI"])
+    dnu_dV = abs(eta_VI * dnu_dI)
+    avg = int(cfg["lockin_avg"])
+    stg = int(cfg["lockin_stages"])
+    lsb = 2.0 * float(cfg["v_range"]) / float(2 ** int(cfg["adc_bits"]))
+    vr = float(cfg["v_range"])
+
+    def _peak(m_val):
+        """给定 m 跑无噪声链路，返回 (2f 峰值, 归一化波形)"""
+        amp_V = (m_val * hwhm) / dnu_dV if dnu_dV > 0 else 0.0
+        v_d = v_scan_s + amp_V * v_mod_s
+        _, nu_l, p_l = voltage_to_laser(v_d, eta_VI, dnu_dI, cfg["wn_ref"],
+                                        cfg["i_ref"], cfg["i_th"], cfg["eta_IP"])
+        alpha = np.interp(nu_l, nu_grid, alpha_pure) * float(x)
+        p_opt = p_l * float(cfg["throughput"]) * np.exp(-alpha * float(L_cm))
+        v_pd = p_opt * 1e-3 * float(cfg["resp"]) * float(cfg["gain"])
+        v_adc = np.clip(np.round(v_pd / lsb) * lsb, -vr, vr)
+        S2f, _, _ = wms_harmonic_lockin(v_adc, t_s, fs_s, fm, 2, avg, stg)
+        s = np.abs(S2f[idx])[valid]
+        return float(s.max()), s
+
+    # B：粗扫（步长 0.2）→ 峰值附近细扫（步长 0.05）
+    ms_c = np.round(np.arange(m_lo, m_hi + 1e-9, 0.2), 3)
+    pk_c = np.array([_peak(m)[0] for m in ms_c])
+    k = int(np.argmax(pk_c))
+    lo = max(m_lo, round(ms_c[k] - 0.2, 3))
+    hi = min(m_hi, round(ms_c[k] + 0.2, 3))
+    ms_f = np.round(np.arange(lo, hi + 1e-9, 0.05), 3)
+    pk_f = np.array([_peak(m)[0] for m in ms_f])
+    ms = np.concatenate([ms_c, ms_f])
+    pk = np.concatenate([pk_c, pk_f])
+    o = np.argsort(ms)
+    ms, pk = ms[o], pk[o]
+
+    pmax = float(pk.max())
+    ok = pk >= tol * pmax
+    m_best = float(ms[ok][np.argmin(ms[ok])])
+
+    # 多峰检测（密集区 2f_peak(m) 可能多峰）
+    d1 = np.diff(pk)
+    n_local_max = int(np.sum((d1[:-1] > 0) & (d1[1:] < 0)))
+
+    # D：对扫描曲线二次拟合取连续域峰值
+    m_model = float(m_best)
+    if ms.size >= 3:
+        try:
+            c = np.polyfit(ms, pk, 2)
+            if c[0] < 0:
+                m_model = float(np.clip(-c[1] / (2 * c[0]), m_lo, m_hi))
+        except Exception:
+            pass
+
+    # A：解析（Lorentz 2.2 基准 + 谱线密度修正）
+    if n_lines > 50:
+        m_analytic = 1.25
+    elif n_lines > 10:
+        m_analytic = 1.80
+    else:
+        m_analytic = 2.20
+
+    return m_best, m_best * hwhm, hwhm, {
+        "m_analytic": m_analytic,
+        "m_model": round(m_model, 3),
+        "m_scan": round(m_best, 3),
+        "peak_max": pmax,
+        "peak_at_m": float(pk[ok][np.argmin(ms[ok])]),
+        "loss_pct": round(100 * (1 - float(pk[ok][np.argmin(ms[ok])]) / pmax), 2),
+        "multipeak": n_local_max > 1,
+        "n_local_max": n_local_max,
+        "scan_m": [round(float(v), 3) for v in ms],
+        "scan_peak": [float(v) for v in pk],
+    }
 
 
 def daq_triangle(t, amp_V, freq_Hz, phase_deg=0.0, offset_V=0.0):
@@ -786,15 +902,29 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
         step=min(2e-4, span_scan / 2000.0), wingHW=max(10.0, 5.0 * span_scan))
     alpha_pure_mix = alpha_pure * float(x)
     auto_mod = cfg["mod_amp_V"] is None
-    if auto_mod:
-        # 用纯 alpha（未乘浓度）：HWHM 是谱线形状属性，与浓度无关，语义更清晰
+    m_opt_raw = cfg.get("m_opt", 2.2)
+    _auto_m = str(m_opt_raw).strip().lower() == "auto"
+    if auto_mod and _auto_m:
+        # 自适应：扫描选最优 m（A 解析 + D 模型 + B 完整链路扫描）
+        m_act, a_cm1, hwhm, mod_info = adaptive_modulation_index(
+            nu_grid, alpha_pure, estimate_hwhm(nu_grid, alpha_pure),
+            cfg, t, v_scan, v_mod_sig, float(x), float(L_cm),
+            n_lines=info["n_lines_in_window"])
+        _dnu_dV = abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
+        mod_amp_V = a_cm1 / _dnu_dV if _dnu_dV > 0 else 0.0
+    elif auto_mod:
+        # 用纯 alpha（未乘浓度）：HWHM 是谱线形状属性，与浓度无关
         mod_amp_V, a_cm1, hwhm, m_act = optimal_mod_amp_V(
-            nu_grid, alpha_pure, cfg["eta_VI"], cfg["dnu_dI"], cfg["m_opt"])
+            nu_grid, alpha_pure, cfg["eta_VI"], cfg["dnu_dI"], float(m_opt_raw))
+        mod_info = {"m_analytic": float(m_opt_raw), "m_model": float(m_opt_raw),
+                    "m_scan": float(m_opt_raw), "note": "手动指定 m_opt，未自适应"}
     else:
         mod_amp_V = float(cfg["mod_amp_V"])
         a_cm1 = mod_amp_V * abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
         hwhm = estimate_hwhm(nu_grid, alpha_pure)
         m_act = a_cm1 / hwhm if hwhm > 0 else float("nan")
+        mod_info = {"m_analytic": m_act, "m_model": m_act, "m_scan": m_act,
+                    "note": "手动指定 mod_amp_V，未自适应"}
     v_drive = v_scan + mod_amp_V * v_mod_sig
 
     # ② V → I → 波数 / 功率
@@ -961,6 +1091,7 @@ def simulate_wms_instrument(species="CH4", wn_center=2968.5, T=296.0, P=1.01325,
             "P": float(P), "x": float(x), "L_cm": float(L_cm), "fs": fs,
             "fscan_Hz": fscan, "mod_freq_Hz": fm, "mod_amp_V": mod_amp_V, "auto_mod": auto_mod,
             "mod_coeff_m": m_act, "mod_depth_cm-1": a_cm1, "hwhm_cm-1": hwhm,
+            "modulation": mod_info,
             "alpha_L_peak": aL_peak, "v_pd_mean": float(np.mean(v_pd)), "lsb_V": lsb,
             "n_sat": n_sat, "sigma_shot": s_shot * cfg["gain"],
             "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],

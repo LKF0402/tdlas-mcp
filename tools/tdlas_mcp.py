@@ -660,6 +660,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                    "mod_amp_V": m["mod_amp_V"], "auto_optimized": m["auto_mod"],
                    "mod_depth_cm-1": m["mod_depth_cm-1"], "HWHM_cm-1": m["hwhm_cm-1"],
                    "mod_coeff_m": m["mod_coeff_m"]},
+           "modulation_adaptive": m["modulation"],
            "adc": {"fs_Hz": m["fs"], "n_per_scan": r["n_per"], "bits": cfg["adc_bits"],
                    "v_range_V": cfg["v_range"], "lsb_V": m["lsb_V"]},
            "normalization": {"method": m["norm_method"], "onef_valid": m["onef_valid"],
@@ -910,7 +911,8 @@ TOOLS = [
                          "mod_freq_Hz": {"type": "number", "description": "正弦调制频率 Hz，默认 30000"},
                          "mod_amp_V": {"type": "number",
                                        "description": "调制幅值 V；缺省=按 m≈2.2 自动优化"},
-                         "m_opt": {"type": "number", "description": "目标调制系数，默认 2.2"},
+                         "m_opt": {"description": "调制系数 m=a/HWHM；'auto'(默认)=自适应(粗扫+细扫，"
+                                                   "兼顾2f幅值与轮廓，密集谱区自动选更小m)；或给数值(如2.2)禁用自适应"},
                          "lockin_avg": {"type": "integer",
                                         "description": "锁相平均调制周期数，默认 1（>1 模糊线形且不降残留）"},
                          "lockin_stages": {"type": "integer",
