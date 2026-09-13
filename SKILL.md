@@ -1,91 +1,98 @@
 ---
 name: tdlas-mcp
-description: TDLAS/WMS spectroscopic simulation MCP server. Use when the user mentions TDLAS, WMS, wavelength modulation spectroscopy, harmonic detection, 2f/1f signal, lock-in detection, gas concentration inversion, detection limit, DAS, or asks to simulate/plot absorption spectra.
+description: TDLAS/WMS 光谱仿真 MCP 服务器。触发词：TDLAS、WMS、波长调制、直接吸收、DAS、二次谐波、2f/1f、数字锁相、谐波检测、气体浓度反演、检测限、LOD、调制系数 m。用户要求模拟/绘制吸收光谱或 WMS 信号时必须使用本 Skill。
 ---
 
-# tdlas-mcp：TDLAS/WMS 光谱仿真 MCP 服务器
+# tdlas-mcp：TDLAS/WMS 仪器级仿真 MCP 服务器
 
-通过 MCP 协议接入 AI 助手，用自然语言完成 TDLAS 仿真，包括 DAS（直接吸收光谱）与 WMS（波长调制光谱）。**仪器系统级仿真**：从 DAQ 驱动电压到数字锁相谐波提取，逐级建模真实实验链路。
+通过 MCP 协议接入 AI 助手，以自然语言完成 TDLAS 实验仿真。对实验全链路逐级建模：DAQ 驱动电压 → 激光调谐 → HITRAN 气体吸收 → 光电探测 → ADC 量化 → 数字锁相 → 谐波提取与归一化。
 
 ## 触发条件
 
-- TDLAS / WMS / 波长调制光谱 / 直接吸收光谱 DAS
-- 二次谐波 / 2f 信号 / 一次谐波 / 1f 信号 / 2f/1f 归一化
-- 锁相放大 / 谐波检测 / 数字锁相
-- 气体浓度反演 / 检测限 LOD
-- 调制深度 / 调制频率 / 调制系数 m
+| 类别 | 关键词 |
+|------|--------|
+| 光谱技术 | TDLAS、WMS、DAS、波长调制光谱、直接吸收光谱 |
+| 谐波信号 | 2f、1f、二次谐波、一次谐波、2f/1f 归一化、谐波检测 |
+| 检测方法 | 数字锁相、锁相放大、正交解调 |
+| 分析应用 | 浓度反演、检测限、LOD、NEC、系统选型 |
+| 调制参数 | 调制深度、调制频率、调制系数 m、最优调制 |
 
-## 前提条件
+## 前置条件
 
-本项目**自包含**，无需 API key，不依赖其它仓库：
+本项目自包含，无需 API key，不依赖其他 MCP 服务：
 
 1. `pip install -r requirements.txt`（numpy / matplotlib / scipy / hitran-api）
-2. 首次运行自动从 HITRAN 下载线表并缓存到 `Hitran_Data/`
+2. 首次运行自动从 HITRAN 下载线表并缓存至 `Hitran_Data/`
 
-> HITRAN 取数仅用 HAPI 1.x（官方接口，免 key）；**不依赖 Hitran MCP server**。
+> 线表获取基于 HAPI 1.x（官方接口，免 key）。
 
-## 工具列表（12 个）
+## 工具路由
 
-| 工具 | 说明 |
+| 场景 | 必选工具 | 说明 |
+|------|----------|------|
+| **画 WMS 图** | `tdlas_wms_instrument` | 仪器级全链路，标准 3×2 六子图输出 |
+| **画 DAS 图** | `tdlas_das_instrument` | 仪器级 DAS，五层链路图 |
+| DAS 信号处理 | `tdlas_das_chain` | PD 原始信号 → 基线拟合 → 吸光度 |
+| 快速算峰高数值 | `tdlas_simulate` | 解析模型，不出仪器链路图 |
+| 结果校验 | `tdlas_review` | 9 项自动检查，不绘图 |
+| 浓度反演 | `tdlas_invert` | 2f/1f 峰高 → 摩尔分数 |
+| 检测限分析 | `tdlas_detection_limit` / `tdlas_detection_limit_scan` | 单值 / 网格扫描 |
+| 硬件参数管理 | `tdlas_device` | 命名保存/引用激光器/PD/DAQ/光学 |
+| 工况记忆 | `tdlas_session` | 跨会话参数持久化 |
+| 协议查询 | `tdlas_guide` | SOP、术语表、参数指南 |
+| 系统自检 | `tdlas_selftest` | 全链路验证 |
+
+## AI 操作规范（必须遵守）
+
+### 1. 启动协议
+
+任何 TDLAS 任务开始前，**必须先调用 `tdlas_guide`** 获取交互协议，包括：
+- 参数索取优先级与澄清流程
+- DAS vs WMS 选型决策树
+- 出图布局规范（`image_layout`）
+- 物理术语表
+
+### 2. 参数澄清（硬约束）
+
+当返回 `clarify.needed=True` 时：
+- **必须先向用户提出 `clarify.questions` 中的问题**，获得回答前不得出图或下结论
+- 用户明确表示"用默认值"时方可跳过
+- 提问使用结构化选择框，每题 2–4 个固定选项 + 自定义输入
+- 超过 4 题按优先级分批：波数/分子 → 浓度/光程 → 温度/压力 → 硬件 → 噪声
+
+**参数来源优先级**：① 用户实测值 → ② 器件型号（联网检索规格书）→ ③ 现场标定 → ④ 默认值并显式标注
+
+**器件型号处理**：用户给出具体型号（如 NI USB-6211、Thorlabs PDA10D2）时，必须联网检索官方 datasheet 提取参数，填入仿真并在 `assumptions` 中标注来源。查不到则退回默认值，不得编造。
+
+**设备库引用**：用户已通过 `tdlas_device` 保存硬件参数时，仿真工具直接传引用名，不再逐项索要。
+
+### 3. 结果校验（硬约束）
+
+每次出图或给出定量结论前，必须通过 `tdlas_review` 或返回值中的 `validation` 字段校验。`overall=fail` 时不得下结论，须先修复失败项。
+
+### 4. 出图规范
+
+- 固定 3×2 六子图布局（详见 `tdlas_guide` 的 `image_layout`）
+- 必须标注：技术名称、归一化方法、基线处理方式、线型含义
+- 1f 与 2f 子图分离显示（幅值量级差异大）
+
+## 关键物理约束（已知坑点）
+
+| 约束 | 说明 |
 |------|------|
-| `tdlas_simulate` | DAS + 免标定 WMS 正向仿真 → 1f/2f 峰高、透过率 |
-| `tdlas_das_chain` | 三角波 DAS 全链路：PD 原始信号 → 基线拟合 → 吸光度 |
-| `tdlas_das_instrument` | 仪器级 DAS：DAQ 电压 → 激光 → 光路 → PD → ADC |
-| `tdlas_wms_instrument` | **WMS 仪器链路**（核心）：扫描+调制 → 锁相 → 1f/2f/归一化（含背景扣除） |
-| `tdlas_review` | 二次审核：自动校验报告（9 项，不画图） |
-| `tdlas_session` | 对话状态机：跨会话记住已确认参数 |
-| `tdlas_device` | 设备库管理：命名保存/引用固定仪器（setup=整机 / laser=pd=daq=optics=单设备 / 默认设备） |
-| `tdlas_guide` | AI 主动指导协议（SOP/优先级/术语表/参数指南/器件检索） |
-| `tdlas_invert` | 免标定浓度反演：2f/1f 峰高 → 摩尔分数 |
-| `tdlas_detection_limit` | 检测限：噪声 → NEC / LOD |
-| `tdlas_detection_limit_scan` | 检测限扫描：LOD 随光程 L / 浓度 x 的网格（选型用） |
-| `tdlas_selftest` | 全链路自检 |
+| 横轴为扫描波数 | 非瞬时波数（瞬时波数含 ±a 调制摆动） |
+| DAS 无调制 | 不能用含调制信号的平均结果伪造 DAS |
+| 1f 过零为物理奇点 | 由 AM 与吸收 1f 相消导致，非"1f 失效" |
+| 2f/1f 失效判据 | 非吸收区泄漏 > 峰值 30%（1f 基线漂移），非过零点 |
+| 密集谱区多线叠加 | 如 CH4 2968.5 cm⁻¹ 窗口内含 221 条线，2f 为多峰叠加；需标准双峰应选择孤立单线 |
 
-## 使用规范（AI 必须遵守）
+## 部署方式
 
-### 1. 先调 `tdlas_guide`
-
-开始任何 TDLAS 任务前，先调 `tdlas_guide` 读协议：参数索取优先级、正向 SOP、术语表、`das_vs_wms` 选型、`image_layout` 图格式、`clarify_protocol` 澄清流程。
-
-### 2. 主动澄清（硬约束）
-
-返回的 `clarify.needed=True` 时，**先向用户提出 `clarify.questions` 里的澄清问题，收到回答前不要直接出图/下结论**。用户说"用默认值"才可跳过。
-
-提问必须用**原生结构化提问工具**（AskUserQuestion 类，点击式选择框）渲染，**禁止纯文字列表让用户打字**：1 次 1–4 题、每题 2–4 个固定选项 + "其他"；超过 4 题按优先级分批多轮（波段 > 浓度/光程 > T/P > 器件 > 噪声）。
-
-参数索取优先级：① 实测值 → ② 器件型号（AI 检索规格书）→ ③ 现场标定 → ④ 默认值并显式标注。
-
-**器件型号 → 联网检索规格书**：用户给出器件型号（如 `NI USB-6211`、`Thorlabs PDA10D2`、`ILX Lightwave LDX-3220`）时，AI **必须联网搜索该型号官方 datasheet** 提取参数（按器件类别查：DAQ→采样率/分辨率/量程；激光器驱动→V→I 跨导/带宽/噪声；DFB→中心波数/调谐系数 dν/dI/阈值电流；PD→响应度/带宽/跨阻增益/NEP），填进仿真并在 `assumptions` 标注「来源：<型号> datasheet」。查不到或无网络则退回现场标定/默认值，**不得编造规格书数值**。
-
-**设备库优先引用**：用户若已用 `tdlas_device` 保存过仪器（如 `laser="我的1653nmDFB"`、`setup="实验室A套"`），仿真工具（`tdlas_wms_instrument` / `tdlas_das_instrument`）应直接传对应引用名，**不再逐项索要硬件参数**。引用解析优先级：本次显式参数 > 单设备引用 > setup 整机 > 默认设备；被设备库覆盖的硬件参数不再列入 `assumptions`（无需重复确认）。
-
-### 3. 二次审核（硬约束）
-
-每次出图/下结论前用 `tdlas_review` 或返回的 `validation` 校验。`overall=fail` 时不得下结论，先修 fail 项。
-
-### 4. 技术标注
-
-- 出图用固定 **3×2 六子图**格式（见 `tdlas_guide` 的 `image_layout`）
-- 技术名、归一化方法、基线处理、线型含义必须标注
-- 1f 与 2f 分开（幅值量级不同）
-
-### 5. 关键物理事实（已踩坑沉淀）
-
-- **横轴用扫描波数**（非瞬时波数，瞬时波数含 ±a 调制摆动）
-- **DAS 是无调制独立链路**（不能拿含调制信号平均伪造）
-- **1f 过零是物理奇点**（AM 与吸收 1f 相消），不是"1f 失效"
-- **2f/1f 失效判据**：仅"非吸收区泄漏 > 峰值 30%"（1f 基线漂移），不是过零
-- **密集谱区**（如 CH4 2968.5 有 221 条线）2f 是多峰叠加，看标准双峰要选孤立单线
-
-## 注意事项
-
-- 本项目是 MCP 服务器，无桌面 GUI
-- 默认 stdio；加 `--http --host 0.0.0.0 --port 8000 --token <密钥>` 可起 HTTP 服务，远端填 `http://<host>:8000/mcp` 直链（MCP Streamable HTTP）。**远程暴露务必加 `--token`**
-- 公网直链：`python tools/remote_link.py`（cloudflared 隧道，仅本地 127.0.0.1 监听 + 强制 Bearer token；建隧道后等 ~60–90s 边缘证书就绪，勿频繁建/杀否则触发限流）
-- 数据基于 HITRAN，结果可复现
-- 首次使用下载线表，后续复用缓存
+- **stdio（默认）**：本地 MCP 客户端直连
+- **HTTP 远程**：`--http --host 0.0.0.0 --port 8000 --token <密钥>`，端点 `/mcp`
+- **公网隧道**：`python tools/remote_link.py`（cloudflared，仅监听 127.0.0.1 + 强制 Bearer token）
 
 ## 项目地址
 
-- GitHub: https://github.com/LKF0402/tdlas-mcp
-- HAPI: https://github.com/hitranonline/hapi
+- 仓库：https://github.com/LKF0402/tdlas-mcp
+- HAPI：https://github.com/hitranonline/hapi
