@@ -76,6 +76,15 @@ def _resolve_conditions(T, P, x, L_cm, session_id="default", x_default=1e-3, L_d
     return res["T"], res["P"], res["x"], res["L_cm"], assumed
 
 
+def _species_defaults(species):
+    """按物种返回推荐浓度 x_typ 与光程 L_cm（来自 SPECIES_PROFILES，缺省回退 1e-3 / 30 cm）。
+
+    强吸收分子（如 CH4@3.3μm）默认浓度应更低，否则 αL 过大进入饱和区、2f/1f 非线性。
+    """
+    prof = SPECIES_PROFILES.get(str(species or "").strip().upper(), {})
+    return prof.get("x_typ", 1e-3), prof.get("L_cm", 30.0)
+
+
 # 技术知识：随工具返回，供 AI 向用户解释真实实验要点（而非只给数字）
 EDGE_TECH_NOTE = (
     "真实实验中三角波上升沿与下降沿常不重合，成因："
@@ -412,7 +421,8 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
     a 为调制深度 cm^-1。sigma_tau 为等效透过率噪声（默认 0=理想无噪）。save_png=True 时出图。
     T/P/x/L 未给出时按「会话已确认 > 默认」取值（复用 tdlas_session 已确认的工况）。
     """
-    T, P, x, L, assumed = _resolve_conditions(T, P, x, L, session_id, x_default=1e-3, L_default=30.0)
+    _xd, _Ld = _species_defaults(species)
+    T, P, x, L, assumed = _resolve_conditions(T, P, x, L, session_id, x_default=_xd, L_default=_Ld)
     i0, i2, p1, p2 = _common(species, wn0, T, P, x, L, a, i0, i2, psi1_pi, psi2_pi, span)
     with _quiet() as g:
         r = ts.simulate(species, wn0, float(T), float(P), float(x), float(L), float(a),
@@ -451,7 +461,8 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
     建议先用 tdlas_simulate 核验 alpha_peak × L；若 αL 超过约 0.05 需改用完整仿真迭代反演。
     T/P/x_ref/L 未给出时按「会话已确认 > 默认」取值。
     """
-    T, P, x_ref, L, assumed = _resolve_conditions(T, P, x_ref, L, session_id, x_default=1e-3, L_default=30.0)
+    _xd, _Ld = _species_defaults(species)
+    T, P, x_ref, L, assumed = _resolve_conditions(T, P, x_ref, L, session_id, x_default=_xd, L_default=_Ld)
     i0, i2, p1, p2 = _common(species, wn0, T, P, x_ref, L, a, i0, i2, psi1_pi, psi2_pi, span)
     with _quiet() as g:
         k = ts.sensitivity_2f1f(species, float(wn0), float(T), float(P), float(L), float(a),
@@ -475,7 +486,8 @@ def t_detection_limit(species="H2O", wn0=7185.596, T=None, P=None, L=None,
     返回噪声等效浓度 NEC 与 LOD = n_sigma × NEC。
     T/P/x_true/L 未给出时按「会话已确认 > 默认」取值。
     """
-    T, P, x_true, L, assumed = _resolve_conditions(T, P, x_true, L, session_id, x_default=1e-3, L_default=30.0)
+    _xd, _Ld = _species_defaults(species)
+    T, P, x_true, L, assumed = _resolve_conditions(T, P, x_true, L, session_id, x_default=_xd, L_default=_Ld)
     i0, i2, p1, p2 = _common(species, wn0, T, P, x_true, L, a, i0, i2, psi1_pi, psi2_pi, span)
     with _quiet() as g:
         dl = ts.detection_limit(species, float(wn0), float(T), float(P), float(L), float(a),
@@ -901,7 +913,7 @@ TOOLS = [
                          "wn0": {"type": "number", "description": "目标线中心 cm^-1"},
                          "T": {"type": "number", "description": "温度 K；缺省=会话已确认或 296"},
                          "P": {"type": "number", "description": "气压 atm；缺省=会话已确认或 1.0"},
-                         "x": {"type": "number", "description": "摩尔分数 (0,1]；缺省=会话已确认或 1e-3（1000 ppm）"},
+                         "x": {"type": "number", "description": "摩尔分数 (0,1]；缺省=会话已确认或按物种推荐（强吸收如 CH4≈1e-4）"},
                          "L": {"type": "number", "description": "光程 cm；缺省=会话已确认或 30"},
                          "session_id": {"type": "string", "description": "会话标识，默认 default（复用 tdlas_session 已确认工况）"},
                          "a": {"type": "number", "description": "调制深度 cm^-1，默认 0.1"},

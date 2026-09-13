@@ -598,7 +598,7 @@ GAS_DEFAULTS = {
     "wn_center": 2968.5,     # 目标吸收线中心波数 cm⁻¹（决定激光调谐到哪条线）
     "T": 296.0,              # 温度 K
     "P": 1.01325,            # 气压 atm（标准大气压 ≈ 1.01325）
-    "x": 1e-3,               # 摩尔分数（= 1000 ppm）
+    "x": 1e-4,               # 摩尔分数（= 100 ppm；CH4@3.3μm 强吸收，默认 100 ppm 才落在弱吸收区）
     "L_cm": 50.0,            # 有效光程 cm（气室光程；多通池 ≈ 几十~几百 cm，等效增大 L）
 }
 
@@ -1286,9 +1286,14 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     v_max = float(np.max(np.abs(v_adc)))
     if v_max < 0.05 * float(cfg["v_range"]):
         warnings.append(f"PD 信号仅 {v_max:.3g} V，远小于量程 ±{cfg['v_range']:g} V → 可提高增益")
-    if not (2.0 <= m_act <= 2.6):
-        warnings.append(f"调制系数 m={m_act:.2f} 偏离最优 2.2（2f 峰值最大处）→ "
-                        f"建议 mod_amp_V≈{2.2 * hwhm / abs(cfg['eta_VI'] * cfg['dnu_dI']):.4g} V")
+    # m 最优参考：孤立线 ≈2.2、密集谱偏小（与 adaptive_modulation_index 的 m_analytic 一致）。
+    # 只有**用户手动指定 m**（非自适应）时才提示偏差；自适应优化已自行选优，不该再报"偏离"。
+    n_lines_w = int(info["n_lines_in_window"])
+    m_ref = 2.2 if n_lines_w <= 10 else (1.8 if n_lines_w <= 50 else 1.25)
+    if (not (auto_mod and _auto_m)) and not (0.85 * m_ref <= m_act <= 1.15 * m_ref):
+        warnings.append(f"手动指定的调制系数 m={m_act:.2f} 偏离该谱线密度下的最优 m≈{m_ref} "
+                        f"（孤立线≈2.2、密集谱偏小）→ 建议 mod_amp_V≈"
+                        f"{m_ref * hwhm / abs(cfg['eta_VI'] * cfg['dnu_dI']):.4g} V")
     warnings.append(f"调制深度 a={a_cm1:.4g} cm⁻¹（HWHM={hwhm:.4g} cm⁻¹, m={m_act:.2f}），"
                     f"调制电压 {mod_amp_V:.4g} V @ fm={fm / 1e3:g} kHz")
     # ★ 噪声透明化：所有注入的噪声项必须逐一告知用户
