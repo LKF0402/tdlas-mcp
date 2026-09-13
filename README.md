@@ -13,7 +13,7 @@ DAQ → 激光 → 光路 → PD → ADC → 数字锁相 · 自然语言驱动<
 
 ---
 
-## 概述
+## 📖 概述
 
 tdlas-mcp 是基于 MCP（Model Context Protocol）的可调谐二极管激光吸收光谱（TDLAS）仿真服务器，对实验全链路进行仪器系统级建模：
 
@@ -23,7 +23,7 @@ DAQ 电压(三角波+正弦调制) → 激光器调谐 → HITRAN 气体吸收 �
 
 服务器自包含 HITRAN 线表获取与吸收谱计算模块（基于 HAPI 1.x，无需 API key），通过 MCP 协议接入 AI 助手，以自然语言完成波长调制光谱（WMS）与直接吸收光谱（DAS）仿真。
 
-## 快速上手
+## 🚀 快速上手
 
 ```bash
 pip install -r requirements.txt
@@ -35,13 +35,21 @@ python tools/tdlas_mcp.py --selftest
 # 将 mcp.config.example.json 中 args 路径改为实际安装路径即可
 ```
 
-> 建议同时将 [SKILL.md](./SKILL.md) 作为独立 Skill 安装至 AI Agent，使其读取完整交互协议与出图规范。
+> 💡 **一键配置**：将以下内容复制粘贴给你的 AI 助手，即可自动完成 MCP 接入：
+>
+> ```
+> 请帮我配置 tdlas-mcp MCP 服务器，本地路径 D:/software/skills/tdlas-mcp，
+> Python 解释器路径 C:/Users/16565/AppData/Local/Programs/Python/Python310/python.exe，
+> 入口文件 tools/tdlas_mcp.py。
+> ```
+>
+> 同时建议将 [SKILL.md](./SKILL.md) 作为独立 Skill 安装，使 AI 读取完整交互协议与出图规范。
 
-## 工具列表
+## 🔧 工具列表
 
 | 工具 | 功能 |
 |------|------|
-| **tdlas_wms_instrument** | **WMS 仪器级仿真首选**：全链路建模，输出标准 3×2 六子图 |
+| ⭐ **tdlas_wms_instrument** | **WMS 仪器级仿真首选**：全链路建模，输出标准 3×2 六子图 |
 | tdlas_das_instrument | 仪器级 DAS 仿真（DAQ→激光→光路→PD→ADC） |
 | tdlas_simulate | 解析模型正向计算：DAS 透过率、1f/2f 峰高 |
 | tdlas_das_chain | 三角波 DAS 链路：PD 原始信号 → 多项式基线拟合 → 吸光度 |
@@ -54,7 +62,7 @@ python tools/tdlas_mcp.py --selftest
 | tdlas_guide | AI 交互协议与术语表 |
 | tdlas_selftest | 全链路自检 |
 
-## 远程部署
+## 🌐 远程部署
 
 ```bash
 # HTTP 模式
@@ -66,7 +74,7 @@ python tools/remote_link.py
 
 配置示例见 [mcp.config.example.json](./mcp.config.example.json)。
 
-## 相关文档
+## 📚 相关文档
 
 | 文档 | 内容 |
 |------|------|
@@ -74,7 +82,7 @@ python tools/remote_link.py
 | [SKILL.md](./SKILL.md) | AI 交互规范与工具使用协议 |
 | [CHANGELOG.md](./CHANGELOG.md) | 版本更新记录 |
 
-## 引用
+## 📝 引用
 
 ```
 The TDLAS/WMS instrument-level simulations were performed using tdlas-mcp
@@ -83,6 +91,6 @@ The TDLAS/WMS instrument-level simulations were performed using tdlas-mcp
 
 底层数据：HAPI (Kochanov et al., JQSRT 2016, DOI: 10.1016/j.jqsrt.2016.03.005) · HITRAN2024 (Gordon et al., JQSRT 2026, DOI: 10.1016/j.jqsrt.2026.109807)
 
-## 许可证
+## 📄 许可证
 
 GPLv3
