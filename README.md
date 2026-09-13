@@ -42,19 +42,20 @@ DAQ 驱动电压（三角波 + 正弦调制）
 | **跨会话状态机** | `tdlas_session` 记住已确认参数，多轮补全、少重复问 |
 | **统一出图** | 固定 3×2 六子图（驱动/PD原始/DAS+理论/1f/2f/归一化），技术名+线型必标 |
 
-## 工具列表（10 个）
+## 工具列表（11 个）
 
 | 工具 | 说明 |
 |------|------|
 | `tdlas_simulate` | DAS + 免标定 WMS 正向仿真 → 1f/2f 峰高、透过率、线表信息 |
 | `tdlas_das_chain` | 三角波 DAS 全链路：PD 原始信号 → 基线拟合 → 吸光度 |
 | `tdlas_das_instrument` | 仪器级 DAS：DAQ 电压 → 激光 → 光路 → PD → ADC |
-| `tdlas_wms_instrument` | **WMS 仪器链路**：扫描+调制 → 锁相 → 1f/2f/归一化（含校验/澄清/工况推荐） |
+| `tdlas_wms_instrument` | **WMS 仪器链路**：扫描+调制 → 锁相 → 1f/2f/归一化（含背景扣除/校验/澄清/工况推荐） |
 | `tdlas_review` | 二次审核：返回自动校验报告（不画图） |
 | `tdlas_session` | 对话状态机：跨会话记住已确认参数 |
-| `tdlas_guide` | AI 主动指导协议（SOP/优先级/术语表/参数指南） |
+| `tdlas_guide` | AI 主动指导协议（SOP/优先级/术语表/参数指南/器件检索） |
 | `tdlas_invert` | 免标定浓度反演：2f/1f 峰高 → 摩尔分数 |
 | `tdlas_detection_limit` | 检测限：噪声 → NEC / LOD |
+| `tdlas_detection_limit_scan` | 检测限扫描：LOD 随光程 L / 浓度 x 的网格（选型用） |
 | `tdlas_selftest` | 全链路自检 |
 
 ## 快速开始

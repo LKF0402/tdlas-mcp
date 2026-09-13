@@ -196,7 +196,7 @@ AI_INTERACTION_GUIDE = {
             "凡信息不足必须主动索取，绝不能默默用默认值出结果。",
     "priority": [
         "① 先要实测标定值（最可靠）；",
-        "② 用户给不出值、但能给**器件型号** → AI 自行检索该型号规格书提取参数；",
+        "② 用户给不出值、但能给**器件型号** → AI **联网检索**该型号官方规格书提取参数（见 datasheet_lookup）；",
         "③ 型号也没有 → 引导用户**现场标定**（例：改变驱动电压 ΔV，记录波数变化 Δν，得 dν/dV）；",
         "④ 以上都做不到 → 用内置默认值，但**必须在结论中显式标注**「以下参数用了默认值 X」。",
     ],
@@ -270,6 +270,21 @@ AI_INTERACTION_GUIDE = {
     },
     "defaults_when_unknown": "所有物理参数未给时按以下顺序索取：① 实测标定值 → "
                              "② 器件型号（AI 自己检索规格书）→ ③ 引导用户现场标定 → ④ 保留内置默认并**显式标注**「默认值 X」。",
+    "datasheet_lookup": {
+        "何时": "用户提供了器件型号（如 'NI USB-6211'、'Thorlabs PDA10D2'、'ILX Lightwave LDX-3220'）时。",
+        "动作": "AI **必须**联网检索该型号的官方 datasheet / 规格书提取参数（用 web 搜索 + 打开官方页面），"
+                "不要只把型号当标签、也不要凭记忆编数字。",
+        "按器件类别要查的参数": {
+            "数据采集卡 DAQ": ["采样率上限 fs_max (S/s)", "分辨率 (bit)", "量程 (±V)", "输入噪声/输入阻抗"],
+            "激光器驱动 / 电流源": ["V→I 跨导或调谐响应", "电流量程 (mA)", "调制带宽 (kHz)", "输出噪声 (µA/√Hz)"],
+            "DFB / 可调谐激光器": ["中心波长 / 波数", "调谐系数 dν/dI (cm⁻¹/mA)", "阈值电流 i_th (mA)",
+                              "输出功率 (mW)", "线宽 (MHz)"],
+            "光电探测器 PD": ["响应度 resp (A/W)", "带宽 bw (Hz)", "跨阻增益 gain (V/A)",
+                          "NEP (W/√Hz)", "饱和功率"],
+        },
+        "查到后": "把规格书参数填进仿真对应字段，并在 assumptions 里标注「来源：<型号> datasheet」。",
+        "查不到或无网络": "退回到优先级 ③（引导现场标定）或 ④（默认值 + 显式标注），**不得编造规格书数值**。",
+    },
     "das_vs_wms": {
         "本质": "WMS 通常强于 DAS。DAS 信号在 DC，受害于 1/f 噪声与激光慢漂移；"
                 "WMS 把信号搬到 fm（30 kHz）用窄带锁相提取，避开 1/f，"
@@ -444,6 +459,45 @@ def t_detection_limit(species="H2O", wn0=7185.596, T=296.0, P=1.0, L=30.0,
             "x_true": float(x_true), "NEC": float(dl["NEC"]), "LOD": float(dl["LOD"]),
             "n_sigma": float(n_sigma), "n_trials": int(dl["n_trials"]),
             "sensitivity_k": float(dl["k"]), "log": g.getvalue().splitlines()}
+
+
+def t_detection_limit_scan(species="CH4", wn0=2968.5, T=296.0, P=1.01325, a=0.10,
+                           L_list=None, x_list=None, sigma_tau=1e-5, n_trials=10,
+                           n_sigma=3.0, seed=0, save_png=False):
+    """检测极限 LOD 随光程 L / 参考浓度 x 的扫描（系统选型：加光程能降多少 LOD）。
+
+    弱吸收下 LOD ∝ 1/L（光程加倍、LOD 减半），且 LOD 与参考浓度 x 基本无关，
+    直到 αL≳0.1 进入非线性区才略升。返回 LOD 网格（行=浓度 x，列=光程 L）。
+    """
+    def _nums(v, default):
+        if v is None:
+            return default
+        if isinstance(v, str):
+            v = [u.strip() for u in v.replace("，", ",").split(",") if u.strip()]
+        return [float(u) for u in v]
+    L_list = _nums(L_list, [5.0, 10.0, 30.0, 50.0, 100.0, 200.0])
+    x_list = _nums(x_list, [1e-4, 1e-3, 1e-2])
+    with _quiet() as g:
+        res = ts.scan_detection_limit(str(species), float(wn0), float(T), float(P), float(a),
+                                      L_list=L_list, x_list=x_list, sigma_tau=float(sigma_tau),
+                                      n_trials=int(n_trials), n_sigma=float(n_sigma),
+                                      seed=int(seed))
+    out = {"species": res["species"], "wn0_cm-1": res["wn0"], "T_K": res["T"],
+           "P_atm": res["P"], "a_cm-1": res["a"],
+           "L_list_cm": res["L_list"], "x_list": res["x_list"],
+           "LOD": [[float(v) for v in row] for row in res["LOD"]],
+           "sigma_tau": res["sigma_tau"], "n_trials": res["n_trials"],
+           "n_sigma": res["n_sigma"],
+           "physical_note": ("弱吸收下 LOD ∝ 1/L（光程加倍、LOD 减半），且 LOD 与参考浓度 x "
+                             "基本无关；αL≳0.1 进入非线性区后 LOD 略升。"),
+           "log": g.getvalue().splitlines()}
+    if save_png:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        png = OUT_DIR / f"detection_limit_scan_{res['species']}_{res['wn0']:g}cm-1.png"
+        with _quiet():
+            ts.plot_detection_limit_scan(res, png)
+        out["png"] = str(png)
+    return out
 
 
 def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
@@ -696,6 +750,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                        "questions": _clarify_qs},
            "ai_guidance": {"role": AI_INTERACTION_GUIDE["role"],
                            "priority": AI_INTERACTION_GUIDE["priority"],
+                           "datasheet_lookup": AI_INTERACTION_GUIDE["datasheet_lookup"],
                            "sop": AI_INTERACTION_GUIDE["sop"],
                            "image_layout": AI_INTERACTION_GUIDE["image_layout"],
                            "das_vs_wms": AI_INTERACTION_GUIDE["das_vs_wms"],
@@ -803,6 +858,7 @@ DISPATCH = {"tdlas_simulate": t_simulate,
             "tdlas_guide": t_guide,
             "tdlas_invert": t_invert,
             "tdlas_detection_limit": t_detection_limit,
+            "tdlas_detection_limit_scan": t_detection_limit_scan,
             "tdlas_selftest": t_selftest}
 
 TOOLS = [
@@ -1015,6 +1071,24 @@ TOOLS = [
                          "n_sigma": {"type": "number", "description": "倍数，默认 3"},
                          "seed": {"type": "integer"}},
                      "required": ["species", "wn0"]}},
+    {"name": "tdlas_detection_limit_scan",
+     "description": "检测极限 LOD 随光程 L / 参考浓度 x 的扫描（系统选型：加光程能降多少 LOD）。"
+                    "弱吸收下 LOD∝1/L，且与参考浓度基本无关；返回 LOD 网格（行=浓度 x，列=光程 L）。",
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "species": {"type": "string", "description": "分子式，默认 CH4"},
+                         "wn0": {"type": "number", "description": "目标线中心 cm^-1，默认 2968.5"},
+                         "T": {"type": "number"}, "P": {"type": "number"},
+                         "a": {"type": "number", "description": "调制深度 cm^-1，默认 0.1"},
+                         "L_list": {"type": "array", "items": {"type": "number"},
+                                    "description": "光程列表 cm，默认 [5,10,30,50,100,200]"},
+                         "x_list": {"type": "array", "items": {"type": "number"},
+                                    "description": "参考浓度列表，默认 [1e-4,1e-3,1e-2]"},
+                         "sigma_tau": {"type": "number", "description": "等效透过率噪声，默认 1e-5"},
+                         "n_trials": {"type": "integer", "description": "每格蒙特卡洛次数，默认 10"},
+                         "n_sigma": {"type": "number"}, "seed": {"type": "integer"},
+                         "save_png": {"type": "boolean", "description": "是否出图，默认 False"}},
+                     "required": []}},
     {"name": "tdlas_selftest",
      "description": "全链路自检（有线 / 2f 形状 / 弱场线性 / 反演闭环 / 检测限 / 时域交叉验证）。",
      "inputSchema": {"type": "object", "properties": {}}},

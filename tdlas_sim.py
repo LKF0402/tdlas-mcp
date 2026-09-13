@@ -197,6 +197,27 @@ def selftest():
           f"vs 真值 αL {tp:.4e}（差 {derr * 100:.2f}%）")
     assert derr < 0.05, f"DAS 基线扣除误差 {derr:.1%} 超过 5%"
 
+    # 8) 电压自适应：amp_V / offset_V 由 wn_center + scan_span_cm 经 V-ν 关系反算
+    w = simulate_wms_instrument(mod_amp_V=0.1)      # 手填调制幅值，跳过慢速自适应扫描
+    c8 = w["meta"]["cfg"]
+    dnu_dV = abs(float(c8["eta_VI"]) * float(c8["dnu_dI"]))
+    amp_exp = float(c8["scan_span_cm"]) / dnu_dV
+    off_exp = (float(c8["i_ref"]) + (float(w["meta"]["wn_center"]) - float(c8["wn_ref"]))
+               / float(c8["dnu_dI"])) / float(c8["eta_VI"])
+    print(f"  电压自适应：amp_V={c8['amp_V']:.4g} V（期望 {amp_exp:.4g}），"
+          f"offset_V={c8['offset_V']:.4g} V（期望 {off_exp:.4g}）")
+    assert abs(float(c8["amp_V"]) - amp_exp) < 1e-6, "amp_V 未按 scan_span_cm 反算"
+    assert abs(float(c8["offset_V"]) - off_exp) < 1e-6, "offset_V 未按 wn_center 反算"
+    assert w["meta"].get("bg_subtracted") is True, "2f 未做背景扣除"
+
+    # 9) 越界 wn_center：选了不在此 DFB 调谐范围内的线 → 清晰报错（不静默给垃圾）
+    try:
+        simulate_wms_instrument(wn_center=6500.0)
+        raise AssertionError("越界 wn_center 应触发 ValueError，却静默通过")
+    except ValueError as e:
+        assert ("offset_V" in str(e)) or ("功率" in str(e)), f"报错信息不含关键提示：{e}"
+        print(f"  越界保护：wn_center=6500 → ValueError（{str(e)[:42]}…）")
+
     print("  自测通过")
     return r
 
@@ -249,6 +270,71 @@ def detection_limit(species="H2O", wn0=7185.596, T=296.0, P=1.0, L=30.0, a=0.10,
     return {"k": k, "x_true": x_true, "sigma_tau": sigma_tau,
             "mean": float(est.mean()), "NEC": nec, "LOD": n_sigma * nec,
             "n_trials": int(n_trials), "samples": est}
+
+
+def scan_detection_limit(species="CH4", wn0=2968.5, T=296.0, P=1.01325, a=0.10,
+                         L_list=None, x_list=None, sigma_tau=1e-5, n_trials=10,
+                         n_sigma=3.0, seed=0, **kw):
+    """检测极限 LOD 随光程 L / 参考浓度 x 的扫描（用于系统选型）。
+
+    物理（弱吸收 αL≪1 下）：
+      · LOD ∝ 1/L —— 光程加倍，LOD 减半（信噪比线性提升）；
+      · LOD 与参考浓度 x 基本无关（NEC ∝ σ_τ/α_pure，不含 x），
+        直到 αL≳0.1 进入非线性区才因反演饱和而略升。
+
+    返回 dict：species / wn0 / T / P / a / L_list / x_list /
+               LOD[i,j]（行=浓度 x，列=光程 L）/ sigma_tau / n_trials / n_sigma
+    """
+    if L_list is None:
+        L_list = [5.0, 10.0, 30.0, 50.0, 100.0, 200.0]
+    if x_list is None:
+        x_list = [1e-4, 1e-3, 1e-2]
+    L_list = [float(L) for L in L_list]
+    x_list = [float(x) for x in x_list]
+    LOD = np.full((len(x_list), len(L_list)), np.nan)
+    for i, x in enumerate(x_list):
+        for j, L in enumerate(L_list):
+            dl = detection_limit(species, wn0, T, P, L, a, sigma_tau=sigma_tau,
+                                 x_true=x, n_trials=int(n_trials),
+                                 n_sigma=n_sigma, seed=int(seed), **kw)
+            LOD[i, j] = float(dl["LOD"])
+    return {"species": str(species).upper(), "wn0": float(wn0), "T": float(T),
+            "P": float(P), "a": float(a),
+            "L_list": L_list, "x_list": x_list, "LOD": LOD,
+            "sigma_tau": float(sigma_tau), "n_trials": int(n_trials),
+            "n_sigma": float(n_sigma)}
+
+
+def plot_detection_limit_scan(res, out_png):
+    """检测极限扫描图（1×2）：
+    左：LOD vs 光程 L（log-log，不同参考浓度 x 一组曲线）→ 斜率≈−1 印证 LOD∝1/L
+    右：LOD vs 参考浓度 x（log-x，不同光程 L 一组曲线）→ 弱吸收下近乎平线
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    use_cjk_font(matplotlib)
+
+    L = np.asarray(res["L_list"]); x = np.asarray(res["x_list"]); LOD = np.asarray(res["LOD"])
+    fig, ax = plt.subplots(1, 2, figsize=(14, 6))
+    cmap = plt.cm.viridis(np.linspace(0, 0.9, LOD.shape[0]))
+    # 左：LOD vs L
+    for i, xi in enumerate(x):
+        ax[0].loglog(L, LOD[i], "o-", color=cmap[i], lw=1.4, label=f"x={xi:g}")
+    ax[0].set_xlabel("光程 L (cm)"); ax[0].set_ylabel("检测极限 LOD（摩尔分数）")
+    ax[0].set_title(f"LOD vs 光程（{res['species']} @ {res['wn0']:g} cm⁻¹, σ_τ={res['sigma_tau']:g}）")
+    ax[0].grid(True, which="both", alpha=0.3); ax[0].legend(fontsize=8)
+    # 右：LOD vs x
+    for j, Lj in enumerate(L):
+        ax[1].loglog(x, LOD[:, j], "o-", lw=1.4,
+                     color=plt.cm.plasma(j / max(len(L) - 1, 1)), label=f"L={Lj:g} cm")
+    ax[1].set_xlabel("参考浓度 x（摩尔分数）"); ax[1].set_ylabel("检测极限 LOD（摩尔分数）")
+    ax[1].set_title("LOD vs 参考浓度（弱吸收下应近似平线）")
+    ax[1].grid(True, which="both", alpha=0.3); ax[1].legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=130)
+    plt.close(fig)
+    return out_png
 
 
 # ══════════════════ 6. 数字锁相（时域交叉验证）══════════════════
@@ -861,9 +947,10 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     # 主动检查：吸收强弱、ADC 饱和、动态范围、噪声量级
     warnings = []
     if not (0.0 <= cfg["offset_V"] <= 5.0):
-        warnings.append(f"算得 offset_V={cfg['offset_V']:.3g} V 超出驱动器典型 0–5 V 范围："
-                        f"请确认 wn_center 与该激光 wn_ref/dν/dI 匹配（可能选了不在此激光调谐范围内的线）；"
-                        f"必要时手填 offset_V 或改 wn_ref")
+        raise ValueError(f"反算 offset_V={cfg['offset_V']:.3g} V 越出驱动器典型 0–5 V 范围："
+                         f"wn_center={wn_center:g} cm⁻¹ 不在此 DFB 调谐范围内"
+                         f"（wn_ref={cfg['wn_ref']:g}, dν/dI={cfg['dnu_dI']:g}）。"
+                         f"请改用对应激光器参数（wn_ref/dν/dI/eta_VI）或手填 offset_V。")
     aL_peak = float(alpha.max()) * float(L_cm)
     if aL_peak > 0.1:
         warnings.append(f"αL≈{aL_peak:.3g} 偏大（>0.1）：DAS 进入非线性区、峰形被压低，"
@@ -964,9 +1051,10 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
 
     warnings = []
     if not (0.0 <= cfg["offset_V"] <= 5.0):
-        warnings.append(f"算得 offset_V={cfg['offset_V']:.3g} V 超出驱动器典型 0–5 V 范围："
-                        f"请确认 wn_center 与该激光 wn_ref/dν/dI 匹配（可能选了不在此激光调谐范围内的线）；"
-                        f"必要时手填 offset_V 或改 wn_ref")
+        raise ValueError(f"反算 offset_V={cfg['offset_V']:.3g} V 越出驱动器典型 0–5 V 范围："
+                         f"wn_center={wn_center:g} cm⁻¹ 不在此 DFB 调谐范围内"
+                         f"（wn_ref={cfg['wn_ref']:g}, dν/dI={cfg['dnu_dI']:g}）。"
+                         f"请改用对应激光器参数（wn_ref/dν/dI/eta_VI）或手填 offset_V。")
     fm = float(cfg["mod_freq_Hz"])
     fs = float(cfg["fs"])
     # ★ 数字锁相要求采样率是调制频率的**整数倍**，且每调制周期 ≥8 点。
@@ -1045,16 +1133,21 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     rng = np.random.default_rng(seed)
     drift_frac = float(cfg.get("drift_frac", 0.0))
     flicker_frac = float(cfg.get("flicker_frac", 0.0))
+    # —— 确定性部分 p_det：慢漂移 + 残余幅度调制 RAM（背景扣除时**保留**，属物理基线）——
+    p_det = p_laser
     if drift_frac > 0:
-        p_laser = p_laser * (1.0 + drift_frac * np.sin(2 * np.pi * 1.0 * t + 0.3))
-    if flicker_frac > 0:
-        p_laser = p_laser * (1.0 + flicker_frac * pink_noise(len(t), fs, rng))
+        p_det = p_det * (1.0 + drift_frac * np.sin(2 * np.pi * 1.0 * t + 0.3))
     # 残余幅度调制（RAM）：激光**固有**强度调制，与 FM 存在相位差
     _am_i0, _am_i2 = float(cfg.get("am_i0", 0.0)), float(cfg.get("am_i2", 0.0))
     if _am_i0 != 0.0 or _am_i2 != 0.0:
         _wm = 2.0 * np.pi * fm
-        p_laser = p_laser * (1.0 + _am_i0 * np.cos(_wm * t + float(cfg.get("am_psi1", 0.0)))
-                             + _am_i2 * np.cos(2.0 * _wm * t + float(cfg.get("am_psi2", 0.0))))
+        p_det = p_det * (1.0 + _am_i0 * np.cos(_wm * t + float(cfg.get("am_psi1", 0.0)))
+                         + _am_i2 * np.cos(2.0 * _wm * t + float(cfg.get("am_psi2", 0.0))))
+    # —— 随机粉红噪声只作用于信号（**不进背景**：减随机噪声只会平方相加、更差）——
+    if flicker_frac > 0:
+        p_laser = p_det * (1.0 + flicker_frac * pink_noise(len(t), fs, rng))
+    else:
+        p_laser = p_det
 
     # ③ 光路
     alpha = np.interp(nu_laser, nu_grid, alpha_pure) * float(x)
@@ -1076,10 +1169,18 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     n_sat = int(np.sum(np.abs(v_noisy) >= float(cfg["v_range"])))
     v_adc = np.clip(np.round(v_noisy / lsb) * lsb, -float(cfg["v_range"]), float(cfg["v_range"]))
 
-    # ⑦ 数字锁相 → 1f / 2f
+    # ⑦ 数字锁相 → 1f / 2f（正交解调，保留 X/Y 复分量用于背景扣除）
     avg, stg = int(cfg["lockin_avg"]), int(cfg["lockin_stages"])
-    S1f, _, _ = wms_harmonic_lockin(v_adc, t, fs, fm, 1, avg, stg)
-    S2f, _, _ = wms_harmonic_lockin(v_adc, t, fs, fm, 2, avg, stg)
+    S1f, X1f, Y1f = wms_harmonic_lockin(v_adc, t, fs, fm, 1, avg, stg)
+    S2f, X2f, Y2f = wms_harmonic_lockin(v_adc, t, fs, fm, 2, avg, stg)
+    # 背景参考谱：τ≡1 走同一条链路（含相同 RAM/AM + 慢漂移，**无**白/粉红噪声）。
+    # 2f 在非吸收区的基线主要来自 L-I 二阶非线性（RAM），是物理背景，
+    # 只能靠"无吸收参考谱"扣除——降噪 / 提采样率都压不掉。
+    i_bg = p_det * float(cfg["throughput"]) * 1e-3 * float(cfg["resp"])
+    v_bg = pd_lowpass(i_bg * float(cfg["gain"]), cfg["bw"], fs)
+    v_bg_adc = np.clip(np.round(v_bg / lsb) * lsb, -float(cfg["v_range"]), float(cfg["v_range"]))
+    _, X1f_bg, Y1f_bg = wms_harmonic_lockin(v_bg_adc, t, fs, fm, 1, avg, stg)
+    _, X2f_bg, Y2f_bg = wms_harmonic_lockin(v_bg_adc, t, fs, fm, 2, avg, stg)
 
     # 取一个扫描方向（默认上升沿）：三角波往返会让同一波数出现两次、方向相反，
     # 叠加后无法判读；实验中也按"单次扫描"取一条。edge=both 可取完整周期。
@@ -1105,6 +1206,9 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
                                          cfg.get("d2nu_dI2", 0.0))
     nu_cyc = nu_scan_all[idx]
     S1f_cyc, S2f_cyc, v_cyc = S1f[idx], S2f[idx], v_adc[idx]
+    X1f_c, Y1f_c, X2f_c, Y2f_c = X1f[idx], Y1f[idx], X2f[idx], Y2f[idx]
+    X1f_bg_c, Y1f_bg_c = X1f_bg[idx], Y1f_bg[idx]
+    X2f_bg_c, Y2f_bg_c = X2f_bg[idx], Y2f_bg[idx]
     alphaL_cyc = np.interp(nu_cyc, nu_grid, alpha_pure) * float(x) * float(L_cm)
 
     # ⑧ 归一化：优先 2f/1f；若 1f 失效则退化为 PD 非吸收区光强归一化 2f/I0
@@ -1118,8 +1222,16 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         valid[-n_keep:] = False
     off = (alphaL_cyc < 0.02 * float(np.max(alphaL_cyc) + 1e-30)) & valid   # 非吸收区
     I0_pd = float(np.mean(np.abs(v_cyc[off]))) if off.any() else float(np.mean(np.abs(v_cyc[valid])))
-    S2f_1f = np.divide(S2f_cyc, S1f_cyc, out=np.zeros_like(S2f_cyc), where=S1f_cyc > 1e-15)
-    S2f_I0 = S2f_cyc / max(I0_pd, 1e-30)
+    # ★ 背景扣除（RAM 基线）：2f/1f 与 2f/I0 都要减"无吸收参考谱"的复分量。
+    #   · 2f/1f：复分量先各除以 1f 幅度、再复减背景（与解析 wms_calibration_free 同式）
+    #   · 2f/I0：复分量直接相减再取模、除 I0（I0 是标量，减法顺序无歧义）
+    R1f_c = np.hypot(X1f_c, Y1f_c); R1f_bg = np.hypot(X1f_bg_c, Y1f_bg_c)
+    _X2f1f = np.divide(X2f_c, R1f_c, out=np.zeros_like(X2f_c), where=R1f_c > 1e-15)
+    _Y2f1f = np.divide(Y2f_c, R1f_c, out=np.zeros_like(Y2f_c), where=R1f_c > 1e-15)
+    _X2f1f_bg = np.divide(X2f_bg_c, R1f_bg, out=np.zeros_like(X2f_bg_c), where=R1f_bg > 1e-15)
+    _Y2f1f_bg = np.divide(Y2f_bg_c, R1f_bg, out=np.zeros_like(Y2f_bg_c), where=R1f_bg > 1e-15)
+    S2f_1f = np.hypot(_X2f1f - _X2f1f_bg, _Y2f1f - _Y2f1f_bg)
+    S2f_I0 = np.hypot(X2f_c - X2f_bg_c, Y2f_c - Y2f_bg_c) / max(I0_pd, 1e-30)
     # 2f/1f 适用性判据（只在有效区内）：
     #   真正让 2f/1f 不好用的是"1f 基线随扫描漂移"（AM 即 dP/dV 非线性），
     #   表现为**真无吸收处** 2f/1f 背景不平（泄漏接近峰值）。
@@ -1203,6 +1315,8 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         warnings.append(f"⚠ **2f/1f 不可用 → 已自动改用 2f/I0（PD 非吸收区光强均值 I0={I0_pd:.4g} V）**。"
                         f"原因：非吸收区 2f/1f 泄漏 {off_1f:.3g} 占峰值 "
                         f"{100 * off_1f / max(pk_1f, 1e-30):.0f}%（>30%，1f 基线随扫描漂移）")
+    warnings.append("已做 **背景扣除**：用无吸收参考谱（τ≡1，含相同 RAM/AM 与慢漂移，无白/粉红噪声）"
+                    "复减 2f/1f 与 2f/I0 的 RAM 基线（L-I 二阶非线性残留）")
 
     meta = {"species": str(species).upper(), "wn_center": float(wn_center), "T": float(T),
             "P": float(P), "x": float(x), "L_cm": float(L_cm), "fs": fs,
@@ -1213,7 +1327,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "n_sat": n_sat, "sigma_shot": s_shot * cfg["gain"],
             "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
             "drift_frac": drift_frac, "flicker_frac": flicker_frac,
-            "norm_method": norm_method, "onef_valid": onef_valid, "I0_pd_V": I0_pd,
+            "bg_subtracted": True, "norm_method": norm_method, "onef_valid": onef_valid, "I0_pd_V": I0_pd,
             "offband_leak_1f": off_1f, "peak_2f_1f": pk_1f,
             "onef_min_over_median": onef_min / max(onef_med, 1e-30),
             "trim_frac": float(cfg["trim_frac"]), "n_trim": n_keep, "edge": edge,

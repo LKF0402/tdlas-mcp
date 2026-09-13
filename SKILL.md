@@ -24,19 +24,20 @@ description: TDLAS/WMS spectroscopic simulation MCP server. Use when the user me
 
 > HITRAN 取数仅用 HAPI 1.x（官方接口，免 key）；**不依赖 Hitran MCP server**。
 
-## 工具列表（10 个）
+## 工具列表（11 个）
 
 | 工具 | 说明 |
 |------|------|
 | `tdlas_simulate` | DAS + 免标定 WMS 正向仿真 → 1f/2f 峰高、透过率 |
 | `tdlas_das_chain` | 三角波 DAS 全链路：PD 原始信号 → 基线拟合 → 吸光度 |
 | `tdlas_das_instrument` | 仪器级 DAS：DAQ 电压 → 激光 → 光路 → PD → ADC |
-| `tdlas_wms_instrument` | **WMS 仪器链路**（核心）：扫描+调制 → 锁相 → 1f/2f/归一化 |
+| `tdlas_wms_instrument` | **WMS 仪器链路**（核心）：扫描+调制 → 锁相 → 1f/2f/归一化（含背景扣除） |
 | `tdlas_review` | 二次审核：自动校验报告（9 项，不画图） |
 | `tdlas_session` | 对话状态机：跨会话记住已确认参数 |
-| `tdlas_guide` | AI 主动指导协议（SOP/优先级/术语表/参数指南） |
+| `tdlas_guide` | AI 主动指导协议（SOP/优先级/术语表/参数指南/器件检索） |
 | `tdlas_invert` | 免标定浓度反演：2f/1f 峰高 → 摩尔分数 |
 | `tdlas_detection_limit` | 检测限：噪声 → NEC / LOD |
+| `tdlas_detection_limit_scan` | 检测限扫描：LOD 随光程 L / 浓度 x 的网格（选型用） |
 | `tdlas_selftest` | 全链路自检 |
 
 ## 使用规范（AI 必须遵守）
@@ -50,6 +51,8 @@ description: TDLAS/WMS spectroscopic simulation MCP server. Use when the user me
 返回的 `clarify.needed=True` 时，**先向用户提出 `clarify.questions` 里的澄清问题，收到回答前不要直接出图/下结论**。用户说"用默认值"才可跳过。
 
 参数索取优先级：① 实测值 → ② 器件型号（AI 检索规格书）→ ③ 现场标定 → ④ 默认值并显式标注。
+
+**器件型号 → 联网检索规格书**：用户给出器件型号（如 `NI USB-6211`、`Thorlabs PDA10D2`、`ILX Lightwave LDX-3220`）时，AI **必须联网搜索该型号官方 datasheet** 提取参数（按器件类别查：DAQ→采样率/分辨率/量程；激光器驱动→V→I 跨导/带宽/噪声；DFB→中心波数/调谐系数 dν/dI/阈值电流；PD→响应度/带宽/跨阻增益/NEP），填进仿真并在 `assumptions` 标注「来源：<型号> datasheet」。查不到或无网络则退回现场标定/默认值，**不得编造规格书数值**。
 
 ### 3. 二次审核（硬约束）
 
