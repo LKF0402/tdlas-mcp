@@ -53,6 +53,68 @@ def _save_sessions(sessions):
                              encoding="utf-8")
 
 
+# ══════════════════ 设备库（仪器统一管理）══════════════════
+# 用户实验仪器基本固定，把激光器/探测器/采集卡/光学元件命名存下来，
+# 仿真时用 setup= / laser= / pd= / daq= / optics= 引用，省去每次手填硬件参数。
+_DEVICE_FILE = _ROOT / ".tdlas_devices.json"
+
+# 各类设备允许保存的参数键（对应仿真里的硬件参数）
+_DEVICE_TYPES = {
+    "laser": ["eta_VI", "dnu_dI", "d2nu_dI2", "wn_ref", "i_ref", "i_th", "eta_IP",
+              "am_i0", "am_i2", "am_psi1", "am_psi2"],
+    "pd": ["resp", "gain", "bw", "rin"],
+    "daq": ["fs", "n_samples", "adc_bits", "v_range"],
+    "optics": ["throughput"],
+}
+_DEVICE_TYPE_CN = {"laser": "激光器", "pd": "探测器", "daq": "采集卡", "optics": "光学元件"}
+
+
+def _load_devices():
+    if _DEVICE_FILE.exists():
+        try:
+            return json.loads(_DEVICE_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_devices(devices):
+    _DEVICE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _DEVICE_FILE.write_text(json.dumps(devices, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+
+
+def _resolve_devices(setup=None, laser=None, pd=None, daq=None, optics=None):
+    """解析设备引用 → 返回要合并进仿真 inst 的硬件参数字典。
+
+    某类设备的选取优先级：显式单设备引用 > setup 整机里的对应项 > 默认设备。
+    返回的参数字典在调用方用 setdefault 合并（本次显式给的具体参数仍最优先）。
+    """
+    dev = _load_devices()
+    pick = {"laser": laser, "pd": pd, "daq": daq, "optics": optics}
+    if setup:
+        st = dev.get("setup", {}).get(str(setup))
+        if st is None:
+            raise ValueError(f"整机配置 {setup!r} 不存在，请先用 tdlas_device 保存")
+        for k in pick:
+            if pick[k] is None and st.get(k):
+                pick[k] = st[k]
+    dflt = dev.get("default", {})
+    for k in pick:
+        if pick[k] is None:
+            pick[k] = dflt.get(k)
+    resolved = {}
+    for k in ("laser", "pd", "daq", "optics"):
+        name = pick[k]
+        if not name:
+            continue
+        params = dev.get(k, {}).get(str(name))
+        if params is None:
+            raise ValueError(f"{_DEVICE_TYPE_CN[k]}设备 {name!r} 不存在，请先用 tdlas_device 保存")
+        resolved.update({kk: vv for kk, vv in params.items() if vv is not None})
+    return resolved
+
+
 def _get_session(session_id="default"):
     return _load_sessions().get(session_id,
                                 {"confirmed": {}, "pending": [], "stage": "clarify"})
@@ -635,7 +697,7 @@ _SCENE_DEFAULTS = {"T": 296.0, "P": 1.01325, "x": 1e-3, "L_cm": 50.0,
 
 def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
                      edge=None, fit_order=None, fit_frac=None, seed=None,
-                     save_png=False, **kw):
+                     save_png=False, setup=None, laser=None, pd=None, daq=None, optics=None, **kw):
     """仪器系统级 DAS 仿真：DAQ 电压 → 激光 → 光路 → PD → ADC 量化 → 基线扣除。
 
     缺省参数按优先级索取：① 用户实测标定值 → ② 器件型号（AI 检索规格书）
@@ -648,8 +710,12 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     assumed = [k for k, v in given_scene.items() if v is None]
 
     given_inst = {k: kw.get(k) for k in _INSTR_KEYS}
-    assumed += [k for k, v in given_inst.items() if v is None and k not in _NO_CONFIRM]
     inst = {k: v for k, v in given_inst.items() if v is not None}
+    # 设备引用：解析设备库，填充未显式给出的硬件参数（本次显式给的值仍最优先）
+    for k, v in _resolve_devices(setup, laser, pd, daq, optics).items():
+        inst.setdefault(k, v)
+    assumed += [k for k, v in given_inst.items()
+                if v is None and k not in _NO_CONFIRM and k not in inst]
 
     if not (species and str(species).strip()):
         raise ValueError("species 不能为空")
@@ -710,7 +776,8 @@ _INSTR_KEYS_WMS = _INSTR_KEYS + ("mod_freq_Hz", "mod_amp_V", "m_opt", "lockin_av
 
 
 def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
-                     seed=None, save_png=False, session_id="default", **kw):
+                     seed=None, save_png=False, session_id="default",
+                     setup=None, laser=None, pd=None, daq=None, optics=None, **kw):
     """WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相（2f/1f）。
 
     调制幅值默认按**最优调制系数 m≈2.2** 自动优化（2f 峰值最大处）。
@@ -737,8 +804,12 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     assumed = [k for k, v in given_scene.items() if v is None and k not in confirmed]
 
     given_inst = {k: kw.get(k) for k in _INSTR_KEYS_WMS}
-    assumed += [k for k, v in given_inst.items() if v is None and k not in _NO_CONFIRM]
     inst = {k: v for k, v in given_inst.items() if v is not None}
+    # 设备引用：解析设备库，填充未显式给出的硬件参数（本次显式给的值仍最优先）
+    for k, v in _resolve_devices(setup, laser, pd, daq, optics).items():
+        inst.setdefault(k, v)
+    assumed += [k for k, v in given_inst.items()
+                if v is None and k not in _NO_CONFIRM and k not in inst]
     if not (species and str(species).strip()):
         raise ValueError("species 不能为空")
 
@@ -892,6 +963,88 @@ def t_session(action="view", session_id="default", **fields):
     return {"error": f"unknown action {action!r}"}
 
 
+def t_device(action="list", device_type=None, name=None,
+             laser=None, pd=None, daq=None, optics=None, **params):
+    """设备库统一管理：把固定的仪器（激光器/探测器/采集卡/光学）命名保存，
+    仿真工具里用 setup= / laser= / pd= / daq= / optics= 直接引用，省去每次手填硬件参数。
+
+    action:
+      list        列出所有设备（按类别）+ 整机配置 + 默认设备
+      save        保存/更新一个设备（device_type: laser/pd/daq/optics；name；其余参数键值）
+      view        查看某个设备
+      delete      删除某个设备（同步清理整机配置与默认里的引用）
+      set_default 设某类设备的默认（不指定设备时自动用默认）
+      save_setup  打包整机配置（name + laser/pd/daq/optics 各给设备名）
+    持久化在仓库根目录 .tdlas_devices.json，MCP 重启/换会话仍保留。
+    """
+    dev = _load_devices()
+
+    if action == "list":
+        return {"devices": {k: {n: dict(v) for n, v in dev.get(k, {}).items()}
+                            for k in ("laser", "pd", "daq", "optics")},
+                "setups": dict(dev.get("setup", {})),
+                "default": dict(dev.get("default", {})),
+                "hint": "在 tdlas_wms_instrument / tdlas_das_instrument 里用 setup= 或 "
+                        "laser= / pd= / daq= / optics= 引用"}
+
+    if action == "view":
+        dt, nm = str(device_type), str(name)
+        return {dt: {nm: dev.get(dt, {}).get(nm)}}
+
+    if action == "delete":
+        dt, nm = str(device_type), str(name)
+        if dt in dev and nm in dev[dt]:
+            del dev[dt][nm]
+            for st in dev.get("setup", {}).values():          # 清理整机配置里的引用
+                for k in list(st):
+                    if st[k] == nm:
+                        st[k] = None
+            for k in list(dev.get("default", {})):            # 清理默认引用
+                if dev["default"][k] == nm:
+                    del dev["default"][k]
+            _save_devices(dev)
+            return {"deleted": f"{dt}:{nm}"}
+        return {"error": f"设备 {nm!r} 不存在（类型 {dt}）"}
+
+    if action == "save":
+        dt = str(device_type)
+        if dt not in _DEVICE_TYPES:
+            return {"error": f"device_type 必须是 {list(_DEVICE_TYPES)} 之一，收到 {dt!r}"}
+        nm = str(name)
+        entry = {k: params[k] for k in _DEVICE_TYPES[dt] if k in params and params[k] is not None}
+        dev.setdefault(dt, {})[nm] = entry
+        _save_devices(dev)
+        return {"saved": f"{dt}:{nm}", "params": entry,
+                "hint": f"引用：{dt}={nm!r}（或打包进 setup 后 setup= 一键加载）"}
+
+    if action == "set_default":
+        dt, nm = str(device_type), str(name)
+        if dt not in _DEVICE_TYPES:
+            return {"error": f"device_type 必须是 {list(_DEVICE_TYPES)} 之一"}
+        if nm not in dev.get(dt, {}):
+            return {"error": f"设备 {nm!r} 不存在（类型 {dt}），请先 save"}
+        dev.setdefault("default", {})[dt] = nm
+        _save_devices(dev)
+        return {"default": dict(dev["default"])}
+
+    if action == "save_setup":
+        nm = str(name)
+        if not nm:
+            return {"error": "save_setup 需要 name（整机配置名）"}
+        st = {k: v for k, v in {"laser": laser, "pd": pd, "daq": daq, "optics": optics}.items() if v}
+        for k, dname in st.items():
+            if dname not in dev.get(k, {}):
+                return {"error": f"{_DEVICE_TYPE_CN[k]}设备 {dname!r} 不存在，请先 save"}
+        full = {"laser": st.get("laser"), "pd": st.get("pd"),
+                "daq": st.get("daq"), "optics": st.get("optics")}
+        dev.setdefault("setup", {})[nm] = full
+        _save_devices(dev)
+        return {"saved_setup": nm, "setup": full,
+                "hint": f"引用：setup={nm!r}"}
+
+    return {"error": f"unknown action {action!r}"}
+
+
 def t_guide(topic=None):
     """返回 AI 主动指导协议（面向实验新手）：参数索取优先级、交互流程、术语表、参数索取指南。"""
     out = dict(AI_INTERACTION_GUIDE)
@@ -917,6 +1070,7 @@ DISPATCH = {"tdlas_simulate": t_simulate,
             "tdlas_wms_instrument": t_wms_instrument,
             "tdlas_review": t_review,
             "tdlas_session": t_session,
+            "tdlas_device": t_device,
             "tdlas_guide": t_guide,
             "tdlas_invert": t_invert,
             "tdlas_detection_limit": t_detection_limit,
@@ -1018,6 +1172,11 @@ TOOLS = [
                          "edge": {"type": "string", "description": "rising(默认) / falling / average / both"},
                          "fit_order": {"type": "integer", "description": "基线多项式阶数，默认 3"},
                          "fit_frac": {"type": "number", "description": "无吸收区占比，默认 0.3"},
+                         "setup": {"type": "string", "description": "整机配置名（tdlas_device save_setup 打包的 laser+pd+daq+optics 组合），一键加载硬件参数"},
+                         "laser": {"type": "string", "description": "激光器设备名（tdlas_device 保存），自动套用 eta_VI/dnu_dI/wn_ref/i_th 等"},
+                         "pd": {"type": "string", "description": "探测器设备名（tdlas_device 保存），自动套用 resp/gain/bw/rin"},
+                         "daq": {"type": "string", "description": "采集卡设备名（tdlas_device 保存），自动套用 fs/n_samples/adc_bits/v_range"},
+                         "optics": {"type": "string", "description": "光学元件设备名（tdlas_device 保存），自动套用 throughput"},
                          "seed": {"type": "integer"},
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                      "required": ["species", "wn_center"]}},
@@ -1073,6 +1232,11 @@ TOOLS = [
                                         "description": "1/f 慢漂移幅度，默认 0.005（可设 0 关）"},
                          "flicker_frac": {"type": "number",
                                           "description": "1/f 粉红噪声幅度，默认 0.01（可设 0 关）"},
+                         "setup": {"type": "string", "description": "整机配置名（tdlas_device save_setup 打包的 laser+pd+daq+optics 组合），一键加载硬件参数"},
+                         "laser": {"type": "string", "description": "激光器设备名（tdlas_device 保存），自动套用 eta_VI/dnu_dI/wn_ref/i_th 等"},
+                         "pd": {"type": "string", "description": "探测器设备名（tdlas_device 保存），自动套用 resp/gain/bw/rin"},
+                         "daq": {"type": "string", "description": "采集卡设备名（tdlas_device 保存），自动套用 fs/n_samples/adc_bits/v_range"},
+                         "optics": {"type": "string", "description": "光学元件设备名（tdlas_device 保存），自动套用 throughput"},
                          "seed": {"type": "integer"},
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                      "required": ["species", "wn_center"]}},
@@ -1102,6 +1266,32 @@ TOOLS = [
                          "T": {"type": "number"}, "P": {"type": "number"},
                          "x": {"type": "number"}, "L_cm": {"type": "number"},
                          "species": {"type": "string"}, "wn_center": {"type": "number"}}}},
+    {"name": "tdlas_device",
+     "description": "设备库统一管理：把固定的仪器（激光器/探测器/采集卡/光学）命名保存，"
+                    "仿真工具里用 setup= / laser= / pd= / daq= / optics= 直接引用，省去每次手填硬件参数。"
+                    "action：list 列出全部；save 保存设备（device_type+name+参数）；view 查看；"
+                    "delete 删除；set_default 设默认设备；save_setup 打包整机配置。",
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "action": {"type": "string",
+                                    "description": "list / save / view / delete / set_default / save_setup，默认 list"},
+                         "device_type": {"type": "string",
+                                         "description": "设备类别：laser / pd / daq / optics（save/view/delete/set_default 用）"},
+                         "name": {"type": "string", "description": "设备名（save/view/delete/set_default）或整机配置名（save_setup）"},
+                         "laser": {"type": "string", "description": "save_setup 时：激光器设备名"},
+                         "pd": {"type": "string", "description": "save_setup 时：探测器设备名"},
+                         "daq": {"type": "string", "description": "save_setup 时：采集卡设备名"},
+                         "optics": {"type": "string", "description": "save_setup 时：光学元件设备名"},
+                         "eta_VI": {"type": "number"}, "dnu_dI": {"type": "number"},
+                         "d2nu_dI2": {"type": "number"}, "wn_ref": {"type": "number"},
+                         "i_ref": {"type": "number"}, "i_th": {"type": "number"},
+                         "eta_IP": {"type": "number"}, "am_i0": {"type": "number"},
+                         "am_i2": {"type": "number"}, "am_psi1": {"type": "number"},
+                         "am_psi2": {"type": "number"}, "resp": {"type": "number"},
+                         "gain": {"type": "number"}, "bw": {"type": "number"},
+                         "rin": {"type": "number"}, "fs": {"type": "number"},
+                         "n_samples": {"type": "integer"}, "adc_bits": {"type": "integer"},
+                         "v_range": {"type": "number"}, "throughput": {"type": "number"}}}},
     {"name": "tdlas_guide",
      "description": "返回 AI 主动指导协议（面向实验新手）：参数索取优先级（实测值 → 器件型号检索 → "
                     "现场标定 → 内置默认并标注）、交互流程四步、专业术语表、全部参数索取指南。"

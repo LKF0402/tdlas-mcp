@@ -25,6 +25,7 @@ tmp/
 xsc_data/
 *.log
 .tdlas_session.json    # 会话状态（运行时数据，含仿真工况，不入库）
+.tdlas_devices.json    # 设备库（用户命名的仪器参数，运行时数据，不入库）
 
 # OS
 .DS_Store
