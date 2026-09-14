@@ -1263,7 +1263,9 @@ TOOLS = [
      "description": "二次审核/多轮核对：跑一遍 WMS 并返回自动校验报告（validation），不画图。"
                     "用于在给出最终结论前对结果做独立复核；非专业用户据此判断结果是否可信。"
                     "overall=pass/warn/fail，逐项 checks 标注 DAS-理论一致性、2f 峰位、αL 弱吸收、"
-                    "是否孤立线、调制系数、采样率、ADC 动态范围、归一化方法、噪声等。",
+                    "是否孤立线、调制系数、采样率、ADC 动态范围、归一化方法、噪声等。"
+                    "**硬件参数与 tdlas_wms_instrument 同源、均可注入**（adc_bits/v_range/gain/… 或 "
+                    "setup=/laser=/pd=/daq=/optics= 设备引用）；务必传入真实硬件，否则默认量程可能 ADC 饱和并误报 fail。",
      "inputSchema": {"type": "object",
                      "properties": {
                          "species": {"type": "string", "description": "分子式，默认 CH4"},
@@ -1272,7 +1274,25 @@ TOOLS = [
                          "x": {"type": "number"}, "L_cm": {"type": "number"},
                          "amp_V": {"type": "number"}, "freq_Hz": {"type": "number"},
                          "mod_freq_Hz": {"type": "number"}, "mod_amp_V": {"type": "number"},
-                         "fs": {"type": "number"}, "seed": {"type": "integer"}}}},
+                         "fs": {"type": "number"}, "seed": {"type": "integer"},
+                         "scan_span_cm": {"type": "number"}, "offset_V": {"type": "number"},
+                         "n_samples": {"type": "integer"},
+                         "adc_bits": {"type": "integer", "description": "ADC 位数，默认 16"},
+                         "v_range": {"type": "number", "description": "ADC 输入量程 ±V，默认 10"},
+                         "throughput": {"type": "number"}, "resp": {"type": "number"},
+                         "gain": {"type": "number", "description": "探测器跨阻增益 V/A，默认 700"},
+                         "bw": {"type": "number"}, "rin": {"type": "number"},
+                         "eta_VI": {"type": "number"}, "dnu_dI": {"type": "number"},
+                         "wn_ref": {"type": "number"}, "i_ref": {"type": "number"},
+                         "i_th": {"type": "number"}, "eta_IP": {"type": "number"},
+                         "trim_frac": {"type": "number", "description": "剔除扫描两端比例，默认 0.12"},
+                         "edge": {"type": "string"}, "lockin_avg": {"type": "integer"},
+                         "lockin_stages": {"type": "integer"}, "background_subtract": {"type": "boolean"},
+                         "drift_frac": {"type": "number"}, "flicker_frac": {"type": "number"},
+                         "setup": {"type": "string", "description": "整机配置名（tdlas_device save_setup），一键加载硬件"},
+                         "laser": {"type": "string"}, "pd": {"type": "string"},
+                         "daq": {"type": "string", "description": "采集卡设备名（tdlas_device 保存）→ 自动套用 fs/n_samples/adc_bits/v_range"},
+                         "optics": {"type": "string"}}}},
     {"name": "tdlas_session",
      "description": "对话状态机（跨会话记忆）：记住用户已确认的工况参数，MCP 重启/换会话仍保留。"
                     "action=view 查看；set 记录（键值）；reset 清空。"

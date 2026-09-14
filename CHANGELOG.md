@@ -2,6 +2,14 @@
 
 本文件精炼记录 tdlas-mcp 的功能演进（按领域归纳，非逐提交罗列）。
 
+## [Unreleased]
+
+### 校验与默认参数修正
+- 默认跨阻增益 `1e3 → 700`：旧默认使默认工况 v_pd≈10.9 V 超出 ±10 V 量程 → ADC 默认即饱和、`tdlas_review` 默认必 fail；现默认工况 v_pd≈7.7 V
+- `tdlas_review` 的 `inputSchema` 补齐硬件/设备参数（`adc_bits/v_range/gain/…` 与 `setup/laser/pd/daq/optics`）；此前实现可透传但 schema 未声明，AI 客户端无从传入
+- 「DAS-理论一致」判据口径修正：明确"有效区 vs 全窗峰"两点口径差异；多线窗口大偏差不再硬 fail（降为提醒），pass/warn 两档不受谱线密度影响
+- 新增 [docs/VALIDATION.md](./docs/VALIDATION.md)：可信度分层、9 条判据口径、使用口径与已知局限
+
 ## [v0.1.0] - 2026-09-13
 
 ### 仿真核心

@@ -112,6 +112,7 @@ python tools/remote_link.py
 | 文档 | 内容 |
 |------|------|
 | [TECHNICAL.md](./TECHNICAL.md) | 物理原理、算法实现、参数表、已知近似 |
+| [docs/VALIDATION.md](./docs/VALIDATION.md) | 可信度分层、校验判据口径、已知局限 |
 | [SKILL.md](./SKILL.md) | AI 交互规范与工具使用协议 |
 | [CHANGELOG.md](./CHANGELOG.md) | 版本更新记录 |
 
