@@ -48,6 +48,14 @@ DAQ 电压(三角波+正弦调制) → 激光器调谐 → HITRAN 气体吸收 �
 
 ![Chat interaction 2](docs/assets/chat-interaction-2.png)
 
+## 🧭 技术适配矩阵
+
+17 种光谱技术在 tdlas-mcp 四层架构（取数层 / 器件层 / 信号层 / 反演层）上的适配判定：
+
+![技术适配矩阵](docs/assets/technique-matrix.png)
+
+> 🟩 复用（直接沿用） · 🟧 改造（新增模块或改写） · 🟥 新增（需全新物理内核）
+
 ## 🚀 快速上手
 
 ```bash
