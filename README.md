@@ -12,6 +12,13 @@ DAQ → 激光 → 光路 → PD → ADC → 数字锁相 · 自然语言驱动<
 <img src="https://img.shields.io/badge/release-v0.1.0-blue" alt="Release">
 <img src="https://img.shields.io/badge/license-GPLv3-green" alt="License">
 <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="Platform">
+<img src="https://img.shields.io/github/stars/LKF0402/tdlas-mcp?style=social" alt="Stars">
+<img src="https://img.shields.io/github/forks/LKF0402/tdlas-mcp?style=social" alt="Forks">
+<img src="https://img.shields.io/github/last-commit/LKF0402/tdlas-mcp" alt="Last commit">
+<img src="https://img.shields.io/github/issues/LKF0402/tdlas-mcp" alt="Issues">
+<img src="https://img.shields.io/github/downloads/LKF0402/tdlas-mcp/total" alt="Downloads">
+<img src="https://img.shields.io/badge/built%20with-NumPy%20%7C%20SciPy-013243" alt="Built with">
+<img src="https://img.shields.io/badge/no%20API%20key%20needed-self--contained-2ea44f" alt="No API key">
 
 </div>
 
