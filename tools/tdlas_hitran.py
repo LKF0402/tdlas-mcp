@@ -154,5 +154,11 @@ def absorption(name, numin, numax, T=296.0, P=1.01325, step=5e-4, wingHW=20.0,
     n_in = int(((nu_all >= numin) & (nu_all <= numax)).sum())
     info = {"molecule": formula, "M": M, "iso": I, "table": table,
             "coverage_cm-1": [round(cov[0], 3), round(cov[1], 3)],
-            "n_lines_table": cov[2], "n_lines_in_window": n_in}
+            "n_lines_table": cov[2], "n_lines_in_window": n_in,
+            # α(ν) 的计算语境：α 峰值随 T/P/网格步长/翼截断/窗口 变化，
+            # 报告 α 峰值时须能同时给出这五项，否则数值不可复现、不可比较。
+            "alpha_context": {"T_K": float(T), "P_atm": float(P),
+                              "window_cm-1": [float(numin), float(numax)],
+                              "step_cm-1": float(step), "wingHW_cm-1": float(wingHW),
+                              "diluent": "air"}}
     return np.asarray(nu, dtype=float), np.asarray(coef, dtype=float), info

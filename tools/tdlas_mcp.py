@@ -77,6 +77,48 @@ def _save_sessions(sessions):
                              encoding="utf-8")
 
 
+# ══════════════════ α 语境的自适应播报 ══════════════════
+# α（吸收系数 / αL）峰值随 T、P、网格步长 step、翼截断 wingHW、波数窗口 变化：
+# 裸报一个 α 数值不可复现、不可比较。但每次都报又啰嗦 → 做成"自适应"：
+# 仅在 ① 本会话首次给出 α 峰值，或 ② 语境相对上次播报发生变化 时，才要求 AI 播报。
+# 记录写入会话态（.tdlas_session.json），跨 MCP 重启仍有效。
+_ALPHA_CTX_FIELDS = ("T_K", "P_atm", "step_cm-1", "wingHW_cm-1")
+
+
+def _alpha_report_block(alpha_context, species, session_id="default"):
+    """自适应决定是否需在回答中显式播报 α 峰值的计算语境。
+
+    规则（任一命中 → needs_report=True）：
+      ① 本会话首次给出 α 峰值（无既往播报记录）；
+      ② 语境变化：物种 或 (T, P, step, wingHW, 窗口) 与上次已播报的不同。
+    返回 None 表示本次结果不含 α 语境（该工具未报 α）。
+    """
+    if not alpha_context:
+        return None
+    snapshot = {"species": str(species).upper(),
+                **{k: alpha_context.get(k) for k in _ALPHA_CTX_FIELDS},
+                "window_cm-1": alpha_context.get("window_cm-1")}
+    sessions = _load_sessions()
+    sess = sessions.get(session_id, {"confirmed": {}, "pending": [], "stage": "clarify"})
+    prev = sess.get("last_alpha_report")
+    reasons = []
+    if prev is None:
+        reasons.append("本会话首次给出 α 峰值")
+    elif prev != snapshot:
+        reasons.append("α 计算语境与上次不同")
+    needs = bool(reasons)
+    if needs:
+        sess["last_alpha_report"] = snapshot
+        sessions[session_id] = sess
+        _save_sessions(sessions)
+    return {"alpha_peak_context": alpha_context,
+            "needs_report": needs,
+            "report_reason": "；".join(reasons) if reasons else "语境未变且已播报过，无需重复",
+            "report_rule": "needs_report=True 时：给出 α 峰值**必须同时**列出 T(K)、P(atm)、"
+                           "网格步长 step(cm⁻¹)、翼截断 wingHW(cm⁻¹)、波数窗口(cm⁻¹)——缺一不可；"
+                           "needs_report=False 时数值口径不变，可省略以保持简洁。"}
+
+
 # ══════════════════ 设备库（仪器统一管理）══════════════════
 # 用户实验仪器基本固定，把激光器/探测器/采集卡/光学元件命名存下来，
 # 仿真时用 setup= / laser= / pd= / daq= / optics= 引用，省去每次手填硬件参数。
@@ -438,6 +480,16 @@ AI_INTERACTION_GUIDE = {
         "弱吸收校验": "推荐工况应使 αL 落在 1e-3 ~ 1e-1（弱吸收线性区）；"
                       "若 αL>0.1 应建议降低 x 或 L_cm，若 <1e-5 应建议增大。",
     },
+    "alpha_reporting": {
+        "原则": "α（吸收系数 / αL）峰值随 T、P、网格步长 step、翼截断 wingHW、波数窗口 变化——"
+                "**裸报一个 α 数值不可复现、不可比较**。故给出 α 峰值时须能同时给出这五项语境。",
+        "何时必须报（自适应）": "看返回的 alpha_report.needs_report：True 时必须报"
+                                "（本会话首次给出 α 峰值，或语境相对上次发生变化）；"
+                                "False 说明语境未变、已播报过，可省略以保持简洁。",
+        "报什么": "α 峰值数值 + T(K) + P(atm) + step(cm⁻¹) + wingHW(cm⁻¹) + 窗口(cm⁻¹)，缺一不可；"
+                  "具体值见 alpha_report.alpha_peak_context。",
+        "注意": "不得为求简洁而省略语境后再对 α 做定量结论；语境不同的两次 α 不可直接比较。",
+    },
     "clarify_protocol": {
         "触发": "返回的 clarify.needed=True（有缺省参数）时，必须进入澄清流程。",
         "流程": "① 按 clarify.questions 向用户提问；② 收到回答后填入对应参数重跑；"
@@ -786,6 +838,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            "warnings": m["warnings"],
            "edge_note": EDGE_TECH_NOTE,
            "log": _sanitize_paths(g.getvalue()).splitlines()}
+    out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species)
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"das_instr_{str(species).upper()}_{float(wn_center):g}cm-1.png"
@@ -917,16 +970,21 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "condition_adaptation": AI_INTERACTION_GUIDE["condition_adaptation"],
                            "clarify_protocol": AI_INTERACTION_GUIDE["clarify_protocol"],
                            "das_baseline_method": AI_INTERACTION_GUIDE["das_baseline_method"],
+                           "alpha_reporting": AI_INTERACTION_GUIDE["alpha_reporting"],
                            "next_step": "若 param_requests 非空：先向用户索取实测值或器件型号；"
-                                        "保留默认时须在结论中标注。",
+                                        "保留默认时须在结论中标注；alpha_report.needs_report=True 时"
+                                        "按 alpha_reporting 播报 α 语境。",
                            "must_disclose": ["① 本次用了哪些噪声（白噪声散粒/热/RIN + 1/f 漂移/粉红，见 noise_disclosure）",
                                              "② 哪些参数用了默认值",
                                              "③ 归一化方法 normalization.method",
-                                             "④ 谱线是否孤立（n_lines_in_window）"],
-                           "interaction_rule": "MCP 必须**多与用户交互**：主动告知以上 must_disclose 四项，"
+                                             "④ 谱线是否孤立（n_lines_in_window）",
+                                             "⑤ 当 alpha_report.needs_report=True 时：α 峰值须连同 "
+                                             "T/P/step/wingHW/窗口 一并给出"],
+                           "interaction_rule": "MCP 必须**多与用户交互**：主动告知以上 must_disclose 各项，"
                                                "并在解读结果前先向用户确认工况（物种/波段/T/P/浓度/光程）。"},
            "warnings": m["warnings"], "edge_note": EDGE_TECH_NOTE,
            "log": _sanitize_paths(g.getvalue()).splitlines()}
+    out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species, session_id)
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"wms_instr_{str(species).upper()}_{float(wn_center):g}cm-1.png"
@@ -951,6 +1009,7 @@ def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
                             "n_lines_in_window": out["results"]["n_lines_in_window"],
                             "norm_method": out["normalization"]["method"],
                             "scan_window_cm-1": out["scan_window_cm-1"]},
+            "alpha_report": out.get("alpha_report"),
             "suggestion": "若 validation.overall != 'pass'，先处理 fail 项再下结论；"
                           "warn 项须向用户说明。"}
 

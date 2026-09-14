@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### α 语境的自适应播报
+- `tdlas_hitran.absorption()` 记录 `info["alpha_context"]`（T/P/窗口/step/wingHW/diluent），经 `meta` 透传到 MCP 返回
+- 新增 `alpha_report = {alpha_peak_context, needs_report, report_reason, report_rule}`（`tdlas_wms_instrument` / `tdlas_das_instrument` / `tdlas_review`）：**仅**本会话首次给出 α 峰值、或 α 语境发生变化时 `needs_report=True`，其余静默携带，避免每次啰嗦
+- `AI_INTERACTION_GUIDE` 新增 `alpha_reporting`，`must_disclose` 增加第 ⑤ 项：`needs_report=True` 时给出 α 峰值须同时列出 T/P/step/wingHW/窗口
+- 修复 `.gitignore` 行内注释导致 `.tdlas_session.json` / `.tdlas_devices.json` 未被忽略的缺陷（gitignore 不支持模式后注释）
+
 ### 校验与默认参数修正
 - 默认跨阻增益 `1e3 → 700`：旧默认使默认工况 v_pd≈10.9 V 超出 ±10 V 量程 → ADC 默认即饱和、`tdlas_review` 默认必 fail；现默认工况 v_pd≈7.7 V
 - `tdlas_review` 的 `inputSchema` 补齐硬件/设备参数（`adc_bits/v_range/gain/…` 与 `setup/laser/pd/daq/optics`）；此前实现可透传但 schema 未声明，AI 客户端无从传入

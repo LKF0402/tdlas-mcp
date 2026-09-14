@@ -304,6 +304,22 @@ das      = -log(v_das / v_das_I0)                       # = αL
 
 **参数解析优先级**：本次显式参数 > 单设备引用 > setup 整机 > 默认设备。设备库提供的硬件参数在返回里**不再列入 `assumptions`**（默认可信、无需重复确认）。设备库持久化于仓库根 `.tdlas_devices.json`（已 gitignore），MCP 重启/换会话仍保留，与 `tdlas_session`（记工况 T/P/x/L）互补。
 
+### 4.8 α 语境的自适应播报（MCP 层）
+
+α（吸收系数 / αL）峰值由 **T、P、网格步长 `step`、翼截断 `wingHW`、波数窗口** 共同决定；其中 `step`/`wingHW` 还是各调用点自适应选取的（WMS：`step=min(2e-4, span/2000)`、`wingHW=max(10, 5·span)`）。因此**裸报 α 峰值不可复现、不可比较**。
+
+分两处实现：
+
+1. **源头记录语境**：`tools/tdlas_hitran.absorption()` 在 `info["alpha_context"]` 中记录
+   `{T_K, P_atm, window_cm-1, step_cm-1, wingHW_cm-1, diluent}`，经仿真 `meta` 透传到 MCP 返回。
+2. **自适应播报**：`_alpha_report_block()` 维护会话态 `last_alpha_report`，返回
+   `alpha_report = {alpha_peak_context, needs_report, report_reason, report_rule}`：
+   - `needs_report=True` 仅当 ① 本会话**首次**给出 α 峰值，或 ② **语境变化**（物种或任一语境量与上次不同）；
+   - 其余情况为 `False`，语境仍随结果静默携带，避免每次啰嗦；
+   - 记录写入 `.tdlas_session.json`，跨 MCP 重启有效。
+
+AI 侧由 `AI_INTERACTION_GUIDE["alpha_reporting"]` 与 `must_disclose⑤` 约束：`needs_report=True` 时，给出 α 峰值**必须同时**列出 T / P / step / wingHW / 窗口 五项。
+
 ---
 
 ## 5. 默认参数表

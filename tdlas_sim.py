@@ -131,7 +131,7 @@ def simulate(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
 
     meta = {"species": species, "wn0": wn0, "T": T, "P": P, "x": x, "L": L,
             "a": a, "i0": i0, "i2": i2, "psi1": psi1, "psi2": psi2,
-            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"]}
+            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"], "alpha_context": info.get("alpha_context")}
     return {"nu": nu, "alpha": alpha, "tau": tau_das, "wn_scan": wn_scan,
             "S1f": S1f, "S2f": S2f, "S4f": S4f, "S2f1f": S2f1f, "meta": meta}
 
@@ -500,7 +500,7 @@ def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=1e-3, L=50.0,
             "fit_order": int(fit_order), "fit_frac": float(fit_frac), "edge": edge,
             "baseline_fallback": baseline_fallback,
             "alpha_L_peak": aL, "warnings": warnings,
-            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"]}
+            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"], "alpha_context": info.get("alpha_context")}
     return {"t": t, "wn": wn, "tri": tri, "I0": I0, "It": It, "baseline": baseline,
             "das_full": das_full, "das": das, "wn_das": wn_das,
             "alpha": alpha, "alpha_L_true": alpha_wn * float(L), "meta": meta}
@@ -1014,7 +1014,7 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "sigma_v_noise": v_noise_rms, "sigma_shot": s_shot * cfg["gain"],
             "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
             "cfg": dict(cfg), "warnings": warnings,
-            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"]}
+            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"], "alpha_context": info.get("alpha_context")}
     return {"t": t, "v_drive": v_drive, "i_laser": i_laser, "nu_laser": nu_laser,
             "p_laser": p_laser, "p_opt": p_opt, "v_pd": v_pd, "v_adc": v_adc,
             "nu_das": nu_das, "das": das, "das_full": das_full, "baseline": baseline,
@@ -1396,7 +1396,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "onef_min_over_median": onef_min / max(onef_med, 1e-30),
             "trim_frac": float(cfg["trim_frac"]), "n_trim": n_keep, "edge": edge,
             "cfg": dict(cfg), "warnings": warnings,
-            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"]}
+            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"], "alpha_context": info.get("alpha_context")}
     return {"t": t, "v_drive": v_drive, "v_scan": v_scan, "v_mod": v_mod_sig * mod_amp_V,
             "nu_laser": nu_laser, "p_laser": p_laser, "p_opt": p_opt, "v_pd": v_pd,
             "v_adc": v_adc, "S1f": S1f, "S2f": S2f, "S2f1f": S2f1f,
