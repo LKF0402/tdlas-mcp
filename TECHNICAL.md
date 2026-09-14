@@ -109,7 +109,7 @@ $$m = \frac{a}{\mathrm{HWHM}}$$
 链路（对应 `simulate_wms_instrument`）：
 
 ```
-DAQ 驱动电压 → 激光器调谐 → 光路 → PD → (+噪声) → ADC → 数字锁相 → 1f/2f/归一化
+DAQ 驱动电压 → 激光器调谐 → 光路 → PD → (+噪声) → ADC → 数字锁相 → 1f、2f、归一化
 ```
 
 ### 3.1 DAQ 驱动电压

@@ -3,7 +3,7 @@
 """TDLAS/WMS 仿真 MCP 服务器（stdio JSON-RPC 2024-11-05）。
 
 把 tdlas_sim 的仿真能力暴露为 AI 可直接调用的工具：
-  · tdlas_simulate         DAS + 免标定 WMS 正向仿真（1f/2f 谐波、峰高、可选 PNG）
+  · tdlas_simulate         DAS + 免标定 WMS 正向仿真（1f、2f 谐波、峰高、可选 PNG）
   · tdlas_invert           免标定浓度反演（2f/1f 峰高 → 摩尔分数）
   · tdlas_detection_limit  检测极限 LOD（等效透过率噪声 σ_τ → NEC / LOD）
   · tdlas_selftest         全链路自检
@@ -343,7 +343,7 @@ AI_INTERACTION_GUIDE = {
                  "图统一为 5 层：驱动电压 → DAS → 1f → 2f → 归一化 2f（自动选方法）。",
          "pass": "返回无错误 + warnings 非空（含工况说明）→ 进 step 4"},
         {"step": 4, "name": "读 normalization.method 并据此解读",
-         "rule": "1f/2f/1f 有效：使用 2f/1f 读数；1f 失效（1f 过零 或 非吸收区泄漏>30%）："
+         "rule": "2f/1f 有效时：使用 2f/1f 读数；1f 失效（1f 过零 或 非吸收区泄漏>30%）："
                  "使用 2f/I0（I0=PD 非吸收区光强均值）读数。**严格按 normalization.method 给出的方法写结论，不要混用**。",
          "pass": "已用同一归一化方法贯穿所有波段读数 → 进 step 5"},
         {"step": 5, "name": "三件校验（用默认值都应通过）",
@@ -505,7 +505,7 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
                a=0.10, i0=0.1671, i2=2.48e-3, psi1_pi=1.9356, psi2_pi=4.4138,
                span=0.8, n_scan=401, n_mod=96, sigma_tau=0.0, seed=None,
                save_png=False, session_id="default"):
-    """DAS + 免标定 WMS 正向仿真：返回 1f/2f 峰高、DAS 最小透过率、线表信息。
+    """DAS + 免标定 WMS 正向仿真：返回 1f、2f 峰高、DAS 最小透过率、线表信息。
 
     wn0 为目标线中心（cm^-1）；x 为摩尔分数（默认 1e-3 = 1000 ppm，弱吸收）；L 为光程 cm；
     a 为调制深度 cm^-1。sigma_tau 为等效透过率噪声（默认 0=理想无噪）。save_png=True 时出图。
@@ -1103,7 +1103,7 @@ DISPATCH = {"tdlas_simulate": t_simulate,
 
 TOOLS = [
     {"name": "tdlas_simulate",
-     "description": "【数值计算，不是画图工具】TDLAS/WMS 简化解析模型：返回 DAS 透过率、1f/2f 峰高等数值。"
+     "description": "【数值计算，不是画图工具】TDLAS/WMS 简化解析模型：返回 DAS 透过率、1f、2f 峰高等数值。"
                     "save_png=True 仅出 3 子图简图（DAS/2f/2f/1f），无仪器链路。"
                     "⚠️ 用户要画 WMS 图、要看 2f/1f 曲线、要仪器级仿真时，必须改用 tdlas_wms_instrument（标准6子图）。"
                     "本工具仅用于快速算峰高数值或解析对照。",
@@ -1206,7 +1206,7 @@ TOOLS = [
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                      "required": ["species", "wn_center"]}},
     {"name": "tdlas_wms_instrument",
-     "description": "【默认首选：画 WMS 图就用这个】WMS 仪器级全链路：三角波+正弦调制→激光→光路→PD→ADC→数字锁相，输出标准6子图（V(t)/PD原始/DAS+理论/1f/2f/2f归一化）。**用户说画WMS图/2f曲线/波长调制时默认调本工具，不要调 tdlas_simulate**。调制幅值按 m≈2.2 自动优化，fm=30kHz，fscan=100Hz。采样率自动适配硬件（常见 16-bit DAQ 上限 250 kS/s）。缺省参数列入 param_requests，AI 须主动澄清工况。",
+     "description": "【默认首选：画 WMS 图就用这个】WMS 仪器级全链路：三角波+正弦调制→激光→光路→PD→ADC→数字锁相，输出标准6子图（V(t)/PD原始/DAS+理论/DAS吸光度/1f/2f/2f/1f归一化）。**用户说画WMS图/2f曲线/波长调制时默认调本工具，不要调 tdlas_simulate**。调制幅值按 m≈2.2 自动优化，fm=30kHz，fscan=100Hz。采样率自动适配硬件（常见 16-bit DAQ 上限 250 kS/s）。缺省参数列入 param_requests，AI 须主动澄清工况。",
      "inputSchema": {"type": "object",
                      "properties": {
                          "species": {"type": "string", "description": "分子式，默认 CH4"},

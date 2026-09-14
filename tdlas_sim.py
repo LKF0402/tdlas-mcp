@@ -4,7 +4,7 @@
 
 链路：
     HITRAN α(ν) ──► 扫描 + 高频调制的瞬时波长 ν(t) ──► τ(t) = exp(-αL)
-                ──► 免标定 WMS 解析（傅里叶系数）──► 1f/2f 谐波
+                ──► 免标定 WMS 解析（傅里叶系数）──► 1f、2f 谐波
                 ──► 2f/1f 归一化（弱吸收下正比于浓度）
 
 设计纪律：
@@ -45,7 +45,7 @@ def wms_hk(t, tau, k: int) -> float:
 
 
 def wms_calibration_free(t, tau, i0, psi1, i2, psi2):
-    """免标定 WMS：由 τ(t) 与强度调制参数给出 1f/2f/4f 的 (X, Y) 分量。
+    """免标定 WMS：由 τ(t) 与强度调制参数给出 1f、2f、4f 的 (X, Y) 分量。
 
     i0 / i2      : 一 / 二阶归一化强度调制幅度（AM）
     psi1 / psi2  : 一 / 二阶 IM-FM 相位差
@@ -369,7 +369,7 @@ def simulate_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
                 psi1=1.9356 * np.pi, psi2=4.4138 * np.pi,
                 i_s=0.1661, psi_s=1.411 * np.pi,
                 span=0.8, fscan=100.0, fm=1e4, fs=5e5, n_cycle_avg=1, step=5e-4):
-    """时域仿真：生成探测器信号 I(t)=I₀(t)·τ(ν(t))，再用数字锁相提取 1f/2f。
+    """时域仿真：生成探测器信号 I(t)=I₀(t)·τ(ν(t))，再用数字锁相提取 1f、2f。
 
     与解析模型（simulate）是两条独立实现，互为交叉验证。
     扫描波形为余弦（fscan），叠加高频正弦调制（fm）。
@@ -1065,7 +1065,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     """WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相。
 
     与 DAS 的差别：驱动电压叠加**高频正弦调制** fm，探测器信号被编码到 fm 及其谐波，
-    经正交解调 + 整数周期滑动平均得到 1f/2f 谐波；2f/1f 在弱吸收下 ∝ 浓度，
+    经正交解调 + 整数周期滑动平均得到 1f、2f 谐波；2f/1f 在弱吸收下 ∝ 浓度，
     且信号被搬离低频 → 天然规避 1/f 噪声与激光 RIN。
 
     调制幅值默认**自动优化**：使调制系数 m = a/HWHM ≈ 2.2（2f 峰值最大）。
