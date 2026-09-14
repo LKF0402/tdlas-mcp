@@ -34,6 +34,20 @@ DAQ 电压(三角波+正弦调制) → 激光器调谐 → HITRAN 气体吸收 �
 
 服务器自包含 HITRAN 线表获取与吸收谱计算模块（基于 HAPI 1.x，无需 API key），通过 MCP 协议接入 AI 助手，以自然语言完成波长调制光谱（WMS）与直接吸收光谱（DAS）仿真。
 
+## 📊 效果展示
+
+### WMS 仪器链路输出（CH₄ @ 2968.5 cm⁻¹）
+
+![WMS demo](docs/assets/wms-ch4-demo.png)
+
+> 3×2 六子图：① 驱动电压（三角波+正弦调制）→ ② DAS 直接吸收 → ③ 一阶谐波 1f → ④ 二阶谐波 2f → ⑤ 2f/1f 归一化（红色区域为电压折返剔除区）
+
+### 自然语言交互
+
+![Chat interaction](docs/assets/chat-interaction-1.png)
+
+![Chat interaction 2](docs/assets/chat-interaction-2.png)
+
 ## 🚀 快速上手
 
 ```bash
