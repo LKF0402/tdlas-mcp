@@ -1,5 +1,5 @@
 {
-  "_comment": "tdlas-mcp 的 MCP 客户端配置示例。把本文件内容合并进你的 MCP 客户端配置文件（如 mcp.json、claude_desktop_config.json 等）。",
+  "_comment": "tdlas-mcp 的 MCP 客户端配置示例。把本文件内容合并进你的 MCP 客户端配置文件（如 mcp.json、mcp_config.json 等）。",
   "_usage": [
     "1. 把 args 里的路径改成你本机 tdlas-mcp 的实际绝对路径（指向 tools/tdlas_mcp.py）",
     "2. command 用 python 或 python.exe；若用虚拟环境，改成 venv 里的解释器路径",
