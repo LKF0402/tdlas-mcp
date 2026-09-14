@@ -1104,7 +1104,7 @@ DISPATCH = {"tdlas_simulate": t_simulate,
 TOOLS = [
     {"name": "tdlas_simulate",
      "description": "【数值计算，不是画图工具】TDLAS/WMS 简化解析模型：返回 DAS 透过率、1f/2f 峰高等数值。"
-                    "save_png=True 仅出 3 子图简图（DAS/2f/2f1f），无仪器链路。"
+                    "save_png=True 仅出 3 子图简图（DAS/2f/2f/1f），无仪器链路。"
                     "⚠️ 用户要画 WMS 图、要看 2f/1f 曲线、要仪器级仿真时，必须改用 tdlas_wms_instrument（标准6子图）。"
                     "本工具仅用于快速算峰高数值或解析对照。",
      "inputSchema": {"type": "object",
@@ -1318,7 +1318,7 @@ TOOLS = [
      "inputSchema": {"type": "object",
                      "properties": {
                          "topic": {"type": "string",
-                                   "description": "可选：查询特定术语（如 m / RIN / 2f1f / LOD）"}}}},
+                                   "description": "可选：查询特定术语（如 m / RIN / 2f/1f / LOD）"}}}},
     {"name": "tdlas_invert",
      "description": "免标定浓度反演：给定测得的归一化 2f 峰高，返回摩尔分数（x = peak / k）。"
                     "优先用 k（来自 tdlas_wms_instrument 返回的 results.sensitivity_k）；"
