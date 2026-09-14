@@ -547,14 +547,14 @@ def plot_das_td(r, out_png):
 
 # ══════════════════ 8. 仪器系统链路（DAQ 电压 → 激光 → 光路 → PD → ADC）══════════════════
 
-# 内置默认参数：NI USB-6211 + 典型中红外 DFB 激光器 + CH4 @2968.5 cm⁻¹ 场景。
+# 内置默认参数：常见 16-bit USB DAQ + 典型中红外 DFB 激光器 + CH4 @2968.5 cm⁻¹ 场景。
 # 参数缺省时的索取优先级：① 用户给实测值 → ② 用户给器件型号（由 AI 检索规格书）
 # → ③ 用户现场标定（如"电压变化 ΔV → 波数变化 Δν"）→ ④ 用下列默认值并明确标注。
 DAQ_DEFAULTS = {
     "fs": 240e3,             # 采样率 Hz = 8×fm(30 kHz)：每调制周期整数 8 点（锁相要求）
     "n_samples": 120_000,    # 采样点数 = 240 kS/s × 0.5 s → 50 个扫描周期 @100 Hz
-    "adc_bits": 16,          # ADC 位数（USB-6211：16-bit）
-    "v_range": 10.0,         # ADC 输入量程 ±V（USB-6211：±10 V）
+    "adc_bits": 16,          # ADC 位数（常见 USB DAQ：16-bit）
+    "v_range": 10.0,         # ADC 输入量程 ±V（常见 USB DAQ：±10 V）
 }
 SCAN_DEFAULTS = {
     "scan_span_cm": 1.5,     # 三角波扫描的波数**半宽**（cm⁻¹）；amp_V = scan_span_cm/(η_VI·|dν/dI|)
@@ -1115,7 +1115,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         fs = fs_new
         cfg["fs"] = fs_new                   # 同步回写，供下游（自适应 m 扫描等）读取
     if fs > 250e3:
-        warnings.append(f"所需采样率 {fs / 1e3:.0f} kS/s 超过 NI USB-6211 上限（250 kS/s）→ "
+        warnings.append(f"所需采样率 {fs / 1e3:.0f} kS/s 超过常见 16-bit DAQ 上限（250 kS/s）→ "
                         f"实际采集需更高采样率的 DAQ，或降低调制频率 fm")
     t = np.arange(int(cfg["n_samples"]), dtype=float) / fs
     fscan = float(cfg["freq_Hz"])

@@ -312,7 +312,7 @@ das      = -log(v_das / v_das_I0)                       # = αL
 |---|---|---|---|
 | DAQ | `fs` | 240 kHz | = 8×fm(30 kHz)；须为 fm 整数倍且 ≥8 点/周期，否则自动吸附 |
 | | `n_samples` | 120 000 | = fs×0.5 s（50 个扫描周期 @100 Hz）；fs 变化时同步放大以保持总时间 |
-| | `adc_bits` / `v_range` | 16 / ±10 V | USB-6211 规格 |
+| | `adc_bits` / `v_range` | 16 / ±10 V | 常见 16-bit DAQ 规格 |
 | 扫描 | `scan_span_cm` | 1.5 cm⁻¹ | 三角波扫描**波数半宽**；`amp_V = scan_span_cm/(η_VI·\|dν/dI\|)` |
 | | `freq_Hz` | 100 Hz | 三角波频率 |
 | | `amp_V` / `offset_V` | **自动反算** | 由 `wn_center`+`scan_span_cm` 经电压—波数关系反算（一般无需手填；显式给则优先） |

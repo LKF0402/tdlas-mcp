@@ -201,8 +201,8 @@ PARAM_ACQ_GUIDE = {
     "wn_ref": ("参考波数", "cm⁻¹", "调谐基准点（通常取规格书中心波长）"),
     "i_ref": ("参考电流", "mA", "与参考波数配对的工作点电流"),
     "i_th": ("阈值电流", "mA", "低于此电流无激光输出"),
-    "fs": ("采集卡采样率", "Hz", "NI USB-6211 上限 250 kS/s"),
-    "adc_bits": ("ADC 位数", "bit", "决定量化噪声与动态范围（USB-6211：16-bit）"),
+    "fs": ("采集卡采样率", "Hz", "常见 16-bit DAQ 上限 250 kS/s"),
+    "adc_bits": ("ADC 位数", "bit", "决定量化噪声与动态范围（常见 USB DAQ：16-bit）"),
     "v_range": ("ADC 输入量程", "V", "决定满量程与饱和阈值"),
     "resp": ("PD 响应度 R", "A/W", "光电转换效率（InGaAs 典型 0.9 A/W）"),
     "gain": ("PD 跨阻增益 G", "V/A", "决定 PD 输出电压；过高会导致 ADC 饱和"),
@@ -387,7 +387,7 @@ AI_INTERACTION_GUIDE = {
     "defaults_when_unknown": "所有物理参数未给时按以下顺序索取：① 实测标定值 → "
                              "② 器件型号（AI 自己检索规格书）→ ③ 引导用户现场标定 → ④ 保留内置默认并**显式标注**「默认值 X」。",
     "datasheet_lookup": {
-        "何时": "用户提供了器件型号（如 'NI USB-6211'、'Thorlabs PDA10D2'、'ILX Lightwave LDX-3220'）时。",
+        "何时": "用户提供了器件型号（如 DAQ 型号、DFB 激光器型号、光电探测器型号）时。",
         "动作": "AI **必须**联网检索该型号的官方 datasheet / 规格书提取参数（用 web 搜索 + 打开官方页面），"
                 "不要只把型号当标签、也不要凭记忆编数字。",
         "按器件类别要查的参数": {
@@ -725,7 +725,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     """仪器系统级 DAS 仿真：DAQ 电压 → 激光 → 光路 → PD → ADC 量化 → 基线扣除。
 
     缺省参数按优先级索取：① 用户实测标定值 → ② 器件型号（AI 检索规格书）
-    → ③ 引导用户现场测量 → ④ 内置默认（NI USB-6211 + 典型中红外 DFB 激光器）。
+    → ③ 引导用户现场测量 → ④ 内置默认（常见 16-bit USB DAQ + 典型中红外 DFB 激光器）。
     返回 assumptions / param_requests / warnings，供 AI 主动向用户澄清后再解读结论。
     """
     given_scene = {"T": T, "P": P, "x": x, "L_cm": L_cm, "edge": edge,
@@ -1157,7 +1157,7 @@ TOOLS = [
     {"name": "tdlas_das_instrument",
      "description": "仪器系统级 DAS 仿真：DAQ 输出电压 → 激光器调谐（V→I→波数/功率）→ 光路损耗与吸收 "
                     "→ PD 光电转换（响应度/跨阻增益/带宽/噪声）→ ADC 量化（位数/量程/饱和）→ 基线扣除。"
-                    "默认器件：NI USB-6211 + 典型中红外 DFB（V→I 24 mA/V、dν/dI −0.088 cm⁻¹/mA、"
+                    "默认器件：常见 16-bit DAQ + 典型中红外 DFB（V→I 24 mA/V、dν/dI −0.088 cm⁻¹/mA、"
                     "中心 2964.7 cm⁻¹）+ CH4 @2968.5 cm⁻¹。"
                     "**缺省参数的索取优先级：① 用户实测值 → ② 器件型号（AI 检索规格书）→ "
                     "③ 引导用户现场标定 → ④ 保留默认并注明。**"
@@ -1183,7 +1183,7 @@ TOOLS = [
                          "i_th": {"type": "number", "description": "阈值电流 mA，默认 30"},
                          "eta_IP": {"type": "number", "description": "功率斜率效率 mW/mA，默认 0.15"},
                          "fs": {"type": "number",
-                                "description": "采样率 Hz，默认 2.4e5（= 8×fm；USB-6211 上限 2.5e5）。"
+                                "description": "采样率 Hz，默认 2.4e5（= 8×fm；常见 16-bit DAQ 上限 2.5e5）。"
                                                "必须为 fm 的整数倍且 ≥8 点/周期，否则自动吸附"},
                          "n_samples": {"type": "integer",
                                        "description": "采样点数，默认 1.2e5（= fs × 0.5 s）"},
@@ -1206,7 +1206,7 @@ TOOLS = [
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                      "required": ["species", "wn_center"]}},
     {"name": "tdlas_wms_instrument",
-     "description": "【默认首选：画 WMS 图就用这个】WMS 仪器级全链路：三角波+正弦调制→激光→光路→PD→ADC→数字锁相，输出标准6子图（V(t)/PD原始/DAS+理论/1f/2f/2f归一化）。**用户说画WMS图/2f曲线/波长调制时默认调本工具，不要调 tdlas_simulate**。调制幅值按 m≈2.2 自动优化，fm=30kHz，fscan=100Hz。采样率自动适配硬件（USB-6211上限250kS/s）。缺省参数列入 param_requests，AI 须主动澄清工况。",
+     "description": "【默认首选：画 WMS 图就用这个】WMS 仪器级全链路：三角波+正弦调制→激光→光路→PD→ADC→数字锁相，输出标准6子图（V(t)/PD原始/DAS+理论/1f/2f/2f归一化）。**用户说画WMS图/2f曲线/波长调制时默认调本工具，不要调 tdlas_simulate**。调制幅值按 m≈2.2 自动优化，fm=30kHz，fscan=100Hz。采样率自动适配硬件（常见 16-bit DAQ 上限 250 kS/s）。缺省参数列入 param_requests，AI 须主动澄清工况。",
      "inputSchema": {"type": "object",
                      "properties": {
                          "species": {"type": "string", "description": "分子式，默认 CH4"},
