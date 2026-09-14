@@ -119,6 +119,40 @@ def _alpha_report_block(alpha_context, species, session_id="default"):
                            "needs_report=False 时数值口径不变，可省略以保持简洁。"}
 
 
+def _fringe_report_block(fringe_meta, session_id="default"):
+    """自适应决定是否需播报 etalon 条纹的影响评估（首次 或 语境变化）。
+
+    未启用条纹模型时返回固定说明且**不写会话**（默认关 → 不打扰用户）。
+    """
+    if not (fringe_meta or {}).get("enabled"):
+        return {"enabled": False, "needs_report": False,
+                "note": "未启用 etalon 条纹模型（默认理想仿真）"}
+    fsr = float(fringe_meta["fsr_cm-1"])
+    ctr = float(fringe_meta["contrast"])
+    snapshot = {"fsr_cm-1": fsr, "contrast": ctr,
+                "drift_frac": float(fringe_meta.get("drift_frac") or 0.0)}
+    sessions = _load_sessions()
+    sess = sessions.get(session_id, {"confirmed": {}, "pending": [], "stage": "clarify"})
+    prev = sess.get("last_fringe_report")
+    reasons = []
+    if prev is None:
+        reasons.append("本会话首次启用 etalon 条纹")
+    elif prev != snapshot:
+        reasons.append("etalon 条纹语境与上次不同")
+    needs = bool(reasons)
+    if needs:
+        sess["last_fringe_report"] = snapshot
+        sessions[session_id] = sess
+        _save_sessions(sessions)
+    return {"enabled": True, "fsr_cm-1": fsr, "contrast": ctr,
+            "fringe_context": fringe_meta,
+            "needs_report": needs,
+            "report_reason": "；".join(reasons) if reasons else "语境未变且已播报过，无需重复",
+            "report_rule": "needs_report=True 时须向用户说明：① 条纹 FSR 与吸收线宽的关系"
+                           "（决定是否会在 2f 上伪造吸收峰）；② 确定性条纹会被背景扣除消除、"
+                           "只有漂移残留；③ 压不掉条纹时该做的物理措施（窗片楔化 / AR 镀膜 / 扫频平均）。"}
+
+
 # ══════════════════ 设备库（仪器统一管理）══════════════════
 # 用户实验仪器基本固定，把激光器/探测器/采集卡/光学元件命名存下来，
 # 仿真时用 setup= / laser= / pd= / daq= / optics= 引用，省去每次手填硬件参数。
@@ -258,6 +292,9 @@ PARAM_ACQ_GUIDE = {
     "lockin_stages": ("锁相低通级联级数", "—", "矩形窗频响是 sinc，级联 2 级(sinc²)把残留 4.1%→1.5%"),
     "drift_frac": ("1/f 慢漂移幅度", "相对光强", "激光功率慢漂移；DAS 受害、WMS 锁相抑制；默认 0.005"),
     "flicker_frac": ("1/f 粉红噪声幅度", "相对光强", "频域 1/√f 噪声；默认 0.01"),
+    "fringe_n": ("etalon 腔折射率", "—", "etalon 条纹：FSR = 1/(2nd)；空气隙 1.0、玻璃≈1.5"),
+    "fringe_d_cm": ("etalon 平行面间距", "cm", "etalon 条纹：决定 FSR；10 mm→1.0、5 mm→0.5"),
+    "fringe_R": ("etalon 单面反射率", "—", "etalon 条纹：峰-峰对比度≈4R/(1−R)²；未镀膜玻璃 0.04、AR≈0.005"),
 }
 
 # ★ 澄清问题模板：把缺省参数转成"带选项的自然语言问句"，供 AI 主动向用户提问。
@@ -395,8 +432,8 @@ AI_INTERACTION_GUIDE = {
          "pass": "三项都通过 → 物理结论可信；任何一项不通过 → 停止解读，回 step 1 排查"},
         {"step": 6, "name": "自检 + 二次审核（必须）",
          "rule": "每次出图/下结论前，必须用 tdlas_review（或读取返回的 validation）做自动校验；"
-                 "校验 9 项：波数轴对齐、DAS-理论一致、αL 弱吸收、是否孤立线、调制系数 m、"
-                 "采样率、ADC 动态范围、归一化方法、噪声。overall=fail 时**不得下结论**，"
+                 "校验 10 项：波数轴对齐、DAS-理论一致、αL 弱吸收、是否孤立线、调制系数 m、"
+                 "采样率、ADC 动态范围、归一化方法、噪声、etalon 条纹。overall=fail 时**不得下结论**，"
                  "先修 fail 项；warn 项须在结论中向用户说明。",
          "pass": "validation.overall=pass 或（warn 项已向用户说明）"},
         {"step": 7, "name": "输出结论",
@@ -489,6 +526,17 @@ AI_INTERACTION_GUIDE = {
         "报什么": "α 峰值数值 + T(K) + P(atm) + step(cm⁻¹) + wingHW(cm⁻¹) + 窗口(cm⁻¹)，缺一不可；"
                   "具体值见 alpha_report.alpha_peak_context。",
         "注意": "不得为求简洁而省略语境后再对 α 做定量结论；语境不同的两次 α 不可直接比较。",
+    },
+    "fringe_reporting": {
+        "原则": "etalon 干涉条纹是 TDLAS 痕量检测的**头号系统性误差**：两个平行且反射率不可忽略的面"
+                "（窗片/透镜/光纤端面）构成 F-P 腔，产生周期 FSR=1/(2nd)、峰-峰对比度≈4R/(1−R)² 的透过率起伏，"
+                "其 2f 与吸收 2f 同形。模型**默认关闭**（fringe=False），绝不静默注入系统性误差。",
+        "何时问": "用户提到窗片 / 光纤 / 滤光片 / 未镀膜或未楔化窗片时，应主动询问是否建模；"
+                  "开启后若未给几何参数，返回的 param_requests 会列出 fringe_n / fringe_d_cm / fringe_R。",
+        "汇报内容": "看返回的 fringe_report：needs_report=True（本会话首次启用或条纹语境变化）时，须说明"
+                    "FSR 与吸收线宽的关系、确定性条纹可被背景扣除而只有漂移残留、"
+                    "以及压不掉条纹时应采取的物理措施（窗片楔化 / AR 镀膜 / 扫频平均）。",
+        "禁止": "不得把 etalon 条纹当成可被降噪 / 多次平均消掉的随机噪声——固定腔长的条纹是确定性项。",
     },
     "clarify_protocol": {
         "触发": "返回的 clarify.needed=True（有缺省参数）时，必须进入澄清流程。",
@@ -761,7 +809,15 @@ def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
 
 _INSTR_KEYS = ("scan_span_cm", "amp_V", "freq_Hz", "offset_V", "phase_deg", "eta_VI", "dnu_dI",
                "wn_ref", "i_ref", "i_th", "eta_IP", "fs", "n_samples", "adc_bits",
-               "v_range", "throughput", "resp", "gain", "bw", "rin")
+               "v_range", "throughput", "resp", "gain", "bw", "rin",
+               # etalon 干涉条纹（默认关，仅显式 fringe=True 时生效）
+               "fringe", "fringe_n", "fringe_d_cm", "fringe_R", "fringe_fsr",
+               "fringe_contrast", "fringe_phase_rad", "fringe_drift_frac")
+
+# etalon 条纹相关键：默认不参与"缺省参数确认"（默认关 → 不该反复追问）；
+# 但用户一旦开启（fringe=True）且未给几何参数，则列入 assumptions / param_requests 主动索取。
+_FRINGE_KEYS = ("fringe", "fringe_n", "fringe_d_cm", "fringe_R", "fringe_fsr",
+                "fringe_contrast", "fringe_phase_rad", "fringe_drift_frac")
 
 # 以下参数有明确默认值或自动反算，无需用户确认：
 #   amp_V / offset_V 由 wn_center + scan_span_cm 经 V-ν 关系反算；
@@ -791,7 +847,8 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     for k, v in _resolve_devices(setup, laser, pd, daq, optics).items():
         inst.setdefault(k, v)
     assumed += [k for k, v in given_inst.items()
-                if v is None and k not in _NO_CONFIRM and k not in inst]
+                if v is None and k not in _NO_CONFIRM and k not in inst
+                and (k not in _FRINGE_KEYS or inst.get("fringe"))]
 
     if not (species and str(species).strip()):
         raise ValueError("species 不能为空")
@@ -839,6 +896,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            "edge_note": EDGE_TECH_NOTE,
            "log": _sanitize_paths(g.getvalue()).splitlines()}
     out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species)
+    out["fringe_report"] = _fringe_report_block(m.get("fringe"))
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"das_instr_{str(species).upper()}_{float(wn_center):g}cm-1.png"
@@ -886,7 +944,8 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     for k, v in _resolve_devices(setup, laser, pd, daq, optics).items():
         inst.setdefault(k, v)
     assumed += [k for k, v in given_inst.items()
-                if v is None and k not in _NO_CONFIRM and k not in inst]
+                if v is None and k not in _NO_CONFIRM and k not in inst
+                and (k not in _FRINGE_KEYS or inst.get("fringe"))]
     if not (species and str(species).strip()):
         raise ValueError("species 不能为空")
 
@@ -971,6 +1030,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "clarify_protocol": AI_INTERACTION_GUIDE["clarify_protocol"],
                            "das_baseline_method": AI_INTERACTION_GUIDE["das_baseline_method"],
                            "alpha_reporting": AI_INTERACTION_GUIDE["alpha_reporting"],
+                           "fringe_reporting": AI_INTERACTION_GUIDE["fringe_reporting"],
                            "next_step": "若 param_requests 非空：先向用户索取实测值或器件型号；"
                                         "保留默认时须在结论中标注；alpha_report.needs_report=True 时"
                                         "按 alpha_reporting 播报 α 语境。",
@@ -979,12 +1039,15 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                              "③ 归一化方法 normalization.method",
                                              "④ 谱线是否孤立（n_lines_in_window）",
                                              "⑤ 当 alpha_report.needs_report=True 时：α 峰值须连同 "
-                                             "T/P/step/wingHW/窗口 一并给出"],
+                                             "T/P/step/wingHW/窗口 一并给出",
+                                             "⑥ 当 fringe_report.needs_report=True 时：说明 etalon 条纹的 FSR/对比度、"
+                                             "是否会在 2f 上伪造吸收、以及该采取的物理措施"],
                            "interaction_rule": "MCP 必须**多与用户交互**：主动告知以上 must_disclose 各项，"
                                                "并在解读结果前先向用户确认工况（物种/波段/T/P/浓度/光程）。"},
            "warnings": m["warnings"], "edge_note": EDGE_TECH_NOTE,
            "log": _sanitize_paths(g.getvalue()).splitlines()}
     out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species, session_id)
+    out["fringe_report"] = _fringe_report_block(m.get("fringe"), session_id)
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"wms_instr_{str(species).upper()}_{float(wn_center):g}cm-1.png"
@@ -1010,6 +1073,7 @@ def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
                             "norm_method": out["normalization"]["method"],
                             "scan_window_cm-1": out["scan_window_cm-1"]},
             "alpha_report": out.get("alpha_report"),
+            "fringe_report": out.get("fringe_report"),
             "suggestion": "若 validation.overall != 'pass'，先处理 fail 项再下结论；"
                           "warn 项须向用户说明。"}
 
@@ -1250,9 +1314,20 @@ TOOLS = [
                          "v_range": {"type": "number", "description": "ADC 输入量程 ±V，默认 10"},
                          "throughput": {"type": "number", "description": "光学总透过率，默认 0.90"},
                          "resp": {"type": "number", "description": "PD 响应度 A/W，默认 0.9"},
-                         "gain": {"type": "number", "description": "PD 跨阻增益 V/A，默认 1e3"},
+                         "gain": {"type": "number", "description": "PD 跨阻增益 V/A，默认 700"},
                          "bw": {"type": "number", "description": "PD 带宽 Hz，默认 1e6"},
                          "rin": {"type": "number", "description": "激光 RIN 1/√Hz，默认 1e-5"},
+                         "fringe": {"type": "boolean",
+                                    "description": "是否启用 etalon 干涉条纹（两平行面 F-P 腔）。默认 False=理想；"
+                                                   "开启后条纹按 FSR=1/(2nd) 叠加在光路上，可能伪造 2f 吸收"},
+                         "fringe_n": {"type": "number", "description": "腔介质折射率，默认 1.5（空气隙 1.0）"},
+                         "fringe_d_cm": {"type": "number", "description": "两平行面间距 cm，默认 0.5（5 mm）"},
+                         "fringe_R": {"type": "number", "description": "单面反射率，默认 0.04（未镀膜玻璃）；AR≈0.005"},
+                         "fringe_fsr": {"type": "number", "description": "自由光谱范围 cm⁻¹（给则覆盖 n/d）"},
+                         "fringe_contrast": {"type": "number", "description": "条纹峰-峰对比度（给则覆盖 R）：≈4R/(1−R)²"},
+                         "fringe_phase_rad": {"type": "number", "description": "条纹初相位 rad，默认 0"},
+                         "fringe_drift_frac": {"type": "number",
+                                               "description": "条纹相对参考谱的漂移幅度（相对 FSR）；只有漂移残留能逃过背景扣除"},
                          "edge": {"type": "string", "description": "rising(默认) / falling / average / both"},
                          "fit_order": {"type": "integer", "description": "基线多项式阶数，默认 3"},
                          "fit_frac": {"type": "number", "description": "无吸收区占比，默认 0.3"},
@@ -1300,6 +1375,14 @@ TOOLS = [
                          "throughput": {"type": "number"}, "resp": {"type": "number"},
                          "gain": {"type": "number"}, "bw": {"type": "number"},
                          "rin": {"type": "number"},
+                         "fringe": {"type": "boolean",
+                                    "description": "是否启用 etalon 干涉条纹（默认 False=理想）。开启后条纹按 FSR=1/(2nd) 叠加，可能伪造 2f 吸收"},
+                         "fringe_n": {"type": "number", "description": "腔介质折射率，默认 1.5"},
+                         "fringe_d_cm": {"type": "number", "description": "两平行面间距 cm，默认 0.5"},
+                         "fringe_R": {"type": "number", "description": "单面反射率，默认 0.04；AR≈0.005"},
+                         "fringe_fsr": {"type": "number", "description": "自由光谱范围 cm⁻¹（给则覆盖 n/d）"},
+                         "fringe_contrast": {"type": "number", "description": "条纹峰-峰对比度（给则覆盖 R）"},
+                         "fringe_phase_rad": {"type": "number"}, "fringe_drift_frac": {"type": "number"},
                          "d2nu_dI2": {"type": "number",
                                       "description": "调谐二阶非线性 cm⁻¹/mA²，默认 0"},
                          "am_i0": {"type": "number", "description": "RAM 1f 强度调制幅度，默认 0（纯 FM）"},
@@ -1341,6 +1424,11 @@ TOOLS = [
                          "throughput": {"type": "number"}, "resp": {"type": "number"},
                          "gain": {"type": "number", "description": "探测器跨阻增益 V/A，默认 700"},
                          "bw": {"type": "number"}, "rin": {"type": "number"},
+                         "fringe": {"type": "boolean", "description": "启用 etalon 干涉条纹（默认 False）"},
+                         "fringe_n": {"type": "number"}, "fringe_d_cm": {"type": "number"},
+                         "fringe_R": {"type": "number"}, "fringe_fsr": {"type": "number"},
+                         "fringe_contrast": {"type": "number"}, "fringe_phase_rad": {"type": "number"},
+                         "fringe_drift_frac": {"type": "number"},
                          "eta_VI": {"type": "number"}, "dnu_dI": {"type": "number"},
                          "wn_ref": {"type": "number"}, "i_ref": {"type": "number"},
                          "i_th": {"type": "number"}, "eta_IP": {"type": "number"},

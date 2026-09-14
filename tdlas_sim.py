@@ -592,6 +592,84 @@ PD_DEFAULTS = {
     "drift_frac": 0.0,       # 1/f 慢漂移幅度（默认关）
     "flicker_frac": 0.0,     # 1/f 粉红噪声幅度（默认关）
 }
+# etalon（法布里-珀罗干涉条纹）：两个平行且反射率不可忽略的光学面（窗片/透镜/光纤端面）
+# 构成的 F-P 腔，在扫描中产生周期 = FSR 的透过率起伏。它是 TDLAS 痕量检测的**头号系统性误差**：
+# 条纹的 2f 与吸收 2f 同形、可被误当吸收；且确定性条纹加噪声/多次平均都压不掉。
+# **默认关闭**（fringe=False = 理想仿真）——绝不静默注入系统性误差，须用户显式开启。
+FRINGE_DEFAULTS = {
+    "fringe": False,          # 开关（默认关）
+    "fringe_n": 1.5,          # 腔介质折射率（空气隙=1.0；玻璃/熔石英≈1.5）
+    "fringe_d_cm": 0.5,       # 两平行面间距 cm（10 mm→1.0；5 mm→0.5）
+    "fringe_R": 0.04,         # 单面反射率（未镀膜玻璃≈0.04；AR 镀膜≈0.005）
+    "fringe_fsr": None,       # 直接给自由光谱范围 cm⁻¹（优先于 n/d）：FSR = 1/(2 n d)
+    "fringe_contrast": None,  # 直接给条纹峰-峰对比度（优先于 R）：≈ 4R/(1−R)²
+    "fringe_phase_rad": 0.0,  # 条纹初相位
+    "fringe_drift_frac": 0.0, # 条纹相对参考谱的漂移幅度（相对 FSR，模拟温度致 d 漂移的残留）
+}
+
+
+def etalon_transmission(nu_cm1, fsr_cm1, contrast, phase_rad=0.0):
+    """F-P etalon（两平行面）的 Airy 透过率 T(ν̃)。
+
+        δ = 2π·ν̃/FSR + φ  ⇒  T = 1 / (1 + F·sin²(δ/2))，F = 4R/(1−R)² ≈ 条纹峰-峰对比度
+
+    小反射率下 T ≈ 1 − F·sin²(δ/2)：即在光强上叠加相对幅度 ≈ F、周期 = FSR 的起伏。
+    ν̃ 与 FSR 均用 cm⁻¹（FSR = 1/(2 n d)，d 用 cm）。
+    """
+    delta = (2.0 * np.pi * np.asarray(nu_cm1, dtype=float)
+             / np.asarray(fsr_cm1, dtype=float) + float(phase_rad))
+    f = max(float(contrast), 0.0)
+    return 1.0 / (1.0 + f * np.sin(delta / 2.0) ** 2)
+
+
+def resolve_fringe(cfg):
+    """解析条纹参数 → (fsr_cm-1, contrast)；未启用或参数非法返回 None。
+
+    FSR（cm⁻¹）优先取显式 `fringe_fsr`，否则由 n/d 反算 1/(2nd)；
+    对比度优先取显式 `fringe_contrast`，否则由 R 反算 4R/(1−R)²。
+    """
+    if not cfg.get("fringe"):
+        return None
+    fsr = cfg.get("fringe_fsr")
+    if fsr is None:
+        n = float(cfg.get("fringe_n") or FRINGE_DEFAULTS["fringe_n"])
+        d = float(cfg.get("fringe_d_cm") or FRINGE_DEFAULTS["fringe_d_cm"])
+        if n <= 0 or d <= 0:
+            return None
+        fsr = 1.0 / (2.0 * n * d)
+    try:
+        fsr = float(fsr)
+    except (TypeError, ValueError):
+        return None
+    if fsr <= 0:
+        return None
+    ctr = cfg.get("fringe_contrast")
+    if ctr is None:
+        r = cfg.get("fringe_R")
+        r = FRINGE_DEFAULTS["fringe_R"] if r is None else float(r)
+        r = min(max(r, 0.0), 0.999)
+        ctr = 4.0 * r / (1.0 - r) ** 2
+    return fsr, float(ctr)
+
+
+def fringe_factor(nu_cm1, cfg, t=None, apply_drift=True):
+    """光路中的 etalon 乘性透过率；未启用时恒为 1.0（完全不改变原行为）。
+
+    apply_drift=True 用于**信号支路**：`fringe_drift_frac` 表示条纹相对参考谱的漂移
+    （d 相对漂移 ε → FSR 按 1/(1+ε) 变化，等效条纹图案平移若干 FSR）；
+    参考谱（背景 / DAS 的 I0）用 apply_drift=False，故确定性条纹被扣除、只留漂移残留——
+    这正是实际中"确定性条纹能被扣除、漂移扣不掉"的物理来源。
+    """
+    res = resolve_fringe(cfg)
+    if res is None:
+        return 1.0
+    fsr, contrast = res
+    if apply_drift and t is not None:
+        eps = float(cfg.get("fringe_drift_frac", 0.0) or 0.0)
+        if eps != 0.0:
+            tt = np.asarray(t, dtype=float)
+            fsr = fsr / (1.0 + eps * np.sin(2.0 * np.pi * 1.0 * tt + 0.7))
+    return etalon_transmission(nu_cm1, fsr, contrast, cfg.get("fringe_phase_rad", 0.0))
 # WMS 调制参数（正弦调制）。调制幅值默认自动优化：使调制系数 m = a/HWHM ≈ 2.2，
 # 这是 2f 谐波幅值最大、检测灵敏度最优的经典取值（Arndt 1965 / Reid & Labrie 1981）。
 MOD_DEFAULTS = {
@@ -877,7 +955,7 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
                 nu_das, das, das_full, baseline, meta
     """
     cfg = {**DAQ_DEFAULTS, **SCAN_DEFAULTS, **LASER_DEFAULTS,
-           **OPTICS_DEFAULTS, **PD_DEFAULTS, **GAS_DEFAULTS}
+           **OPTICS_DEFAULTS, **PD_DEFAULTS, **GAS_DEFAULTS, **FRINGE_DEFAULTS}
     user_keys = set(kw)
     cfg.update({k: v for k, v in kw.items() if v is not None})
     # 显式位置参数覆盖默认（不传则用 GAS_DEFAULTS）
@@ -912,7 +990,8 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         step=min(5e-4, span / 500.0), wingHW=max(10.0, 5.0 * span))
     alpha = np.interp(nu_laser, nu_grid, alpha_pure) * float(x)
     tau = np.exp(-alpha * float(L_cm))
-    p_opt = p_laser * float(cfg["throughput"]) * tau          # 到达 PD 的光功率 mW
+    _fr = resolve_fringe(cfg)                                 # etalon 条纹参数（未启用为 None）
+    p_opt = (p_laser * float(cfg["throughput"]) * fringe_factor(nu_laser, cfg, t) * tau)   # 到达 PD 的光功率 mW
 
     # ④ PD：光功率 → 光电流 → 跨阻电压（含带宽低通）
     i_pd = p_opt * 1e-3 * float(cfg["resp"])                  # A
@@ -955,7 +1034,8 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     _aL_th = float(np.max(alphaL_cyc))
     if _ratio < 0.9 or abs(float(np.max(das_full)) - _aL_th) > 0.5 * max(_aL_th, 1e-30):
         baseline_fallback = True
-        p_opt_bg = p_laser * float(cfg["throughput"])          # 无吸收光功率（τ≡1）
+        p_opt_bg = (p_laser * float(cfg["throughput"])         # 无吸收光功率（τ≡1）
+                    * fringe_factor(nu_laser, cfg, t, apply_drift=False))   # 同一光路 → 含确定性条纹
         v_pd_bg = pd_lowpass(p_opt_bg * 1e-3 * float(cfg["resp"]) * float(cfg["gain"]),
                              cfg["bw"], fs)
         v_bg_adc = np.clip(np.round(v_pd_bg / lsb) * lsb,
@@ -1014,6 +1094,10 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "sigma_v_noise": v_noise_rms, "sigma_shot": s_shot * cfg["gain"],
             "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
             "cfg": dict(cfg), "warnings": warnings,
+            "fringe": ({"enabled": True, "fsr_cm-1": _fr[0], "contrast": _fr[1],
+                        "n": cfg.get("fringe_n"), "d_cm": cfg.get("fringe_d_cm"),
+                        "R": cfg.get("fringe_R"), "phase_rad": cfg.get("fringe_phase_rad"),
+                        "drift_frac": cfg.get("fringe_drift_frac")} if _fr else {"enabled": False}),
             "n_lines_in_window": info["n_lines_in_window"], "table": info["table"], "alpha_context": info.get("alpha_context")}
     return {"t": t, "v_drive": v_drive, "i_laser": i_laser, "nu_laser": nu_laser,
             "p_laser": p_laser, "p_opt": p_opt, "v_pd": v_pd, "v_adc": v_adc,
@@ -1076,7 +1160,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
                 v_adc, S1f, S2f, S2f1f, meta；另有全局序列供局部放大查看。
     """
     cfg = {**DAQ_DEFAULTS, **SCAN_DEFAULTS, **MOD_DEFAULTS, **LASER_DEFAULTS,
-           **OPTICS_DEFAULTS, **PD_DEFAULTS, **GAS_DEFAULTS}
+           **OPTICS_DEFAULTS, **PD_DEFAULTS, **GAS_DEFAULTS, **FRINGE_DEFAULTS}
     user_keys = set(kw)
     cfg.update({k: v for k, v in kw.items() if v is not None})
     # 显式位置参数覆盖默认（不传则用 GAS_DEFAULTS）
@@ -1190,7 +1274,9 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     # ③ 光路
     alpha = np.interp(nu_laser, nu_grid, alpha_pure) * float(x)
     tau = np.exp(-alpha * float(L_cm))
-    p_opt = p_laser * float(cfg["throughput"]) * tau
+    # etalon 条纹：光路乘性透过率（默认关 → 恒 1.0，不改变原行为）。信号支路含漂移残留。
+    _fr = resolve_fringe(cfg)
+    p_opt = p_laser * float(cfg["throughput"]) * fringe_factor(nu_laser, cfg, t) * tau
 
     # ④ PD：光电流 → 跨阻电压 → 带宽低通（真实 PD 有响应时间）
     i_pd = p_opt * 1e-3 * float(cfg["resp"])
@@ -1214,7 +1300,9 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     # 背景参考谱：τ≡1 走同一条链路（含相同 RAM/AM + 慢漂移，**无**白/粉红噪声）。
     # 2f 在非吸收区的基线主要来自 L-I 二阶非线性（RAM），是物理背景，
     # 只能靠"无吸收参考谱"扣除——降噪 / 提采样率都压不掉。
-    i_bg = p_det * float(cfg["throughput"]) * 1e-3 * float(cfg["resp"])
+    # 参考谱走**同一光路**：含确定性条纹（apply_drift=False）→ 背景扣除只留漂移残留。
+    i_bg = (p_det * float(cfg["throughput"]) * fringe_factor(nu_laser, cfg, t, apply_drift=False)
+            * 1e-3 * float(cfg["resp"]))
     v_bg = pd_lowpass(i_bg * float(cfg["gain"]), cfg["bw"], fs)
     v_bg_adc = np.clip(np.round(v_bg / lsb) * lsb, -float(cfg["v_range"]), float(cfg["v_range"]))
     _, X1f_bg, Y1f_bg = wms_harmonic_lockin(v_bg_adc, t, fs, fm, 1, avg, stg)
@@ -1306,11 +1394,14 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     #   在密集谱区（如 C2H6 159 条线，无非吸收区）会失效，导致 DAS 基线错、吸光度失真。
     # ★ I0 也必须过同一条低通 + ADC 量化链路，否则与含吸收的 v_das_all 相位不对齐、
     #   在斜坡上产生系统性偏差（弱吸收下偏差可达 100%+）。噪声不加（I0 是理想无吸收基线）。
-    v_das_I0 = np.clip(np.round(pd_lowpass(p_das * float(cfg["throughput"]) * 1e-3
+    # etalon：I0 支路用确定性条纹，信号支路含漂移残留（与 WMS 同源处理）
+    _fr0 = fringe_factor(nu_das, cfg, t, apply_drift=False)
+    _fr1 = fringe_factor(nu_das, cfg, t)
+    v_das_I0 = np.clip(np.round(pd_lowpass(p_das * float(cfg["throughput"]) * _fr0 * 1e-3
                                            * float(cfg["resp"]) * float(cfg["gain"]),
                                            cfg["bw"], fs) / lsb) * lsb,
                        -float(cfg["v_range"]), float(cfg["v_range"]))
-    p_das_opt = (p_das * float(cfg["throughput"]) * np.exp(-alpha_das * float(L_cm)))
+    p_das_opt = (p_das * float(cfg["throughput"]) * _fr1 * np.exp(-alpha_das * float(L_cm)))
     i_das = p_das_opt * 1e-3 * float(cfg["resp"])
     # 同源噪声模型（与 WMS 完全一致，公平对比）
     s_sh_d, s_th_d, s_rin_d = noise_currents(float(np.mean(i_das)), cfg["bw"],
@@ -1355,6 +1446,12 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     if flicker_frac > 0:
         _np.append(f"1/f 粉红噪声 {flicker_frac * 100:.2g}%")
     warnings.append("已注入噪声（须告知用户）：" + " + ".join(_np))
+    if _fr is not None:
+        warnings.append(f"etalon 条纹已启用：FSR={_fr[0]:.4g} cm⁻¹、峰-峰对比度≈{_fr[1]:.1%}。"
+                        f"确定性条纹会被背景扣除 / I0 归一化消除，**只有漂移残留**"
+                        f"（fringe_drift_frac={float(cfg.get('fringe_drift_frac') or 0):.2g}）进入 2f；"
+                        f"如需直接观察条纹本身，可设 background_subtract=False。"
+                        f"注意：固定 Etalon 的确定性条纹加噪声/多次平均压不掉，只能靠楔化/AR/扫频。")
     if n_keep > 0:
         warnings.append(f"已剔除扫描两端各 {float(cfg['trim_frac']) * 100:.0f}% 数据"
                         f"（三角波转折点导数不连续，其高频谐波会泄漏进 2f）")
@@ -1396,6 +1493,10 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "onef_min_over_median": onef_min / max(onef_med, 1e-30),
             "trim_frac": float(cfg["trim_frac"]), "n_trim": n_keep, "edge": edge,
             "cfg": dict(cfg), "warnings": warnings,
+            "fringe": ({"enabled": True, "fsr_cm-1": _fr[0], "contrast": _fr[1],
+                        "n": cfg.get("fringe_n"), "d_cm": cfg.get("fringe_d_cm"),
+                        "R": cfg.get("fringe_R"), "phase_rad": cfg.get("fringe_phase_rad"),
+                        "drift_frac": cfg.get("fringe_drift_frac")} if _fr else {"enabled": False}),
             "n_lines_in_window": info["n_lines_in_window"], "table": info["table"], "alpha_context": info.get("alpha_context")}
     return {"t": t, "v_drive": v_drive, "v_scan": v_scan, "v_mod": v_mod_sig * mod_amp_V,
             "nu_laser": nu_laser, "p_laser": p_laser, "p_opt": p_opt, "v_pd": v_pd,
@@ -1510,6 +1611,33 @@ def validate_wms_result(r):
         add("噪声", "pass", "未加噪声（理想仿真），已按约定告知")
     else:
         add("噪声", "pass", f"已加噪声：rin={m['cfg']['rin']}, drift={m['drift_frac']}, flicker={m['flicker_frac']}")
+
+    # 10. etalon 干涉条纹（默认关）：可解析性 + 是否会在 2f 上伪造吸收
+    fr = m.get("fringe") or {}
+    if not fr.get("enabled"):
+        add("etalon 条纹", "pass", "未启用 etalon 条纹模型（默认理想仿真）")
+    else:
+        fsr, ctr = float(fr["fsr_cm-1"]), float(fr["contrast"])
+        fw = 2.0 * float(m["hwhm_cm-1"])                 # 吸收线 FWHM
+        step = float((m.get("alpha_context") or {}).get("step_cm-1") or 0.0)
+        scale = fsr / fw if fw > 0 else float("inf")
+        base = (f"FSR={fsr:.4g} cm⁻¹（≈{scale:.1f}×线宽）、峰-峰对比度≈{ctr:.1%}、"
+                f"漂移={float(fr.get('drift_frac') or 0):.2g}")
+        extra = ("" if ctr < 0.05
+                 else "；对比度已远超痕量 αL（~1e-3），不做背景扣除会直接淹没信号")
+        if step > 0 and step > fsr / 10.0:
+            add("etalon 条纹", "fail",
+                f"{base}；网格 step={step:.2g} > FSR/10 → 条纹欠采样/混叠，"
+                f"须减小 step（更细网格）或增大 FSR，否则条纹形状不可信{extra}")
+        elif fsr > 10.0 * fw:
+            add("etalon 条纹", "pass", f"{base}；FSR ≫ 线宽 → 表现为缓慢基线，可拟合/背景扣除{extra}")
+        elif fsr >= fw:
+            add("etalon 条纹", "warn",
+                f"{base}；FSR 为线宽的数倍 → 扫描窗内形成密集假结构，极易与 2f 吸收混淆，"
+                f"务必物理解决（窗片楔化 / AR 镀膜 / 扫频平均）{extra}")
+        else:
+            add("etalon 条纹", "pass",
+                f"{base}；FSR < 线宽 → 线内快速振荡，提高 fm 可把 2f 移出其频谱{extra}")
 
     status = "fail" if any(c["status"] == "fail" for c in checks) else \
              ("warn" if any(c["status"] == "warn" for c in checks) else "pass")

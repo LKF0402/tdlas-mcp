@@ -86,7 +86,7 @@ python tools/tdlas_mcp.py --selftest
 | tdlas_das_instrument | 仪器级 DAS 仿真（DAQ→激光→光路→PD→ADC） |
 | tdlas_simulate | 解析模型正向计算：DAS 透过率、1f、2f 峰高 |
 | tdlas_das_chain | 三角波 DAS 链路：PD 原始信号 → 多项式基线拟合 → 吸光度 |
-| tdlas_review | 结果自动校验（9 项检查，不绘图） |
+| tdlas_review | 结果自动校验（10 项检查，不绘图） |
 | tdlas_invert | 免标定浓度反演：2f/1f 峰高 → 摩尔分数 |
 | tdlas_detection_limit | 噪声等效浓度（NEC）与检测限（LOD）计算 |
 | tdlas_detection_limit_scan | LOD 随光程与参考浓度的二维扫描（系统选型） |

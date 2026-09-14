@@ -25,7 +25,7 @@
   - [4.3 归一化：2f/1f 与 2f/I0](#43-归一化2f1f-与-2fi0)
   - [4.4 扫描方向与剔除区](#44-扫描方向与剔除区)
   - [4.5 浓度反演与检测限](#45-浓度反演与检测限)
-  - [4.6 自动校验（9 项）](#46-自动校验9-项)
+  - [4.6 自动校验（10 项）](#46-自动校验10-项)
 - [5. 默认参数表](#5-默认参数表)
 - [6. 已知近似与局限](#6-已知近似与局限)
 - [7. 实现陷阱（踩坑记录）](#7-实现陷阱踩坑记录)
@@ -145,7 +145,8 @@ P   = max(eta_IP * (i - i_th), 0)                             # mW，低于阈�
 ```python
 alpha = interp(nu_laser, nu_grid, alpha_pure) * x    # 混合气吸收系数
 tau   = exp(-alpha * L_cm)
-p_opt = p_laser * throughput * tau
+T_eta = 1 / (1 + F·sin²(δ/2))                        # etalon 条纹（可选，默认 1）
+p_opt = p_laser * throughput * T_eta * tau
 ```
 
 ### 3.4 探测器 PD
@@ -285,11 +286,11 @@ das      = -log(v_das / v_das_I0)                       # = αL
 - **检测限**：`tdlas_detection_limit` 蒙特卡洛，由等效透过率噪声 $\sigma_\tau$ → NEC / LOD（默认 3σ）
 - **检测限扫描**：`tdlas_detection_limit_scan` 扫 LOD 随光程 $L$ / 参考浓度 $x$ 的网格——弱吸收下 LOD $\propto 1/L$（光程加倍、LOD 减半），且与 $x$ 基本无关；$\alpha L\gtrsim0.1$ 进入非线性区后 LOD 回升，据此选最优光程。
 
-### 4.6 自动校验（9 项）
+### 4.6 自动校验（10 项）
 
 `validate_wms_result()` 每次返回，供非专业用户判断可信度：
 
-波数轴对齐 · DAS-理论一致 · αL 弱吸收区 · 是否孤立线 · 调制系数 m · 采样率 · ADC 动态范围 · 归一化方法 · 噪声
+波数轴对齐 · DAS-理论一致 · αL 弱吸收区 · 是否孤立线 · 调制系数 m · 采样率 · ADC 动态范围 · 归一化方法 · 噪声 · etalon 条纹
 
 `overall = pass/warn/fail`；fail 时不得下结论。
 
@@ -320,6 +321,19 @@ das      = -log(v_das / v_das_I0)                       # = αL
 
 AI 侧由 `AI_INTERACTION_GUIDE["alpha_reporting"]` 与 `must_disclose⑤` 约束：`needs_report=True` 时，给出 α 峰值**必须同时**列出 T / P / step / wingHW / 窗口 五项。
 
+### 4.9 etalon 干涉条纹（MCP 层，默认关）
+
+两个平行且反射率不可忽略的光学面（窗片 / 透镜 / 光纤端面）构成 F-P 腔，透过率为
+
+$$T(\tilde\nu)=\frac{1}{1+F\sin^2(\delta/2)},\qquad \delta=\frac{2\pi\tilde\nu}{\mathrm{FSR}},\qquad F=\frac{4R}{(1-R)^2}$$
+
+即在光强上叠加周期 $\mathrm{FSR}=1/(2nd)$、峰-峰幅度 ≈ F 的起伏。它是 TDLAS 痕量检测的**头号系统性误差**：条纹 2f 与吸收 2f 同形、会被误当吸收，且**确定性条纹加噪声 / 多次平均都压不掉**。
+
+- **注入点**：光路乘性透过率（$p_{opt}=p_{laser}\cdot\mathrm{throughput}\cdot T_{etalon}\cdot\tau$）。信号支路含漂移；**参考谱（背景 / DAS 的 $I_0$）用确定性条纹**，故背景扣除后只留漂移残留——这正是实际中"确定性条纹能被扣除、漂移扣不掉"的来源。
+- **默认关闭**（`fringe=False`），绝不静默注入系统性误差；用户提到窗片 / 光纤 / 未镀膜或未楔化窗片时应主动询问。
+- **校验（第 10 项）**：① `step > FSR/10` → **fail**（条纹欠采样 / 混叠，与采样率铁律同构）；② `FSR > 10×线宽` → 缓慢基线（pass）；③ `线宽 ≤ FSR ≤ 10×线宽` → **warn**（扫描窗内密集假结构，极易与 2f 吸收混淆）；④ `FSR < 线宽` → 线内快速振荡，提高 fm 可把 2f 移出其频谱（pass）。
+- **自适应播报**：`fringe_report = {fringe_context, needs_report, …}`，仅本会话首次启用或条纹语境变化时要求 AI 播报（FSR/对比度、与线宽的关系、该采取的物理措施）。
+
 ---
 
 ## 5. 默认参数表
@@ -345,13 +359,16 @@ AI 侧由 `AI_INTERACTION_GUIDE["alpha_reporting"]` 与 `must_disclose⑤` 约�
 | | `x` | 1e-4 | 摩尔分数（= 100 ppm；强吸收分子如 CH4@3.3μm 默认更低，否则 αL 饱和） |
 | | `L_cm` | 50.0 cm | 有效光程（气室；多通池 ≈ 增大 L） |
 | 光路 | `throughput` | 0.90 | 光学总透过率（窗片/镜片/光纤/连接器**统一折成一个数**）；有效光程见上 `L_cm` |
-| PD | `resp` / `gain` | 0.9 A/W / 1e3 V/A | InGaAs / 跨阻 |
+| PD | `resp` / `gain` | 0.9 A/W / 700 V/A | InGaAs / 跨阻（700 → 默认工况 v_pd≈7.7 V，不饱和） |
 | | `bw` | 1 MHz | 带宽 |
 | | `rin` / `drift_frac` / `flicker_frac` | **0 / 0 / 0** | 噪声默认全关 |
 | 调制 | `mod_freq_Hz` | 30 kHz | 调制频率 |
 | | `m_opt` | **"auto"** | 自适应调制深度 |
 | | `lockin_avg` / `lockin_stages` | 1 / 2 | 低通参数 |
 | | `trim_frac` | 0.12 | 剔除转折点比例 |
+| etalon | `fringe` | **False（关）** | 干涉条纹总开关；开启后按 FSR=1/(2nd) 叠加在光路上 |
+| | `fringe_n` / `fringe_d_cm` / `fringe_R` | 1.5 / 0.5 / 0.04 | 或直接给 `fringe_fsr`(cm⁻¹) / `fringe_contrast`（覆盖前者的推算） |
+| | `fringe_drift_frac` | 0 | 条纹相对参考谱的漂移幅度；**只有漂移残留逃得过背景扣除** |
 
 > **电压是波数的从变量**：`scan_span_cm`（用户给的波数半宽）与 `wn_center`（目标线）才是自然坐标；
 > `amp_V`、`offset_V` 由它们的电压—波数关系（`V→I→ν`）反算，**不写死**。`wn_center` 不填则按上表默认 2968.5；
@@ -367,6 +384,7 @@ AI 侧由 `AI_INTERACTION_GUIDE["alpha_reporting"]` 与 `must_disclose⑤` 约�
 4. **Voigt 近似**：用 HAPI 的 `absorptionCoefficient_Voigt`，非逐线精确 Voigt 数值积分
 5. **单次扫描**：默认取单一扫描方向，未做多周期平均
 6. **DAS 基线为理想 $I_0$**：真实实验需背景扣除，精度低于此
+7. **etalon 条纹为单对平行面模型**：$T = 1/(1 + F\sin^2(\delta/2))$ 只描述**一对**平行面，忽略楔化、多面叠加、光束发散与偏振——给出的条纹幅度实为**上界**；且**默认关闭**
 
 ---
 

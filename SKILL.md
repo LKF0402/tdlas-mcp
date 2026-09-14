@@ -36,7 +36,7 @@ description: TDLAS/WMS 光谱仿真 MCP 服务器。触发词：TDLAS、WMS、�
 | **画 DAS 图** | `tdlas_das_instrument` | 仪器级 DAS，五层链路图 |
 | DAS 信号处理 | `tdlas_das_chain` | PD 原始信号 → 基线拟合 → 吸光度 |
 | 快速算峰高数值 | `tdlas_simulate` | 解析模型，不出仪器链路图 |
-| 结果校验 | `tdlas_review` | 9 项自动检查，不绘图 |
+| 结果校验 | `tdlas_review` | 10 项自动检查，不绘图 |
 | 浓度反演 | `tdlas_invert` | 2f/1f 峰高 → 摩尔分数 |
 | 检测限分析 | `tdlas_detection_limit` / `tdlas_detection_limit_scan` | 单值 / 网格扫描 |
 | 硬件参数管理 | `tdlas_device` | 命名保存/引用激光器/PD/DAQ/光学 |
@@ -88,11 +88,20 @@ description: TDLAS/WMS 光谱仿真 MCP 服务器。触发词：TDLAS、WMS、�
 - **报什么**：α 峰值数值 **＋** `T(K)` **＋** `P(atm)` **＋** `step(cm⁻¹)` **＋** `wingHW(cm⁻¹)` **＋** 窗口(cm⁻¹)——缺一不可，具体值见 `alpha_report.alpha_peak_context`。
 - **禁止**：为求简洁省略语境后再对 α 下定量结论；语境不同的两次 α 不得直接比较。
 
+### 6. etalon 条纹（默认关，按需开启）
+
+只有 `fringe=True` 才建模；**默认 False = 理想仿真，绝不静默注入系统性误差**。
+
+- 用户提到窗片 / 光纤 / 滤光片 / 未镀膜或未楔化窗片时，应**主动询问**是否建模；开启后若未给几何参数，`param_requests` 会列出 `fringe_n` / `fringe_d_cm` / `fringe_R`。
+- 看 `validation` 第 10 项与 `fringe_report`：`needs_report=True` 时须说明 ① FSR 与吸收线宽的关系；② 确定性条纹可被背景扣除、只有漂移残留；③ 压不掉时该做的物理措施（窗片楔化 / AR 镀膜 / 扫频平均）。
+- **不得**把条纹当成可被降噪 / 多次平均消掉的随机噪声——固定腔长的条纹是**确定性项**。
+
 ## 关键物理约束（已知坑点）
 
 | 约束 | 说明 |
 |------|------|
 | α 数值脱离语境 | α 峰值依赖 T/P/step/wingHW/窗口，报数须带上这五项（见 `alpha_report`），否则不可复现 |
+| etalon 条纹被当噪声 | 条纹是确定性项：加噪声/多次平均压不掉，只有楔化/AR 镀膜/扫频能消除；`step > FSR/10` 还会混叠 |
 | 横轴为扫描波数 | 非瞬时波数（瞬时波数含 ±a 调制摆动） |
 | DAS 无调制 | 不能用含调制信号的平均结果伪造 DAS |
 | 1f 过零为物理奇点 | 由 AM 与吸收 1f 相消导致，非"1f 失效" |

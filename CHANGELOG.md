@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### etalon 干涉条纹（新增，默认关）
+- 物理模型 `etalon_transmission()`：两平行面 F-P 腔 Airy 透过率 `T = 1/(1 + F·sin²(δ/2))`，`F = 4R/(1−R)²`、`FSR = 1/(2nd)`（或直接给 `fringe_fsr` / `fringe_contrast` 覆盖）
+- 注入为**光路乘性透过率**：信号支路含漂移，参考谱（背景 / DAS 的 I0）用确定性条纹 → 背景扣除后只留漂移残留
+- **默认关闭**（`fringe=False`），绝不静默注入系统性误差；`tdlas_wms_instrument` / `tdlas_das_instrument` / `tdlas_review` 的 `inputSchema` 均已暴露条纹参数
+- 新增校验第 10 项「etalon 条纹」：`step > FSR/10` 判 **fail**（条纹混叠）；`线宽 ≤ FSR ≤ 10×线宽` 判 **warn**（会与 2f 吸收混淆）
+- 新增自适应 `fringe_report`（首次启用 / 语境变化时播报）+ `AI_INTERACTION_GUIDE["fringe_reporting"]` + `must_disclose⑥`
+- 自动校验 9 项 → **10 项**（README / SKILL / TECHNICAL / VALIDATION 同步）
+
 ### α 语境的自适应播报
 - `tdlas_hitran.absorption()` 记录 `info["alpha_context"]`（T/P/窗口/step/wingHW/diluent），经 `meta` 透传到 MCP 返回
 - 新增 `alpha_report = {alpha_peak_context, needs_report, report_reason, report_rule}`（`tdlas_wms_instrument` / `tdlas_das_instrument` / `tdlas_review`）：**仅**本会话首次给出 α 峰值、或 α 语境发生变化时 `needs_report=True`，其余静默携带，避免每次啰嗦
