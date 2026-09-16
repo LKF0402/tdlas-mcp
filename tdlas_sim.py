@@ -218,6 +218,20 @@ def selftest():
         assert ("offset_V" in str(e)) or ("功率" in str(e)), f"报错信息不含关键提示：{e}"
         print(f"  越界保护：wn_center=6500 → ValueError（{str(e)[:42]}…）")
 
+    # 10) 二次调谐不可达：判别式 < 0 必须硬报错（不得用 max(disc,0) 编出一个假根）
+    try:
+        simulate_wms_instrument(wn_center=float(LASER_DEFAULTS["wn_ref"]) + 5.0,
+                                d2nu_dI2=-1e-3, mod_amp_V=0.1)
+        raise AssertionError("二次调谐不可达应触发 ValueError，却静默通过")
+    except ValueError as e:
+        assert "不可达" in str(e), f"报错未点明\"不可达\"：{e}"
+        print(f"  二次调谐不可达：判别式<0 → ValueError（{str(e)[:42]}…）")
+    w2 = simulate_wms_instrument(wn_center=float(LASER_DEFAULTS["wn_ref"]) + 2.0,
+                                 d2nu_dI2=-1e-3, mod_amp_V=0.1)     # 同模型下可达的目标波数
+    off2 = float(w2["meta"]["cfg"]["offset_V"])
+    assert 0.0 <= off2 <= 5.0, f"二次调谐可达时 offset_V={off2:g} V 越界"
+    print(f"  二次调谐可达：offset_V={off2:.4g} V（判别式>0 时按取近根正常反算）")
+
     print("  自测通过")
     return r
 
@@ -891,7 +905,19 @@ def _resolve_scan(cfg, wn_center, user_keys):
             di = -c / dnu_dI if abs(dnu_dI) > 1e-15 else 0.0
         else:
             # 0.5·d2·di² + dν/dI·di + (wn_ref − wn_center) = 0
-            disc = max(dnu_dI * dnu_dI - 2.0 * d2 * c, 0.0)
+            disc = dnu_dI * dnu_dI - 2.0 * d2 * c
+            if disc < 0.0:
+                # 判别式 < 0 ⇒ 该二次调谐曲线取不到目标波数。此前用 max(disc, 0) 截断成"重根"，
+                # 会凭空造出一个虚假的驱动电压、下游照常出谱（静默伪造），必须硬报错。
+                nu_ext = wn_ref - dnu_dI * dnu_dI / (2.0 * d2)   # 调谐曲线顶点（可达极值）
+                reach = f"≤ {nu_ext:.6g}" if d2 < 0 else f"≥ {nu_ext:.6g}"
+                raise ValueError(
+                    f"目标波数 {float(wn_center):g} cm⁻¹ 在二次调谐模型下不可达："
+                    f"ν = wn_ref + (dν/dI)·Δi + ½(d²ν/dI²)·Δi² 的判别式 {disc:.4g} < 0，方程无实根，"
+                    f"该曲线最多只能到 ν {reach} cm⁻¹"
+                    f"（wn_ref={wn_ref:g}, dν/dI={dnu_dI:g}, d²ν/dI²={d2:g}）。"
+                    f"请核对 wn_ref / dν/dI 的数值与符号、d²ν/dI² 是否合理；"
+                    f"若该波数本应可达，可置 d2nu_dI2=0 改用线性调谐模型。")
             r1 = (-dnu_dI + np.sqrt(disc)) / d2
             r2 = (-dnu_dI - np.sqrt(disc)) / d2
             di = r1 if abs(r1) <= abs(r2) else r2     # 取离 0 近的根（更合理驱动电流）

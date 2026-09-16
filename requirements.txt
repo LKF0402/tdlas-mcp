@@ -1,3 +1,6 @@
+# 运行期依赖（tdlas-mcp）
+# 注意：hitran-api 是发行名，import 名是 hapi（HAPI 1.x，免 API key）。
+# 装完后务必跑一次全链路自检：python tools/tdlas_mcp.py --selftest
 numpy
 matplotlib
 scipy

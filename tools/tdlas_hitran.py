@@ -25,7 +25,19 @@ _SPECIES = None
 
 
 def _hapi():
-    import hapi
+    """导入 HAPI 1.x（pip 包名 `hitran-api`，import 名才是 `hapi`）。
+
+    缺依赖时给出可操作的提示，而不是裸 ModuleNotFoundError ——
+    常见误用是用别的解释器跑（如 windows 商店占位符 python），报错现场离根因很远。
+    """
+    try:
+        import hapi
+    except ImportError as exc:          # 依赖缺失：直接说清装什么、用哪个解释器
+        import sys
+        raise ImportError(
+            "缺少依赖 hitran-api（提供 import hapi）→ 无法从 HITRAN 取线表。"
+            f"请先安装：pip install -r requirements.txt（当前解释器：{sys.executable}）"
+        ) from exc
     return hapi
 
 

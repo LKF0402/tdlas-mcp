@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -168,6 +169,57 @@ _DEVICE_TYPES = {
 }
 _DEVICE_TYPE_CN = {"laser": "激光器", "pd": "探测器", "daq": "采集卡", "optics": "光学元件"}
 
+# 设备参数合法域：(下限, 上限, 是否含下限, 特殊约束)。None = 该端不设限。
+# 为什么必须校验：这些键直接进仿真链路 —— bw→噪声带宽（负值让 np.sqrt 出 nan）、
+# gain→跨阻（除零/负增益）、adc_bits/v_range→量化（非法值产生虚假分辨率）、
+# fs→采样率、throughput→光通量。在"保存"这个最早入口拦下，远比等仿真出 nan 再回溯根因便宜。
+_DEVICE_RULES = {
+    "eta_VI": (0.0, None, False, None),
+    "dnu_dI": (None, None, False, "nonzero"),
+    "d2nu_dI2": (None, None, False, None),
+    "wn_ref": (0.0, None, False, None),
+    "i_ref": (0.0, None, True, None),
+    "i_th": (0.0, None, True, None),
+    "eta_IP": (0.0, None, False, None),
+    "am_i0": (None, None, False, None),
+    "am_i2": (None, None, False, None),
+    "am_psi1": (None, None, False, None),
+    "am_psi2": (None, None, False, None),
+    "resp": (0.0, None, False, None),
+    "gain": (0.0, None, False, None),
+    "bw": (0.0, None, False, None),
+    "rin": (0.0, None, True, None),
+    "fs": (0.0, None, False, None),
+    "n_samples": (1.0, None, True, "int"),
+    "adc_bits": (4.0, 32.0, True, "int"),
+    "v_range": (0.0, None, False, None),
+    "throughput": (0.0, 1.0, False, None),
+}
+
+
+def _validate_device_entry(entry):
+    """校验一组设备参数；返回错误说明（None = 通过）。"""
+    for k, v in entry.items():
+        rule = _DEVICE_RULES.get(k)
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return f"参数 {k}={v!r} 不是数值"
+        if not math.isfinite(fv):
+            return f"参数 {k}={v!r} 不是有限数值"
+        if rule is None:
+            continue
+        lo, hi, lo_incl, kind = rule
+        if kind == "int" and abs(fv - round(fv)) > 1e-9:
+            return f"参数 {k}={fv:g} 必须为整数"
+        if kind == "nonzero" and fv == 0.0:
+            return f"参数 {k} 不能为 0（否则波数不随注入电流变化，无法反算扫描中心）"
+        if lo is not None and (fv < lo or (fv == lo and not lo_incl)):
+            return f"参数 {k}={fv:g} 必须 {'≥' if lo_incl else '>'} {lo:g}"
+        if hi is not None and fv > hi:
+            return f"参数 {k}={fv:g} 必须 ≤ {hi:g}"
+    return None
+
 
 def _load_devices():
     if _DEVICE_FILE.exists():
@@ -211,7 +263,12 @@ def _resolve_devices(setup=None, laser=None, pd=None, daq=None, optics=None):
         params = dev.get(k, {}).get(str(name))
         if params is None:
             raise ValueError(f"{_DEVICE_TYPE_CN[k]}设备 {name!r} 不存在，请先用 tdlas_device 保存")
-        resolved.update({kk: vv for kk, vv in params.items() if vv is not None})
+        entry = {kk: vv for kk, vv in params.items() if vv is not None}
+        bad = _validate_device_entry(entry)          # 兜住历史/手改过的非法条目
+        if bad:
+            raise ValueError(f"已保存的{_DEVICE_TYPE_CN[k]}设备 {name!r} 参数非法：{bad}；"
+                             f"请用 tdlas_device save 重新保存修正")
+        resolved.update(entry)
     return resolved
 
 
@@ -655,21 +712,48 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
     T, P, x_ref, L, assumed = _resolve_conditions(T, P, x_ref, L, session_id, x_default=_xd, L_default=_Ld)
     if not 0.0 < float(x_ref) <= 1.0:
         raise ValueError(f"x_ref 必须在 (0, 1]，收到 {x_ref}")
+    # 输入域校验：2f/1f 峰高是**取绝对值**后的量（≥0）；负值/NaN 一律是用法错误，
+    # 直接算 peak/k 会静默返回负浓度，必须在这里拦下。
+    peak_2f1f = float(peak_2f1f)
+    if not math.isfinite(peak_2f1f):
+        raise ValueError(f"peak_2f1f 必须是有限数值，收到 {peak_2f1f!r}")
+    if peak_2f1f < 0.0:
+        raise ValueError(f"peak_2f1f 必须 ≥ 0（2f/1f 峰高取绝对值），收到 {peak_2f1f:g}")
     with _quiet() as g:
         if k is not None:
             k = float(k)
+            if not math.isfinite(k) or k <= 0.0:
+                raise ValueError(f"灵敏度 k 必须为有限正数，收到 {k:g}"
+                                 f"（应用 tdlas_wms_instrument 的 results.sensitivity_k）")
             k_src = "调用方提供（tdlas_wms_instrument.sensitivity_k）"
         else:
             r = ts.simulate_wms_instrument(str(species), wn_center=float(wn0), T=float(T),
                                            P=float(P), x=float(x_ref), L_cm=float(L))
             k = float(r["meta"]["sensitivity_k"])
             k_src = "完整链路重算（@x_ref）"
-        x_est = ts.invert_concentration(float(peak_2f1f), k)
-    return {"species": str(species).upper(), "mole_frac": float(x_est),
-            "peak_2f1f_in": float(peak_2f1f), "sensitivity_k": float(k),
-            "k_source": k_src, "x_ref": float(x_ref), "T_K": float(T), "P_atm": float(P),
-            "path_cm": float(L), "assumptions": assumed, "needs_confirm": bool(assumed),
-            "log": _sanitize_paths(g.getvalue()).splitlines()}
+        x_est = float(ts.invert_concentration(peak_2f1f, k))
+    # 输出域校验：摩尔分数定义域是 (0, 1]。越界**不静默截断**（截断会掩盖前提已破），
+    # 而是显式标注状态 —— 越界本身即说明 k 与本次工况不同源 / 已出弱吸收线性区 / 峰值取错。
+    if x_est <= 0.0:
+        x_status, x_warn = "zero", ("反演浓度 ≤ 0：peak_2f1f 为 0 或远小于噪声。"
+                                    "请确认取的是吸收峰而非非吸收区，且基线已正确扣除。")
+    elif x_est > 1.0:
+        x_status = "out_of_range_high"
+        x_warn = (f"反演浓度 {x_est:.4g} > 1，物理上不可能（摩尔分数 ≤ 1）→ 该结果不可用。"
+                  f"常见原因：① k 与本次工况不同源（物种/T/P/光程/调制深度不同）；"
+                  f"② αL 已出弱吸收线性区（2f 偏离 x 的线性）；"
+                  f"③ 2f 峰值含未扣除的 RAM 基线/背景。")
+    else:
+        x_status, x_warn = "ok", None
+    out = {"species": str(species).upper(), "mole_frac": x_est,
+           "mole_frac_valid": x_status == "ok", "mole_frac_status": x_status,
+           "peak_2f1f_in": peak_2f1f, "sensitivity_k": k,
+           "k_source": k_src, "x_ref": float(x_ref), "T_K": float(T), "P_atm": float(P),
+           "path_cm": float(L), "assumptions": assumed, "needs_confirm": bool(assumed),
+           "log": _sanitize_paths(g.getvalue()).splitlines()}
+    if x_warn:
+        out["warning"] = x_warn
+    return out
 
 
 def t_detection_limit(species="H2O", wn0=7185.596, T=None, P=None, L=None,
@@ -958,7 +1042,15 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     cfg = m["cfg"]
     s2f1f = np.abs(r["S2f1f_cyc"])
     valid_i = r["valid_mask"]
-    kpk = int(s2f1f.argmax())
+    # ★ 取峰值必须限定在**有效区**（valid_mask，已剔除扫描两端 trim_frac）内：
+    #   sensitivity_k 就是在有效区取 max（tdlas_sim.simulate_wms_instrument），
+    #   若这里用全窗 argmax，被剔除的三角波转折点伪影可能成为"峰值" →
+    #   返回的 results.S2f1f_peak 与 sensitivity_k 不是同一区间，
+    #   把这对不自洽的数直接喂给 tdlas_invert 就会算出错误浓度。
+    if not valid_i.any():
+        raise ValueError("有效区为空（valid_mask 全 False）：trim_frac 过大，请减小后重试")
+    _vidx = np.flatnonzero(valid_i)
+    kpk = int(_vidx[int(np.argmax(s2f1f[valid_i]))])
 
     requests = []
     for k in assumed:
@@ -995,6 +1087,12 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                        "S2f_norm_peak": float(np.abs(r["S2f_norm_cyc"])[valid_i].max())
                        if valid_i.any() else None,
                        "S2f1f_peak": float(s2f1f[kpk]),
+                       "S2f1f_peak_interval": {
+                           "region": "valid_mask（已剔除扫描两端 trim_frac 的转折点区）",
+                           "trim_frac": m["trim_frac"], "n_points_used": int(valid_i.sum()),
+                           "n_points_total": int(valid_i.size),
+                           "full_window_peak_in_trimmed_edge": bool(int(s2f1f.argmax()) != kpk),
+                           "note": "与 sensitivity_k 同区间取峰（否则两者不自洽，不可一起送 tdlas_invert）"},
                        "sensitivity_k": m["sensitivity_k"],
                        "sensitivity_note": "sensitivity_k = S2f_norm_peak / x（完整链路），"
                                            "供 tdlas_invert 的 k 参数直接复用，勿用解析版灵敏度",
@@ -1157,12 +1255,29 @@ def t_device(action="list", device_type=None, name=None,
         dt = str(device_type)
         if dt not in _DEVICE_TYPES:
             return {"error": f"device_type 必须是 {list(_DEVICE_TYPES)} 之一，收到 {dt!r}"}
-        nm = str(name)
+        nm = str(name or "").strip()
+        if not nm:
+            return {"error": "save 需要非空的设备名 name"}
+        if len(nm) > 64:
+            return {"error": f"设备名过长（{len(nm)} 字符，限 64）"}
         entry = {k: params[k] for k in _DEVICE_TYPES[dt] if k in params and params[k] is not None}
+        if not entry:
+            return {"error": f"未提供任何可用参数；{_DEVICE_TYPE_CN[dt]}允许的键："
+                             f"{_DEVICE_TYPES[dt]}"}
+        bad = _validate_device_entry(entry)
+        if bad:
+            return {"error": f"设备 {dt}:{nm} 参数非法：{bad}；"
+                             f"{_DEVICE_TYPE_CN[dt]}允许的键：{_DEVICE_TYPES[dt]}"}
         dev.setdefault(dt, {})[nm] = entry
         _save_devices(dev)
-        return {"saved": f"{dt}:{nm}", "params": entry,
-                "hint": f"引用：{dt}={nm!r}（或打包进 setup 后 setup= 一键加载）"}
+        out = {"saved": f"{dt}:{nm}", "params": entry,
+               "hint": f"引用：{dt}={nm!r}（或打包进 setup 后 setup= 一键加载）"}
+        ignored = sorted(k for k in params if k not in _DEVICE_TYPES[dt])
+        if ignored:
+            out["ignored_params"] = ignored
+            out["ignored_note"] = (f"以下键不属于{_DEVICE_TYPE_CN[dt]}、未保存（疑似拼写错误）："
+                                   f"{ignored}；允许的键：{_DEVICE_TYPES[dt]}")
+        return out
 
     if action == "set_default":
         dt, nm = str(device_type), str(name)
@@ -1456,7 +1571,11 @@ TOOLS = [
      "description": "设备库统一管理：把固定的仪器（激光器/探测器/采集卡/光学）命名保存，"
                     "仿真工具里用 setup= / laser= / pd= / daq= / optics= 直接引用，省去每次手填硬件参数。"
                     "action：list 列出全部；save 保存设备（device_type+name+参数）；view 查看；"
-                    "delete 删除；set_default 设默认设备；save_setup 打包整机配置。",
+                    "delete 删除；set_default 设默认设备；save_setup 打包整机配置。"
+                    "save 会校验：设备名非空、参数为有限数值且在物理合法域内"
+                    "（gain/bw/fs/v_range/eta_* 须 >0，adc_bits 须为 4–32 的整数，"
+                    "throughput ∈ (0,1]，dnu_dI ≠ 0），非法即拒绝保存并说明原因；"
+                    "不属于该类别的键会被忽略并在 ignored_params 中回报（防拼写错误）。",
      "inputSchema": {"type": "object",
                      "properties": {
                          "action": {"type": "string",
@@ -1490,10 +1609,16 @@ TOOLS = [
      "description": "免标定浓度反演：给定测得的归一化 2f 峰高，返回摩尔分数（x = peak / k）。"
                     "优先用 k（来自 tdlas_wms_instrument 返回的 results.sensitivity_k）；"
                     "未给 k 时内部跑完整仪器链路在 x_ref 下重算，保证与测量同模型。"
-                    "仅适用弱吸收（αL≪1），强吸收时结果偏高。",
+                    "仅适用弱吸收（αL≪1），强吸收时结果偏高。"
+                    "输入校验：peak_2f1f 须为有限值且 ≥0（峰高取绝对值）、k 须为有限正数，"
+                    "否则直接报错而非返回负浓度。"
+                    "输出校验：结果超出摩尔分数定义域 (0,1] 时不静默截断，"
+                    "而以 mole_frac_status / mole_frac_valid / warning 显式标注越界（该结果不可用）。"
+                    "⚠ 请用 tdlas_wms_instrument 返回的 results.S2f1f_peak 与 results.sensitivity_k ——"
+                    "两者在同一有效区内取峰，配对使用才自洽。",
      "inputSchema": {"type": "object",
                      "properties": {
-                         "peak_2f1f": {"type": "number", "description": "测得的归一化 2f 峰高"},
+                         "peak_2f1f": {"type": "number", "description": "测得的归一化 2f 峰高（≥0，取绝对值后的量）"},
                          "species": {"type": "string"}, "wn0": {"type": "number"},
                          "T": {"type": "number"}, "P": {"type": "number"},
                          "L": {"type": "number"}, "a": {"type": "number"},
@@ -1725,7 +1850,11 @@ def main():
         except Exception:
             pass
     if "--selftest" in sys.argv:
-        print(json.dumps(_sanitize_paths(t_selftest()), ensure_ascii=False, indent=2))
+        try:
+            print(json.dumps(_sanitize_paths(t_selftest()), ensure_ascii=False, indent=2))
+        except ImportError as exc:      # 依赖缺失：给可操作的提示 + 非零退出码（便于 CI 判断）
+            sys.stderr.write(f"[tdlas-mcp] 自检无法运行：{exc}\n")
+            raise SystemExit(2)
         return
     if "--http" in sys.argv:
         host = _arg("--host", "127.0.0.1")
