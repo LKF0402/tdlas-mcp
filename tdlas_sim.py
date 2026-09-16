@@ -883,6 +883,84 @@ def voltage_to_laser(v, eta_VI=24.0, dnu_dI=-0.088, wn_ref=2964.7, i_ref=120.0,
     return i, nu, p
 
 
+DRIVER_V_LO, DRIVER_V_HI = 0.0, 5.0        # 驱动器输出电压典型范围（v_lo/v_hi）
+_V_EPS = 1e-9                              # 边界容差：offset_V 恰好落在 0 或 5 V 属合法
+
+
+def laser_reach(wn_center, eta_VI=24.0, dnu_dI=-0.088, i_ref=120.0, wn_ref=2964.7,
+                scan_span_cm=1.5, d2nu_dI2=0.0, i_th=30.0,
+                v_lo=DRIVER_V_LO, v_hi=DRIVER_V_HI):
+    """判断目标波数能否被该激光器 + 驱动器达到；给出「需要的 wn_ref」与不可达原因。
+
+    这是**离线可算**的判据（纯算术，不依赖线表），因此既用于报错提示，也用于：
+      · MCP 层在目标波数越界时自动重锚 wn_ref（详见 tools/tdlas_mcp.py 的 _maybe_align_laser）；
+      · 回归测试对 SPECIES_PROFILES 的每个推荐波段做可达性断言。
+
+    返回 dict：
+      reachable        目标波数是否落在驱动器量程内（且扫描半宽不越界）
+      offset_V         当前参数反算出的三角波偏置
+      amp_V            三角波幅值
+      wn_ref_needed    把工作点移到量程中点所需的 wn_ref（重锚建议）
+      fits_span        重锚后扫描半宽是否仍在量程内（过大扫宽救不了）
+      reason           ok / out_of_driver_range / quadratic_unreachable / span_too_wide
+      discriminant     仅二次模型（d2nu_dI2≠0）时有值
+      nu_extremum      二次模型的可达极值（不可达时说明"最多只能到哪"）
+    """
+    eta_VI = float(eta_VI); dnu_dI = float(dnu_dI); i_ref = float(i_ref)
+    wn_ref = float(wn_ref); span = float(scan_span_cm); d2 = float(d2nu_dI2)
+    v_lo = float(v_lo); v_hi = float(v_hi)
+    c = wn_ref - float(wn_center)
+
+    info = {"reachable": False, "offset_V": None, "amp_V": None, "wn_ref_needed": None,
+            "fits_span": None, "reason": "ok", "discriminant": None, "nu_extremum": None}
+    if eta_VI <= 0 or abs(dnu_dI) < 1e-15:
+        info["reason"] = "invalid_laser_params"
+        return info
+
+    # 有效电压下限还要受**阈值电流**约束：V 落在 0–5 V 内并不代表激光出光，
+    # 必须 i = η_VI·V > i_th 才有输出（实测踩到：offset_V≈0 时引擎报"功率≤0"）。
+    v_lo_eff = max(v_lo, float(i_th) / eta_VI)
+    info["v_lo_eff"] = v_lo_eff
+
+    # 扫描半宽与"重锚后的 wn_ref"永远可算（平移 wn_ref 不改变曲率），先算出来：
+    # 这样即使当前参数不可达，调用方也能拿到可执行的修复建议，而不是拿到 None。
+    amp_V = span / abs(eta_VI * dnu_dI)
+    v_mid = 0.5 * (v_lo_eff + v_hi)
+    di_mid = eta_VI * v_mid - i_ref
+    # 让"参考电流处波数 = 目标波数"这条要求落在量程中点：解 ν(di_mid) = wn_center 的截距。
+    # ⚠ 必须带二次项：只用线性式（漏掉 ½·di_mid²·d²ν/dI²）会算出错误的 wn_ref，
+    #   在 d²ν/dI²≠0 时重锚后依然不可达（自检曾抓到该错误）。
+    wn_ref_needed = float(wn_center) - di_mid * dnu_dI - 0.5 * di_mid ** 2 * d2
+    fits_span = (v_mid - amp_V >= v_lo_eff - _V_EPS) and (v_mid + amp_V <= v_hi + _V_EPS)
+    info.update({"amp_V": amp_V, "wn_ref_needed": wn_ref_needed, "fits_span": fits_span})
+    if not fits_span:
+        info["reason"] = "span_too_wide"
+        return info
+
+    if abs(d2) < 1e-15:
+        di = -c / dnu_dI
+    else:
+        disc = dnu_dI * dnu_dI - 2.0 * d2 * c
+        info["discriminant"] = disc
+        if disc < 0.0:                       # 二次调谐曲线取不到该波数（重锚 wn_ref 可解）
+            info["nu_extremum"] = wn_ref - dnu_dI * dnu_dI / (2.0 * d2)
+            info["reason"] = "quadratic_unreachable"
+            return info
+        r1 = (-dnu_dI + np.sqrt(disc)) / d2
+        r2 = (-dnu_dI - np.sqrt(disc)) / d2
+        di = r1 if abs(r1) <= abs(r2) else r2
+
+    offset_V = (di + i_ref) / eta_VI
+    info["offset_V"] = offset_V
+    if offset_V > v_hi + _V_EPS:
+        info["reason"] = "out_of_driver_range"
+    elif offset_V < v_lo_eff - _V_EPS:
+        info["reason"] = "below_threshold_current"
+    else:
+        info["reachable"] = True
+    return info
+
+
 def _resolve_scan(cfg, wn_center, user_keys):
     """由「目标波数 + 扫描半宽」经电压—波数关系反算三角波幅值/偏置。
 
@@ -917,11 +995,37 @@ def _resolve_scan(cfg, wn_center, user_keys):
                     f"该曲线最多只能到 ν {reach} cm⁻¹"
                     f"（wn_ref={wn_ref:g}, dν/dI={dnu_dI:g}, d²ν/dI²={d2:g}）。"
                     f"请核对 wn_ref / dν/dI 的数值与符号、d²ν/dI² 是否合理；"
-                    f"若该波数本应可达，可置 d2nu_dI2=0 改用线性调谐模型。")
+                    f"若该波数本应可达，可置 d2nu_dI2=0 改用线性调谐模型。"
+                    f"（MCP 层默认 auto_laser=True，会自动把 wn_ref 重锚到该波数并如实标注；"
+                    f"这里见到此错说明 auto_laser 被关掉或直接调用了引擎。）")
             r1 = (-dnu_dI + np.sqrt(disc)) / d2
             r2 = (-dnu_dI - np.sqrt(disc)) / d2
             di = r1 if abs(r1) <= abs(r2) else r2     # 取离 0 近的根（更合理驱动电流）
         cfg["offset_V"] = (di + i_ref) / eta_VI if eta_VI > 0 else 0.0
+
+
+def _require_driver_range(cfg, wn_center):
+    """offset_V 越出驱动器量程 → 硬报错（含可达性诊断与可操作建议）。
+
+    边界留 1e-9 容差：目标波数恰好落在量程端点时，浮点误差会把 5.0 算成 5.0000000001，
+    旧实现用严格比较会把一个**合法**工况误判为越界（实测 wn_center=2975.26 得
+    offset_V=-1.89e-13 V 就被拒了）。
+    """
+    off = float(cfg["offset_V"])
+    if (DRIVER_V_LO - _V_EPS) <= off <= (DRIVER_V_HI + _V_EPS):
+        return
+    r = laser_reach(wn_center, eta_VI=cfg["eta_VI"], dnu_dI=cfg["dnu_dI"], i_ref=cfg["i_ref"],
+                    wn_ref=cfg["wn_ref"], scan_span_cm=cfg.get("scan_span_cm", 1.5),
+                    d2nu_dI2=cfg.get("d2nu_dI2", 0.0), i_th=cfg.get("i_th", 30.0))
+    hint = ""
+    if r.get("wn_ref_needed") is not None:
+        hint = (f"该目标波数需 wn_ref≈{r['wn_ref_needed']:.6g} cm⁻¹"
+                f"（或传 laser= 你的真实激光器参数）；MCP 层默认 auto_laser=True 会自动重锚并如实标注。")
+    raise ValueError(
+        f"反算 offset_V={off:.3g} V 越出驱动器典型 {DRIVER_V_LO:.0f}–{DRIVER_V_HI:.0f} V 范围："
+        f"wn_center={float(wn_center):g} cm⁻¹ 不在此 DFB 调谐范围内"
+        f"（wn_ref={cfg['wn_ref']:g}, dν/dI={cfg['dnu_dI']:g}）。"
+        f"请改用对应激光器参数（wn_ref/dν/dI/eta_VI）或手填 offset_V。{hint}")
 
 
 def pink_noise(n, fs, rng, f_lo=1.0):
@@ -1025,10 +1129,15 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
 
     # ⑤ 噪声
     rng = np.random.default_rng(seed)
-    s_shot, s_therm, s_rin = noise_currents(float(np.mean(i_pd)), cfg["bw"],
-                                            cfg["gain"], cfg["rin"], T)
-    s_total = float(np.sqrt(s_shot ** 2 + s_therm ** 2 + s_rin ** 2))
-    v_noisy = v_pd + rng.normal(0.0, s_total * float(cfg["gain"]), v_pd.shape)
+    # physical_noise=False → 严格理想仿真：连散粒/热也不注入（无噪理论对照）
+    if bool(cfg.get("physical_noise", True)):
+        s_shot, s_therm, s_rin = noise_currents(float(np.mean(i_pd)), cfg["bw"],
+                                                cfg["gain"], cfg["rin"], T)
+        s_total = float(np.sqrt(s_shot ** 2 + s_therm ** 2 + s_rin ** 2))
+        v_noisy = v_pd + rng.normal(0.0, s_total * float(cfg["gain"]), v_pd.shape)
+    else:
+        s_shot = s_therm = s_rin = 0.0
+        v_noisy = np.array(v_pd, dtype=float)
 
     # ⑥ ADC 量化（含饱和统计）
     lsb = 2.0 * float(cfg["v_range"]) / float(2 ** int(cfg["adc_bits"]))
@@ -1089,11 +1198,7 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     warnings = []
     if baseline_fallback:
         warnings.append("baseline fallback: dense spectrum, used known I0")
-    if not (0.0 <= cfg["offset_V"] <= 5.0):
-        raise ValueError(f"反算 offset_V={cfg['offset_V']:.3g} V 越出驱动器典型 0–5 V 范围："
-                         f"wn_center={wn_center:g} cm⁻¹ 不在此 DFB 调谐范围内"
-                         f"（wn_ref={cfg['wn_ref']:g}, dν/dI={cfg['dnu_dI']:g}）。"
-                         f"请改用对应激光器参数（wn_ref/dν/dI/eta_VI）或手填 offset_V。")
+    _require_driver_range(cfg, wn_center)
     aL_peak = float(alpha.max()) * float(L_cm)
     if aL_peak > 0.1:
         warnings.append(f"αL≈{aL_peak:.3g} 偏大（>0.1）：DAS 进入非线性区、峰形被压低，"
@@ -1119,6 +1224,7 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "v_pd_mean": float(np.mean(v_pd)), "lsb_V": lsb, "n_sat": n_sat,
             "sigma_v_noise": v_noise_rms, "sigma_shot": s_shot * cfg["gain"],
             "sigma_thermal": s_therm * cfg["gain"], "sigma_rin": s_rin * cfg["gain"],
+            "physical_noise": bool(cfg.get("physical_noise", True)), "seed_used": seed,
             "cfg": dict(cfg), "warnings": warnings,
             "fringe": ({"enabled": True, "fsr_cm-1": _fr[0], "contrast": _fr[1],
                         "n": cfg.get("fringe_n"), "d_cm": cfg.get("fringe_d_cm"),
@@ -1198,11 +1304,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     _resolve_scan(cfg, wn_center, user_keys)
 
     warnings = []
-    if not (0.0 <= cfg["offset_V"] <= 5.0):
-        raise ValueError(f"反算 offset_V={cfg['offset_V']:.3g} V 越出驱动器典型 0–5 V 范围："
-                         f"wn_center={wn_center:g} cm⁻¹ 不在此 DFB 调谐范围内"
-                         f"（wn_ref={cfg['wn_ref']:g}, dν/dI={cfg['dnu_dI']:g}）。"
-                         f"请改用对应激光器参数（wn_ref/dν/dI/eta_VI）或手填 offset_V。")
+    _require_driver_range(cfg, wn_center)
     fm = float(cfg["mod_freq_Hz"])
     fs = float(cfg["fs"])
     # ★ 数字锁相要求采样率是调制频率的**整数倍**，且每调制周期 ≥8 点。
@@ -1309,10 +1411,15 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     v_pd = pd_lowpass(i_pd * float(cfg["gain"]), cfg["bw"], fs)
 
     # ⑤ 噪声（白噪声：散粒 + 热 + RIN）
-    s_shot, s_therm, s_rin = noise_currents(float(np.mean(i_pd)), cfg["bw"],
-                                            cfg["gain"], cfg["rin"], T)
-    s_total = float(np.sqrt(s_shot ** 2 + s_therm ** 2 + s_rin ** 2))
-    v_noisy = v_pd + rng.normal(0.0, s_total * float(cfg["gain"]), v_pd.shape)
+    # physical_noise=False → 严格理想仿真：连散粒/热也不注入（无噪理论对照，结果逐位可复现）
+    if bool(cfg.get("physical_noise", True)):
+        s_shot, s_therm, s_rin = noise_currents(float(np.mean(i_pd)), cfg["bw"],
+                                                cfg["gain"], cfg["rin"], T)
+        s_total = float(np.sqrt(s_shot ** 2 + s_therm ** 2 + s_rin ** 2))
+        v_noisy = v_pd + rng.normal(0.0, s_total * float(cfg["gain"]), v_pd.shape)
+    else:
+        s_shot = s_therm = s_rin = 0.0
+        v_noisy = np.array(v_pd, dtype=float)
 
     # ⑥ ADC
     lsb = 2.0 * float(cfg["v_range"]) / float(2 ** int(cfg["adc_bits"]))
@@ -1518,6 +1625,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "offband_leak_1f": off_1f, "peak_2f_1f": pk_1f, "sensitivity_k": k_sens,
             "onef_min_over_median": onef_min / max(onef_med, 1e-30),
             "trim_frac": float(cfg["trim_frac"]), "n_trim": n_keep, "edge": edge,
+            "physical_noise": bool(cfg.get("physical_noise", True)), "seed_used": seed,
             "cfg": dict(cfg), "warnings": warnings,
             "fringe": ({"enabled": True, "fsr_cm-1": _fr[0], "contrast": _fr[1],
                         "n": cfg.get("fringe_n"), "d_cm": cfg.get("fringe_d_cm"),
@@ -1632,11 +1740,21 @@ def validate_wms_result(r):
     else:
         add("归一化方法", "warn", f"采用 {m['norm_method']}（1f 有效={m['onef_valid']}；未背景扣除，仅供诊断）")
 
-    # 9. 噪声告知（1/f 默认关，须向用户说明）
-    if m["drift_frac"] == 0 and m["flicker_frac"] == 0 and m["cfg"]["rin"] == 0:
-        add("噪声", "pass", "未加噪声（理想仿真），已按约定告知")
+    # 9. 噪声告知（须向用户说明到底注入了什么）
+    #    注意：散粒/热是**物理固有**的，默认就会注入（只取决于光电流与带宽）。
+    #    旧文案在 rin=drift=flicker=0 时直接说"未加噪声（理想仿真）"——不准确，会被 AI
+    #    转述成"结果可精确复现"，而实测跑-跑散布达 ±2%~8%（随机种子每次不同）。
+    if not bool(m["cfg"].get("physical_noise", True)):
+        add("噪声", "pass", "严格理想仿真：未注入任何噪声（含散粒/热），结果逐位可复现")
+    elif m["drift_frac"] == 0 and m["flicker_frac"] == 0 and m["cfg"]["rin"] == 0:
+        add("噪声", "pass",
+            f"仅物理固有噪声：散粒 {m['sigma_shot'] * 1e3:.3g} mV + 热 "
+            f"{m['sigma_thermal'] * 1e3:.3g} mV（RIN/1f 漂移/粉红 = 0）。"
+            f"该噪声**恒在**、且随 seed 变化；需完全无噪请设 physical_noise=False")
     else:
-        add("噪声", "pass", f"已加噪声：rin={m['cfg']['rin']}, drift={m['drift_frac']}, flicker={m['flicker_frac']}")
+        add("含人为开关的噪声", "pass",
+            f"rin={m['cfg']['rin']}, drift={m['drift_frac']}, flicker={m['flicker_frac']}"
+            f"（另含物理固有散粒 {m['sigma_shot'] * 1e3:.3g} mV + 热 {m['sigma_thermal'] * 1e3:.3g} mV）")
 
     # 10. etalon 干涉条纹（默认关）：可解析性 + 是否会在 2f 上伪造吸收
     fr = m.get("fringe") or {}

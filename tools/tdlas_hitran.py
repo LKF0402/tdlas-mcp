@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -94,6 +95,45 @@ def _wnum(v):
     return f"{float(v):g}".replace(".", "p").replace("-", "m")
 
 
+_FETCH_TRIES = 3
+_FETCH_BACKOFF = 1.0            # 秒；重试间隔 1s → 2s（指数退避）
+
+
+def _is_transient(e):
+    """判断抓取失败是否属"网络/服务端暂时故障"（可重试）而非"该窗口无数据"（重试无用）。
+
+    HITRAN 旧接口偶发 502/超时很常见（首次运行与 CI 必踩），此前一次失败就抛错并
+    把四种可能原因并列，用户会误读成"该窗口无 HITRAN 收录"。
+    """
+    import urllib.error
+    if isinstance(e, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)):
+        return True
+    code = getattr(e, "code", None)
+    if isinstance(code, int) and code >= 500:
+        return True
+    msg = str(e).lower()
+    # HAPI 把 HTTP 故障统一包成 "Failed to retrieve data for given parameters."，
+    # 单看这句话无法区分"服务端 502"与"该窗口无数据"，故另配 _isotope_known() 判别。
+    return any(w in msg for w in ("timed out", "timeout", "connection", "temporarily",
+                                  "bad gateway", "502", "503", "504", "reset",
+                                  "failed to retrieve"))
+
+
+def _isotope_known(M, I):
+    """该分子/同位素是否在 HITRAN 收录范围内（用 HAPI 自带索引，离线判断）。
+
+    用途：把"下载失败"与"该同位素根本不存在"分开。HAPI 的 fetch 把两者都抛成同一句话，
+    直接并列成"常见原因：无收录/无网络"会让一次 502 被读成"这个波段 HITRAN 没收"。
+    返回 True/False，索引不可用时返回 None。
+    """
+    try:
+        h = _hapi()
+        # ⚠ HAPI 的 ISO 以 **(M, I) 元组** 为键（不是嵌套字典）：ISO[(6, 1)] = [id, 'CH4', 丰度, 质量, 'CH4']
+        return (int(M), int(I)) in h.ISO
+    except Exception:
+        return None
+
+
 def _coverage(table):
     """已加载表的覆盖区间 (nu_min, nu_max, n_lines)；未加载返回 None。"""
     h = _hapi()
@@ -123,13 +163,41 @@ def fetch_table(formula, M, I, numin, numax, force=False):
         cov = _coverage(base)
         if cov and cov[0] <= numin and cov[1] >= numax:
             return base, cov
-    try:
-        _hapi().fetch(wtable, M, I, numin, numax)
-    except Exception as e:
+    last = None
+    for attempt in range(_FETCH_TRIES):
+        try:
+            _hapi().fetch(wtable, M, I, numin, numax)
+            last = None
+            break
+        except Exception as e:
+            last = e
+            if not _is_transient(e):
+                break
+            if attempt < _FETCH_TRIES - 1:
+                time.sleep(_FETCH_BACKOFF * (2 ** attempt))
+    if last is not None:
+        # ★ 归因必须分开：网络/服务端故障 ≠ "该窗口没有谱线"。
+        #   此前把四种原因并列成一段话，一次 502 会被读成"HITRAN 没收录这条线"，
+        #   用户据此换波段甚至得出"该气体无吸收"——这正是本模块开头纪律要避免的静默错误。
+        known = _isotope_known(M, I)
+        # 优先用**离线索引**下判断（比关键字更可靠）：同位素确实收录 ⇒ 失败必是服务端/网络问题。
+        if known is False:
+            raise RuntimeError(
+                f"[tdlas] 抓取 {formula}(M={M}, I={I}) 于 {numin}-{numax} cm-1 失败：{last}。"
+                f"该分子/同位素不在 HITRAN 收录范围（已用离线索引核对），请核对物种与同位素编号。"
+            ) from last
+        if known is True or _is_transient(last):
+            raise RuntimeError(
+                f"[tdlas] HITRAN 服务暂时不可用（{type(last).__name__}: {last}），"
+                f"已自动重试 {_FETCH_TRIES} 次仍失败。"
+                + (f"{formula}(M={M}, I={I}) 是 HITRAN 收录的同位素，"
+                   f"失败属网络/服务端故障。" if known else "")
+                + "**这不代表该窗口无谱线** —— 请稍后重试，不要据此换波段或判定该气体无吸收。"
+            ) from last
         raise RuntimeError(
-            f"[tdlas] 抓取 {formula}(M={M}, I={I}) 于 {numin}-{numax} cm-1 失败：{e}。"
-            f"常见原因：该窗口无 HITRAN 收录线 / 分子号或同位素不存在 / 无网络 / 官方每日配额超限"
-        ) from e
+            f"[tdlas] 抓取 {formula}(M={M}, I={I}) 于 {numin}-{numax} cm-1 失败：{last}。"
+            f"该分子号/同位素不在 HITRAN 收录范围（已用离线索引核对），请核对物种与同位素编号。"
+        ) from last
     cov = _coverage(wtable)
     if cov is None:
         raise RuntimeError(f"[tdlas] 抓取失败：{formula} 在 {numin}-{numax} cm-1 无线表")

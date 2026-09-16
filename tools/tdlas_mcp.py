@@ -19,6 +19,7 @@ import contextlib
 import io
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -72,10 +73,21 @@ def _load_sessions():
     return {}
 
 
+def _atomic_write_text(path, text):
+    """原子写盘：先写同目录临时文件再 os.replace 覆盖。
+
+    为什么：会话/设备文件的读-改-写不是原子操作，MCP 崩溃或断电时会留下**半截 JSON**
+    （下次 _load_* 直接 JSONDecodeError → 静默丢失全部已确认工况）。os.replace 在
+    同一文件系统上是原子操作，要么旧内容、要么新内容，不会出现半截文件。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _save_sessions(sessions):
-    _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _SESSION_FILE.write_text(json.dumps(sessions, ensure_ascii=False, indent=2),
-                             encoding="utf-8")
+    _atomic_write_text(_SESSION_FILE, json.dumps(sessions, ensure_ascii=False, indent=2))
 
 
 # ══════════════════ α 语境的自适应播报 ══════════════════
@@ -231,9 +243,7 @@ def _load_devices():
 
 
 def _save_devices(devices):
-    _DEVICE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _DEVICE_FILE.write_text(json.dumps(devices, ensure_ascii=False, indent=2),
-                            encoding="utf-8")
+    _atomic_write_text(_DEVICE_FILE, json.dumps(devices, ensure_ascii=False, indent=2))
 
 
 def _resolve_devices(setup=None, laser=None, pd=None, daq=None, optics=None):
@@ -277,15 +287,20 @@ def _get_session(session_id="default"):
                                 {"confirmed": {}, "pending": [], "stage": "clarify"})
 
 
-def _resolve_conditions(T, P, x, L_cm, session_id="default", x_default=1e-3, L_default=30.0):
+def _resolve_conditions(T, P, x, L_cm, session_id="default", x_default=1e-3, L_default=50.0):
     """工况参数优先级：本次显式给 > 会话已确认 > 默认。
 
     会话里存的是 T/P/x/L_cm（与 tdlas_wms_instrument 一致）。返回 (T, P, x, L_cm, assumed)；
     assumed 为「既非本次显式给、也非会话确认、因此用了默认值」的键列表，供返回 assumptions 字段。
+
+    ⚠ 默认值必须与仪器链（_SCENE_DEFAULTS）**同一套**：曾出现分析链 P=1.0 / L_cm=30 而
+    仪器链 P=1.01325 / L_cm=50（物种推荐还有 100），同一会话里两条链对"未给光程"给出
+    相差 3.3 倍的 L，两个数看起来都"合理"却互相矛盾（见 docs/VALIDATION.md §6）。
     """
     confirmed = _get_session(session_id).get("confirmed", {})
     res, assumed = {}, []
-    for k, v, dflt in (("T", T, 296.0), ("P", P, 1.0), ("x", x, x_default), ("L_cm", L_cm, L_default)):
+    for k, v, dflt in (("T", T, _SCENE_DEFAULTS["T"]), ("P", P, _SCENE_DEFAULTS["P"]),
+                       ("x", x, x_default), ("L_cm", L_cm, L_default)):
         if v is not None:
             res[k] = v
         elif k in confirmed:
@@ -297,12 +312,13 @@ def _resolve_conditions(T, P, x, L_cm, session_id="default", x_default=1e-3, L_d
 
 
 def _species_defaults(species):
-    """按物种返回推荐浓度 x_typ 与光程 L_cm（来自 SPECIES_PROFILES，缺省回退 1e-3 / 30 cm）。
+    """按物种返回推荐浓度 x_typ 与光程 L_cm（来自 SPECIES_PROFILES，缺省回退 1e-3 / 50 cm）。
 
     强吸收分子（如 CH4@3.3μm）默认浓度应更低，否则 αL 过大进入饱和区、2f/1f 非线性。
+    回退值取 _SCENE_DEFAULTS 的光程，保证与仪器链一致（见 _resolve_conditions 的说明）。
     """
     prof = SPECIES_PROFILES.get(str(species or "").strip().upper(), {})
-    return prof.get("x_typ", 1e-3), prof.get("L_cm", 30.0)
+    return prof.get("x_typ", 1e-3), prof.get("L_cm", _SCENE_DEFAULTS["L_cm"])
 
 
 # 技术知识：随工具返回，供 AI 向用户解释真实实验要点（而非只给数字）
@@ -346,7 +362,7 @@ PARAM_ACQ_GUIDE = {
     "mod_amp_V": ("正弦调制幅值", "V", "决定调制系数 m=a/HWHM；m≈2.2 时 2f 峰值最大"),
     "m_opt": ("目标调制系数 m", "—", "2f 灵敏度最优的调制深度/线宽比，经典值 2.2"),
     "lockin_avg": ("锁相平均周期数", "—", "低通平均的调制周期数，保持 1（>1 会模糊线形且不降残留）"),
-    "lockin_stages": ("锁相低通级联级数", "—", "矩形窗频响是 sinc，级联 2 级(sinc²)把残留 4.1%→1.5%"),
+    "lockin_stages": ("锁相低通级联级数", "—", "矩形窗频响是 sinc，级联 2 级(sinc²)把非吸收区 2f 残留 4.1%→1.6%"),
     "drift_frac": ("1/f 慢漂移幅度", "相对光强", "激光功率慢漂移；DAS 受害、WMS 锁相抑制；默认 0.005"),
     "flicker_frac": ("1/f 粉红噪声幅度", "相对光强", "频域 1/√f 噪声；默认 0.01"),
     "fringe_n": ("etalon 腔折射率", "—", "etalon 条纹：FSR = 1/(2nd)；空气隙 1.0、玻璃≈1.5"),
@@ -429,15 +445,38 @@ SPECIES_PROFILES = {
 
 
 def adaptive_condition(species, wn_center=None):
-    """工况自适应：未给工况参数时，返回该物种的推荐波段/典型浓度/光程。"""
+    """工况自适应：未给工况参数时，返回该物种的推荐波段/典型浓度/光程 + **该波段的激光可达性**。
+
+    为什么必须带可达性：推荐表横跨 1900–7185 cm⁻¹，而默认激光只是一支 3.36 μm DFB
+    （可达 2964.7–2975.3 cm⁻¹）。旧版只报"推荐 7185.6"，AI 照此调用必然报 offset_V 越界，
+    用户会以为是自己选错了线。现在每个波段都附 `可达` 与 `laser_params_needed`，
+    AI 可以先告诉用户"该波段需要换激光器"，或直接把这组参数传进仿真（也可依赖
+    auto_laser=True 的自动重锚）。
+    """
     sp = str(species).strip().upper()
     p = SPECIES_PROFILES.get(sp, {})
+    dflt = dict(ts.LASER_DEFAULTS)
+    bands_detail = []
+    for label, wn in p.get("bands", []):
+        r = ts.laser_reach(wn, eta_VI=dflt["eta_VI"], dnu_dI=dflt["dnu_dI"], i_ref=dflt["i_ref"],
+                           wn_ref=dflt["wn_ref"], scan_span_cm=1.5, i_th=dflt.get("i_th", 30.0))
+        item = {"波段": label, "wn_center_cm-1": wn, "默认激光可达": bool(r["reachable"])}
+        if not r["reachable"]:
+            item["需要"] = f"wn_ref≈{r['wn_ref_needed']:.6g} cm⁻¹ 的激光器（其余参数可沿用默认）"
+            item["laser_params_needed"] = {"wn_ref": round(float(r["wn_ref_needed"]), 6)}
+            item["说明"] = ("默认激光（wn_ref=%.6g）覆盖不到该波段；调用 tdlas_wms_instrument 时"
+                            "auto_laser=True（默认）会自动重锚 wn_ref 并在 warnings 中标注，"
+                            "结论中必须向用户说明这不是真实硬件。" % dflt["wn_ref"])
+        bands_detail.append(item)
     rec = {"species": sp,
            "推荐波段": p.get("bands", []),
+           "波段可达性": bands_detail,
            "推荐浓度 x": p.get("x_typ"),
            "推荐光程 L_cm": p.get("L_cm"),
            "推荐 T": p.get("T"), "推荐 P": p.get("P"),
-           "说明": p.get("note", "无内置资料，请提供工况")}
+           "说明": p.get("note", "无内置资料，请提供工况"),
+           "默认激光": {k: dflt[k] for k in ("wn_ref", "dnu_dI", "eta_VI", "i_ref")},
+           "提示": "推荐波段未必落在默认激光的调谐范围内；给用户推荐前先看『波段可达性』。"}
     return rec
 
 
@@ -454,7 +493,10 @@ AI_INTERACTION_GUIDE = {
     ],
     "workflow": [
         "第 1 步｜确认场景：测什么分子、什么波段、什么工况（T/P/浓度量级/光程）。"
-        "用户不确定时主动给推荐（CH4 → 3.3 μm 或 1.65 μm；CO → 2.3 μm；CO2 → 2.0 μm）。",
+        "用户不确定时主动给推荐（CH4 → 3.3 μm 或 1.65 μm；CO → 2.3 μm；CO2 → 2.0 μm）；"
+        "**推荐前先看 adaptive_condition 返回的『波段可达性』**——默认激光只覆盖 2964.7–2975.3 cm⁻¹，"
+        "其它波段需要另配激光器：要么把该波段的 laser_params_needed 一并告诉用户（让他知道要换器件），"
+        "要么依赖 auto_laser=True 的自动重锚（此时必须按 must_disclose⑦ 说明这属理想假设、非真实硬件）。",
         "第 2 步｜分组索取参数，每次只问一组，并说明该参数控制什么物理量（见 PARAM_ACQ_GUIDE 的 why）。",
         "第 3 步｜拿到结果后做**合理性体检**并主动告知：αL 是否在弱吸收区、ADC 是否饱和、"
         "噪声主导来源（散粒/热/RIN）、检测限量级、调制系数 m 是否接近 2.2。",
@@ -482,11 +524,14 @@ AI_INTERACTION_GUIDE = {
          "rule": "2f/1f 有效时：使用 2f/1f 读数；1f 失效（1f 过零 或 非吸收区泄漏>30%）："
                  "使用 2f/I0（I0=PD 非吸收区光强均值）读数。**严格按 normalization.method 给出的方法写结论，不要混用**。",
          "pass": "已用同一归一化方法贯穿所有波段读数 → 进 step 5"},
-        {"step": 5, "name": "三件校验（用默认值都应通过）",
+        {"step": 5, "name": "三件校验（形态类判据视工况打折）",
          "rule": "① DAS 提取峰与 HITRAN 理论 αL 一致（偏差 <2%）；"
                  "② 2f 峰位 Δν ≈ ±0.7a（孤立单线下应见标准双峰结构）；"
-                 "③ 非吸收区残留/峰 < 2%。",
-         "pass": "三项都通过 → 物理结论可信；任何一项不通过 → 停止解读，回 step 1 排查"},
+                 "③ 非吸收区残留/峰 < 2%。"
+                 "⚠ **默认工况本身通常就有 1–2 条形态类提醒**（如 CH4@2968.5 密集谱区："
+                 "αL=0.133 偏大 + 221 条线非孤立），这属正常，不是失败；"
+                 "密集谱区 ② 本就不该按孤立线的标准双峰要求。",
+         "pass": "三项都通过 → 物理结论可信；任何一项不通过 → 停止解读，回 step 1 排查（形态类先看线密度）"},
         {"step": 6, "name": "自检 + 二次审核（必须）",
          "rule": "每次出图/下结论前，必须用 tdlas_review（或读取返回的 validation）做自动校验；"
                  "校验 10 项：波数轴对齐、DAS-理论一致、αL 弱吸收、是否孤立线、调制系数 m、"
@@ -568,7 +613,9 @@ AI_INTERACTION_GUIDE = {
     },
     "condition_adaptation": {
         "规则": "工况参数（T/P/x/L_cm）未给时，按物种用 SPECIES_PROFILES 自动推荐（自适应），"
-                "不套用全局默认；返回 condition_advice 告知推荐值。",
+                "不套用全局默认；返回 condition_advice 告知推荐值。"
+                "**推荐波段的可达性也在 condition_advice 里**（波段可达性/laser_params_needed），"
+                "推荐前先核对，否则用户按推荐选波段会直接撞上激光调谐范围。",
         "主动询问": "出图前必须**主动向用户确认工况**：物种/波段是否正确、浓度量级、光程、"
                     "T/P；用户不确定时给出 condition_advice 的推荐。",
         "弱吸收校验": "推荐工况应使 αL 落在 1e-3 ~ 1e-1（弱吸收线性区）；"
@@ -607,10 +654,13 @@ AI_INTERACTION_GUIDE = {
                     "超过 4 题时按优先级分批多轮：波段 > 浓度/光程 > T/P > 器件 > 噪声。",
     },
     "noise_and_interaction": {
-        "默认": "**默认不加任何噪声**（理想仿真：rin=0, drift_frac=0, flicker_frac=0）。",
+        "默认": "**默认：RIN 与 1/f（漂移/粉红）关，但散粒/热噪声恒在**——它们是物理固有项"
+                "（只取决于光电流与带宽，量级通常 0.01–0.1 mV），无法通过参数关闭；"
+                "要让噪声严格为零请设 physical_noise=False（此时为纯理论对照，结果逐位可复现）。"
+                "随机种子默认 seed=0 → 默认参数下结果可复现；返回里的 seed_used 即实际所用种子。",
         "询问": "MCP 必须在出图/解读前**主动询问用户**：是否需要加噪声？加哪类？多大？"
                 "可选：① RIN 白噪声(rin) ② 1/f 慢漂移(drift_frac) ③ 1/f 粉红(flicker_frac)。"
-                "散粒/热噪声为物理固有、量级极小，保留但通常可忽略。",
+                "散粒/热噪声为物理固有、量级极小，**恒在**（若用户要求绝对无噪，用 physical_noise=False）。",
         "透明化": "每次返回必须把 noise_breakdown_mV + noise_1f 原样告知用户，"
                   "并明确「本次是否加了噪声、加了哪些、幅度多少」。",
         "多交互": "MCP 服务要**多与用户交互**，而非一次性吐结果：① 先确认工况（物种/波段/T/P/浓度/光程）；"
@@ -707,6 +757,10 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
     results.sensitivity_k）；未给 k 时，内部跑一遍**完整仪器链路**在参考浓度 x_ref 下重算 k。
     **勿用解析版 simulate() 的灵敏度**——它与完整链路的 S2f/1f 差 ~6×，混用会严重偏差。
     仅适用弱吸收（αL ≪ 1）。a/i0/i2/psi/span 为解析版遗留参数，完整链路下不再使用。
+
+    ⚠ 闭环精度不等于反演精度：k 的定义就是 S2f_norm_peak / x，故"用同一次仿真的
+    peak 配 k"必然精确还原（误差恒为 0），这**不是**验证。真实误差来自换工况 ——
+    k 与 T/P/x/L_cm/调制深度/fm/扫描半宽 强绑定，换任一条件都必须重新取 k。
     """
     _xd, _Ld = _species_defaults(species)
     T, P, x_ref, L, assumed = _resolve_conditions(T, P, x_ref, L, session_id, x_default=_xd, L_default=_Ld)
@@ -719,6 +773,7 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
         raise ValueError(f"peak_2f1f 必须是有限数值，收到 {peak_2f1f!r}")
     if peak_2f1f < 0.0:
         raise ValueError(f"peak_2f1f 必须 ≥ 0（2f/1f 峰高取绝对值），收到 {peak_2f1f:g}")
+    k_cond = None
     with _quiet() as g:
         if k is not None:
             k = float(k)
@@ -731,6 +786,15 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
                                            P=float(P), x=float(x_ref), L_cm=float(L))
             k = float(r["meta"]["sensitivity_k"])
             k_src = "完整链路重算（@x_ref）"
+            # 回传内部重算 k 所用的**完整工况**：调用方只有拿到这些才能判断 k 是否与自己的
+            # 测量同源（此前只回 x_ref/T/P/L，调制深度/fm/扫描半宽/采样都看不到）。
+            _mc = r["meta"]
+            k_cond = {"species": str(species).upper(), "wn_center_cm-1": float(wn0),
+                      "T_K": float(T), "P_atm": float(P), "L_cm": float(L),
+                      "x_ref": float(x_ref), "scan_span_cm-1": _mc.get("cfg", {}).get("scan_span_cm"),
+                      "mod_freq_Hz": _mc.get("mod_freq_Hz"), "mod_amp_V": _mc.get("mod_amp_V"),
+                      "mod_coeff_m": _mc.get("mod_coeff_m"),
+                      "fs_Hz": _mc.get("fs"), "seed_used": _mc.get("seed_used")}
         x_est = float(ts.invert_concentration(peak_2f1f, k))
     # 输出域校验：摩尔分数定义域是 (0, 1]。越界**不静默截断**（截断会掩盖前提已破），
     # 而是显式标注状态 —— 越界本身即说明 k 与本次工况不同源 / 已出弱吸收线性区 / 峰值取错。
@@ -750,7 +814,11 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
            "peak_2f1f_in": peak_2f1f, "sensitivity_k": k,
            "k_source": k_src, "x_ref": float(x_ref), "T_K": float(T), "P_atm": float(P),
            "path_cm": float(L), "assumptions": assumed, "needs_confirm": bool(assumed),
+           "k_binding": "k 与工况强绑定：T/P/x/L_cm/调制深度/fm/扫描半宽 任一改变都必须重新取 k，"
+                        "否则 peak/k 不是同一套物理条件下的比值。",
            "log": _sanitize_paths(g.getvalue()).splitlines()}
+    if k_cond:                      # 内部重算 k 时，回传它用的完整工况，供判断 k 是否同源
+        out["k_conditions"] = k_cond
     if x_warn:
         out["warning"] = x_warn
     return out
@@ -894,6 +962,10 @@ def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
 _INSTR_KEYS = ("scan_span_cm", "amp_V", "freq_Hz", "offset_V", "phase_deg", "eta_VI", "dnu_dI",
                "wn_ref", "i_ref", "i_th", "eta_IP", "fs", "n_samples", "adc_bits",
                "v_range", "throughput", "resp", "gain", "bw", "rin",
+               # 调谐二阶非线性（两条链都经 voltage_to_laser 使用）
+               "d2nu_dI2",
+               # 严格理想仿真开关：False = 连散粒/热也不注入
+               "physical_noise",
                # etalon 干涉条纹（默认关，仅显式 fringe=True 时生效）
                "fringe", "fringe_n", "fringe_d_cm", "fringe_R", "fringe_fsr",
                "fringe_contrast", "fringe_phase_rad", "fringe_drift_frac")
@@ -911,9 +983,75 @@ _SCENE_DEFAULTS = {"T": 296.0, "P": 1.01325, "x": 1e-3, "L_cm": 50.0,
                    "edge": "rising", "fit_order": 3, "fit_frac": 0.3}
 
 
+def _safe_name(s):
+    """净化拼进 PNG 文件名的字段：只留字母数字._-，长度上限 40。
+
+    species 是字符串参数，直接拼进路径时 `species="../../x"` 会越出 tmp/mcp_out/。
+    """
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(s))[:40] or "x"
+
+
+def _maybe_align_laser(wn_center, inst, explicit_keys, device_used=False):
+    """目标波数超出当前激光可达范围时，把 wn_ref 重锚到该波数（理想激光器假设）。
+
+    为什么需要：SPECIES_PROFILES 给 6 个物种推荐了 8 个波段（1900–7185 cm⁻¹），
+    而默认激光只是一支 3.36 μm DFB（wn_ref=2964.7、驱动器 0–5 V）——按文档推荐选波段，
+    第一次调用必报"offset_V 越界"，用户会误以为是自己选错了线。
+
+    为什么合理：wn_ref 只是"参考电流处的波数"这个标定基准点，重锚不改变扫描窗口与
+    吸收物理，语义上等于声明"有一支中心落在该波数的理想激光器"。但**绝不静默**：
+    重锚会写进 assumptions 与 warnings，AI 须按 must_disclose② 告知用户这不是真实硬件。
+
+    返回 (note|None, info|None)。用户显式给了 wn_ref/offset_V 或引用了设备库时不介入。
+    """
+    if device_used or ("wn_ref" in explicit_keys) or ("offset_V" in explicit_keys):
+        return None, None
+    eta_VI = inst.get("eta_VI", 24.0)
+    dnu_dI = inst.get("dnu_dI", -0.088)
+    i_ref = inst.get("i_ref", 120.0)
+    wn_ref0 = inst.get("wn_ref", 2964.7)
+    span_cm = inst.get("scan_span_cm", 1.5)
+    d2 = inst.get("d2nu_dI2", 0.0)
+    i_th = inst.get("i_th", 30.0)
+    r = ts.laser_reach(float(wn_center), eta_VI=eta_VI, dnu_dI=dnu_dI, i_ref=i_ref,
+                       wn_ref=wn_ref0, scan_span_cm=span_cm, d2nu_dI2=d2, i_th=i_th)
+    if r.get("reachable"):
+        return None, None
+    if not r.get("fits_span"):
+        raise ValueError(
+            f"扫描半宽 {float(inst.get('scan_span_cm', 1.5)):g} cm⁻¹ 需要 ±{r['amp_V']:.3g} V 驱动，"
+            f"超出驱动器 {ts.DRIVER_V_LO:.0f}–{ts.DRIVER_V_HI:.0f} V 量程 → 任何 wn_ref 都盖不住，"
+            f"请减小 scan_span_cm 或核对 η_VI。")
+    old = float(wn_ref0)
+    # 自校验：重锚候选是按线性关系算的，二次模型（d2nu_dI2≠0）下必须复算确认真的可达，
+    # 不能"算出个候选就直接用"——那正是本项目要消灭的静默伪造。
+    inst["wn_ref"] = float(r["wn_ref_needed"])
+    r2 = ts.laser_reach(float(wn_center), eta_VI=eta_VI, dnu_dI=dnu_dI, i_ref=i_ref,
+                        wn_ref=inst["wn_ref"], scan_span_cm=span_cm, d2nu_dI2=d2, i_th=i_th)
+    if not r2.get("reachable"):
+        inst["wn_ref"] = old
+        raise ValueError(
+            f"目标波数 {float(wn_center):g} cm⁻¹ 无法通过重锚 wn_ref 达到"
+            f"（重锚到 {r['wn_ref_needed']:.6g} 后仍 {r2['reason']}）→ 请核对 dν/dI / d²ν/dI² / η_VI。")
+    _off = r.get("offset_V")
+    _off_txt = (f"{_off:.4g} V" if _off is not None
+                else f"无实解（{r.get('reason')}）")
+    info = {"wn_ref_before": old, "wn_ref_auto": float(r["wn_ref_needed"]),
+            "offset_V_before": r["offset_V"], "reason": r["reason"],
+            "note": "理想激光器假设：仅重锚 wn_ref（参考电流处的波数），其余激光参数未变"}
+    note = (f"⚠ 目标波数 {float(wn_center):g} cm⁻¹ 超出当前激光器可达范围"
+            f"（wn_ref={old:g}、dν/dI={float(dnu_dI):g}、驱动器 "
+            f"{ts.DRIVER_V_LO:.0f}–{ts.DRIVER_V_HI:.0f} V，原参数反算 offset_V：{_off_txt}）"
+            f"→ **已自动把 wn_ref 重锚到 {info['wn_ref_auto']:.6g} cm⁻¹**（理想激光器假设，"
+            f"其余激光参数未变）。这不是你的真实硬件：请提供实测 wn_ref/dν/dI，或用 tdlas_device "
+            f"保存真实激光器后以 laser= 引用；确认后本提示消失。")
+    return note, info
+
+
 def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
-                     edge=None, fit_order=None, fit_frac=None, seed=None,
-                     save_png=False, setup=None, laser=None, pd=None, daq=None, optics=None, **kw):
+                     edge=None, fit_order=None, fit_frac=None, seed=0, session_id="default",
+                     auto_laser=True, save_png=False, setup=None, laser=None, pd=None, daq=None,
+                     optics=None, **kw):
     """仪器系统级 DAS 仿真：DAQ 电压 → 激光 → 光路 → PD → ADC 量化 → 基线扣除。
 
     缺省参数按优先级索取：① 用户实测标定值 → ② 器件型号（AI 检索规格书）
@@ -922,13 +1060,23 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     """
     given_scene = {"T": T, "P": P, "x": x, "L_cm": L_cm, "edge": edge,
                    "fit_order": fit_order, "fit_frac": fit_frac}
-    scene = {k: (_SCENE_DEFAULTS[k] if v is None else v) for k, v in given_scene.items()}
-    assumed = [k for k, v in given_scene.items() if v is None]
+    # 工况优先级：本次显式给 > 会话已确认(跨会话记忆) > 全局默认（与 t_wms_instrument 一致）
+    confirmed = _get_session(session_id).get("confirmed", {})
+    scene, assumed = {}, []
+    for k, v in given_scene.items():
+        if v is not None:
+            scene[k] = v
+        elif k in confirmed:
+            scene[k] = confirmed[k]
+        else:
+            scene[k] = _SCENE_DEFAULTS[k]
+            assumed.append(k)
 
     given_inst = {k: kw.get(k) for k in _INSTR_KEYS}
     inst = {k: v for k, v in given_inst.items() if v is not None}
     # 设备引用：解析设备库，填充未显式给出的硬件参数（本次显式给的值仍最优先）
-    for k, v in _resolve_devices(setup, laser, pd, daq, optics).items():
+    dev_params = _resolve_devices(setup, laser, pd, daq, optics)
+    for k, v in dev_params.items():
         inst.setdefault(k, v)
     assumed += [k for k, v in given_inst.items()
                 if v is None and k not in _NO_CONFIRM and k not in inst
@@ -936,6 +1084,13 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
 
     if not (species and str(species).strip()):
         raise ValueError("species 不能为空")
+
+    laser_info = None
+    if auto_laser:
+        _note, laser_info = _maybe_align_laser(wn_center, inst, set(kw), bool(dev_params))
+    else:
+        _note = None
+    ignored = sorted(k for k in kw if k not in _INSTR_KEYS)
 
     with _quiet() as g:
         r = ts.simulate_das_instrument(species, wn_center=float(wn_center),
@@ -976,26 +1131,40 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            "needs_input": bool(requests),
            "confirm_note": "param_requests 为缺省参数：请优先向用户索取实测值或器件型号；"
                            "必要时引导现场标定；保留默认时须在结论中明确注明。",
-           "warnings": m["warnings"],
+           "seed_used": m.get("seed_used"),
+           "physical_noise": m.get("physical_noise", True),
+           "warnings": ([_note] if _note else []) + m["warnings"],
            "edge_note": EDGE_TECH_NOTE,
            "log": _sanitize_paths(g.getvalue()).splitlines()}
-    out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species)
-    out["fringe_report"] = _fringe_report_block(m.get("fringe"))
+    if laser_info:
+        out["laser_auto_aligned"] = laser_info
+    if ignored:
+        out["ignored_params"] = ignored
+        out["ignored_note"] = (f"以下参数不属于本工具、已被忽略（疑似拼写错误）：{ignored}；"
+                               f"允许的键见 tools/list 的 inputSchema")
+    out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species, session_id)
+    out["fringe_report"] = _fringe_report_block(m.get("fringe"), session_id)
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        png = OUT_DIR / f"das_instr_{str(species).upper()}_{float(wn_center):g}cm-1.png"
+        png = OUT_DIR / f"das_instr_{_safe_name(str(species).upper())}_{float(wn_center):g}cm-1.png"
         with _quiet():
             ts.plot_das_instrument(r, png)
         out["png"] = str(png)
     return out
 
 
-_INSTR_KEYS_WMS = _INSTR_KEYS + ("mod_freq_Hz", "mod_amp_V", "m_opt", "lockin_avg", "lockin_stages",
-                                 "drift_frac", "flicker_frac", "background_subtract")
+# WMS 专属参数。⚠ 这里曾漏掉 edge / trim_frac / d2nu_dI2 / am_* —— 而 schema 声明了它们，
+# 于是 AI 传 edge="falling" 被静默丢弃、返回里 normalization.edge 仍是 "rising"，
+# 用户以为改了、实际没改（见 CHANGELOG「参数透传」）。**新增 schema 键必须同时加到这里**，
+# 契约测试 tools/contract_check.py 会做 schema↔透传键的双向核对，防止再次漂移。
+_WMS_ONLY_KEYS = ("mod_freq_Hz", "mod_amp_V", "mod_phase_deg", "m_opt", "lockin_avg",
+                  "lockin_stages", "drift_frac", "flicker_frac", "background_subtract",
+                  "edge", "trim_frac", "am_i0", "am_i2", "am_psi1", "am_psi2")
+_INSTR_KEYS_WMS = _INSTR_KEYS + _WMS_ONLY_KEYS
 
 
 def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
-                     seed=None, save_png=False, session_id="default",
+                     seed=0, session_id="default", auto_laser=True, save_png=False,
                      setup=None, laser=None, pd=None, daq=None, optics=None, **kw):
     """WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相（2f/1f）。
 
@@ -1025,13 +1194,22 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     given_inst = {k: kw.get(k) for k in _INSTR_KEYS_WMS}
     inst = {k: v for k, v in given_inst.items() if v is not None}
     # 设备引用：解析设备库，填充未显式给出的硬件参数（本次显式给的值仍最优先）
-    for k, v in _resolve_devices(setup, laser, pd, daq, optics).items():
+    dev_params = _resolve_devices(setup, laser, pd, daq, optics)
+    for k, v in dev_params.items():
         inst.setdefault(k, v)
     assumed += [k for k, v in given_inst.items()
                 if v is None and k not in _NO_CONFIRM and k not in inst
                 and (k not in _FRINGE_KEYS or inst.get("fringe"))]
     if not (species and str(species).strip()):
         raise ValueError("species 不能为空")
+
+    # 目标波数越界时自动重锚 wn_ref（理想激光器假设；已显式给激光参数/引用设备时不介入）
+    laser_info = None
+    if auto_laser:
+        _note, laser_info = _maybe_align_laser(wn_center, inst, set(kw), bool(dev_params))
+    else:
+        _note = None
+    ignored = sorted(k for k in kw if k not in _INSTR_KEYS_WMS)
 
     with _quiet() as g:
         r = ts.simulate_wms_instrument(species, wn_center=float(wn_center),
@@ -1139,16 +1317,26 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                              "⑤ 当 alpha_report.needs_report=True 时：α 峰值须连同 "
                                              "T/P/step/wingHW/窗口 一并给出",
                                              "⑥ 当 fringe_report.needs_report=True 时：说明 etalon 条纹的 FSR/对比度、"
-                                             "是否会在 2f 上伪造吸收、以及该采取的物理措施"],
+                                             "是否会在 2f 上伪造吸收、以及该采取的物理措施",
+                                             "⑦ 当 laser_auto_aligned 非空时：必须说明本次 wn_ref 是**自动重锚**的"
+                                             "理想激光器假设（不是你手上的器件），并提示用户提供实测 "
+                                             "wn_ref/dν/dI，或用 tdlas_device 保存真实激光器后以 laser= 引用"],
                            "interaction_rule": "MCP 必须**多与用户交互**：主动告知以上 must_disclose 各项，"
                                                "并在解读结果前先向用户确认工况（物种/波段/T/P/浓度/光程）。"},
-           "warnings": m["warnings"], "edge_note": EDGE_TECH_NOTE,
+           "seed_used": m.get("seed_used"), "physical_noise": m.get("physical_noise", True),
+           "warnings": ([_note] if _note else []) + m["warnings"], "edge_note": EDGE_TECH_NOTE,
            "log": _sanitize_paths(g.getvalue()).splitlines()}
+    if laser_info:
+        out["laser_auto_aligned"] = laser_info
+    if ignored:
+        out["ignored_params"] = ignored
+        out["ignored_note"] = (f"以下参数不属于本工具、已被忽略（疑似拼写错误）：{ignored}；"
+                               f"允许的键见 tools/list 的 inputSchema")
     out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species, session_id)
     out["fringe_report"] = _fringe_report_block(m.get("fringe"), session_id)
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        png = OUT_DIR / f"wms_instr_{str(species).upper()}_{float(wn_center):g}cm-1.png"
+        png = OUT_DIR / f"wms_instr_{_safe_name(str(species).upper())}_{float(wn_center):g}cm-1.png"
         with _quiet():
             ts.plot_wms_instrument(r, png)
         out["png"] = str(png)
@@ -1156,14 +1344,15 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
 
 
 def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
-             seed=None, **kw):
+             seed=0, session_id="default", **kw):
     """二次审核 / 多轮核对：跑一遍 WMS 并只返回自动校验报告（不画图）。
 
     用于在给出最终结论前，对结果做独立复核；非专业用户可据此判断"是否可信"。
     返回 validation（overall + 逐项 checks）+ warnings + 关键指标。
+    参数与 tdlas_wms_instrument **完全同源**（实现上就是透传）。
     """
     out = t_wms_instrument(species=species, wn_center=wn_center, T=T, P=P, x=x, L_cm=L_cm,
-                           seed=seed, save_png=False, **kw)
+                           seed=seed, session_id=session_id, save_png=False, **kw)
     return {"species": out["species"], "wn_center_cm-1": out["wn_center_cm-1"],
             "validation": out["validation"], "warnings": out["warnings"],
             "key_metrics": {"alpha_L_peak": out["results"]["alpha_L_peak"],
@@ -1451,10 +1640,20 @@ TOOLS = [
                          "pd": {"type": "string", "description": "探测器设备名（tdlas_device 保存），自动套用 resp/gain/bw/rin"},
                          "daq": {"type": "string", "description": "采集卡设备名（tdlas_device 保存），自动套用 fs/n_samples/adc_bits/v_range"},
                          "optics": {"type": "string", "description": "光学元件设备名（tdlas_device 保存），自动套用 throughput"},
-                         "seed": {"type": "integer"},
+                         "seed": {"type": "integer",
+                                  "description": "随机种子，默认 0（**默认结果可复现**）；传 null 则每次随机"},
+                         "session_id": {"type": "string",
+                                        "description": "会话标识，默认 default（复用 tdlas_session 已确认工况）"},
+                         "auto_laser": {"type": "boolean",
+                                        "description": "目标波数超出当前激光可达范围时，自动把 wn_ref 重锚到该波数"
+                                                       "（理想激光器假设，会在 warnings/assumptions 中标注，默认 True；"
+                                                       "显式给 wn_ref/offset_V 或用 laser=/setup= 引用设备时不介入）"},
+                         "physical_noise": {"type": "boolean",
+                                            "description": "是否注入物理固有噪声（散粒+热），默认 True；"
+                                                           "False = 严格理想仿真（连散粒/热也不加，结果逐位可复现）"},
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
-                     "required": ["species", "wn_center"]}},
-    {"name": "tdlas_wms_instrument",
+                         "required": ["species", "wn_center"]}},
+                         {"name": "tdlas_wms_instrument",
      "description": "【默认首选：画 WMS 图就用这个】WMS 仪器级全链路：三角波+正弦调制→激光→光路→PD→ADC→数字锁相，输出标准6子图（V(t)/PD原始/DAS+理论/DAS吸光度/1f/2f/2f/1f归一化）。**用户说画WMS图/2f曲线/波长调制时默认调本工具，不要调 tdlas_simulate**。调制幅值按 m≈2.2 自动优化，fm=30kHz，fscan=100Hz。采样率自动适配硬件（常见 16-bit DAQ 上限 250 kS/s）。缺省参数列入 param_requests，AI 须主动澄清工况。",
      "inputSchema": {"type": "object",
                      "properties": {
@@ -1472,7 +1671,7 @@ TOOLS = [
                          "lockin_avg": {"type": "integer",
                                         "description": "锁相平均调制周期数，默认 1（>1 模糊线形且不降残留）"},
                          "lockin_stages": {"type": "integer",
-                                           "description": "低通级联级数，默认 2（sinc² 抑制旁瓣，残留 4%→1.5%）"},
+                                           "description": "低通级联级数，默认 2（sinc² 抑制旁瓣，非吸收区 2f 残留 4.1%→1.6%）"},
                          "background_subtract": {"type": "boolean",
                                                    "description": "是否以无吸收参考谱扣除 RAM 2f 基线，默认 True；False 仅用于诊断原始基线"},
                          "trim_frac": {"type": "number",
@@ -1513,10 +1712,19 @@ TOOLS = [
                          "pd": {"type": "string", "description": "探测器设备名（tdlas_device 保存），自动套用 resp/gain/bw/rin"},
                          "daq": {"type": "string", "description": "采集卡设备名（tdlas_device 保存），自动套用 fs/n_samples/adc_bits/v_range"},
                          "optics": {"type": "string", "description": "光学元件设备名（tdlas_device 保存），自动套用 throughput"},
-                         "seed": {"type": "integer"},
+                         "seed": {"type": "integer",
+                                  "description": "随机种子，默认 0（**默认结果可复现**）；传 null 则每次随机"},
+                         "session_id": {"type": "string",
+                                        "description": "会话标识，默认 default（复用 tdlas_session 已确认工况）"},
+                         "auto_laser": {"type": "boolean",
+                                        "description": "目标波数超出当前激光可达范围时，自动把 wn_ref 重锚到该波数"
+                                                       "（理想激光器假设，会在 warnings 中标注，默认 True）"},
+                         "physical_noise": {"type": "boolean",
+                                            "description": "是否注入物理固有噪声（散粒+热），默认 True；"
+                                                           "False = 严格理想仿真（结果逐位可复现）"},
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
-                     "required": ["species", "wn_center"]}},
-    {"name": "tdlas_review",
+                         "required": ["species", "wn_center"]}},
+                         {"name": "tdlas_review",
      "description": "二次审核/多轮核对：跑一遍 WMS 并返回自动校验报告（validation），不画图。"
                     "用于在给出最终结论前对结果做独立复核；非专业用户据此判断结果是否可信。"
                     "overall=pass/warn/fail，逐项 checks 标注 DAS-理论一致性、2f 峰位、αL 弱吸收、"
@@ -1625,8 +1833,11 @@ TOOLS = [
                          "x_ref": {"type": "number", "description": "参考浓度；缺省=会话已确认或按物种推荐"},
                          "k": {"type": "number", "description": "完整链路灵敏度（来自 tdlas_wms_instrument.sensitivity_k）；不给则内部重算"},
                          "session_id": {"type": "string", "description": "会话标识，默认 default（复用已确认 T/P/x/L）"},
-                         "i0": {"type": "number"}, "i2": {"type": "number"},
-                         "psi1_pi": {"type": "number"}, "psi2_pi": {"type": "number"}},
+                         "span": {"type": "number", "description": "【遗留参数】解析版扫描半宽，完整链路下不生效"},
+                         "i0": {"type": "number", "description": "【遗留参数】解析版 1f 基线，完整链路下不生效"},
+                         "i2": {"type": "number", "description": "【遗留参数】解析版 2f 基线，完整链路下不生效"},
+                         "psi1_pi": {"type": "number", "description": "【遗留参数】完整链路下不生效"},
+                         "psi2_pi": {"type": "number", "description": "【遗留参数】完整链路下不生效"}},
                      "required": ["peak_2f1f", "species", "wn0"]}},
     {"name": "tdlas_detection_limit",
      "description": "检测极限 LOD：给定等效透过率噪声 σ_τ，蒙特卡洛给出噪声等效浓度 NEC 与 LOD(nσ)。",
@@ -1640,9 +1851,14 @@ TOOLS = [
                          "n_trials": {"type": "integer", "description": "蒙特卡洛次数，默认 30"},
                          "n_sigma": {"type": "number", "description": "倍数，默认 3"},
                          "session_id": {"type": "string", "description": "会话标识，默认 default（复用已确认 T/P/x/L）"},
+                         "span": {"type": "number", "description": "【遗留参数】解析版扫描半宽，完整链路下不生效"},
+                         "i0": {"type": "number", "description": "【遗留参数】解析版 1f 基线，完整链路下不生效"},
+                         "i2": {"type": "number", "description": "【遗留参数】解析版 2f 基线，完整链路下不生效"},
+                         "psi1_pi": {"type": "number", "description": "【遗留参数】完整链路下不生效"},
+                         "psi2_pi": {"type": "number", "description": "【遗留参数】完整链路下不生效"},
                          "seed": {"type": "integer"}},
-                     "required": ["species", "wn0"]}},
-    {"name": "tdlas_detection_limit_scan",
+                         "required": ["species", "wn0"]}},
+                         {"name": "tdlas_detection_limit_scan",
      "description": "检测极限 LOD 随光程 L / 参考浓度 x 的扫描（系统选型：加光程能降多少 LOD）。"
                     "弱吸收下 LOD∝1/L，且与参考浓度基本无关；返回 LOD 网格（行=浓度 x，列=光程 L）。",
      "inputSchema": {"type": "object",
@@ -1666,10 +1882,74 @@ TOOLS = [
 ]
 
 
+# tdlas_review 与 tdlas_wms_instrument 的参数**完全同源**（实现上就是透传），
+# 手工维护两份属性表迟早漂移（历史上就发生过：review 缺硬件参数、wms 缺 session_id）。
+# 这里在定义后直接把 wms 的属性集复制过去，只去掉出图开关，保证两者**永不脱节**。
+def _sync_review_schema():
+    by = {t["name"]: t for t in TOOLS}
+    _wms_props = by["tdlas_wms_instrument"]["inputSchema"]["properties"]
+    _r_props = by["tdlas_review"]["inputSchema"].setdefault("properties", {})
+    for k, v in _wms_props.items():
+        if k != "save_png":
+            _r_props.setdefault(k, v)
+
+
+_sync_review_schema()
+
+_SCHEMA_BY_NAME = {t["name"]: t["inputSchema"] for t in TOOLS}
+
+
+def _validate_args(name, args):
+    """按 inputSchema 做轻量校验（未知键 / 必填 / 类型）。返回错误说明，None = 通过。
+
+    为什么必须拦未知键：此前未声明的键被**静默丢弃**，最惨的一次是 schema 声明了
+    `edge`/`trim_frac`/`d2nu_dI2`/`am_*` 而 MCP 层从未透传 → AI 传 edge="falling"
+    得到的是 rising 的结果、返回体里还写着 rising，全程零提示。用户会拿着归因错误的
+    结论去指导真实实验 —— "以为改了、实际没改"比直接报错危险得多。
+    """
+    if not isinstance(args, dict):
+        return "arguments 必须是 JSON 对象"
+    sch = _SCHEMA_BY_NAME.get(name) or {}
+    props = sch.get("properties") or {}
+    missing = [k for k in (sch.get("required") or []) if k not in args]
+    if missing:
+        return f"缺少必填参数：{missing}"
+    unknown = sorted(k for k in args if k not in props)
+    if unknown:
+        return (f"存在未声明的参数：{unknown}；本工具允许的键：{sorted(props)}。"
+                f"（拼写错误会被拒绝而非静默忽略；确需新参数请提 issue）")
+    for k, v in args.items():
+        if v is None:
+            continue
+        want = (props.get(k) or {}).get("type")
+        if want == "number" and (isinstance(v, bool) or not isinstance(v, (int, float))):
+            return f"参数 {k} 期望 number，收到 {type(v).__name__}（{v!r}）"
+        if want == "integer" and (isinstance(v, bool) or not isinstance(v, (int, float))
+                                  or float(v) != int(v)):
+            return f"参数 {k} 期望 integer，收到 {v!r}"
+        if want == "boolean" and not isinstance(v, bool):
+            return f"参数 {k} 期望 boolean，收到 {v!r}"
+        if want == "string" and not isinstance(v, str):
+            return f"参数 {k} 期望 string，收到 {type(v).__name__}"
+    return None
+
+
 # ───────────────────────── JSON-RPC ─────────────────────────
 
 def handle_request(req):
-    """处理 MCP 请求（initialize / tools/list / tools/call）。"""
+    """处理 MCP 请求（initialize / tools/list / tools/call）。
+
+    支持 JSON-RPC 2.0 批量请求（顶层数组）；批量内每个请求独立处理，通知（返回 None）被剔除。
+    """
+    if isinstance(req, list):                     # 批量请求：此前会把 list 当 dict 用 → AttributeError
+        if not req:
+            return {"jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32600, "message": "空批量请求"}}
+        return [r for r in (handle_request(x) for x in req) if r is not None]
+    if not isinstance(req, dict):
+        return {"jsonrpc": "2.0", "id": None,
+                "error": {"code": -32600, "message": "请求必须是 JSON 对象或其数组"}}
+
     method = req.get("method", "")
     params = req.get("params") or {}
     req_id = req.get("id")
@@ -1689,6 +1969,11 @@ def handle_request(req):
         if fn is None:
             return {"jsonrpc": "2.0", "id": req_id,
                     "error": {"code": -32601, "message": f"未知工具：{name}"}}
+        bad = _validate_args(name, args)
+        if bad:
+            return {"jsonrpc": "2.0", "id": req_id,
+                    "result": {"content": [{"type": "text", "text": f"参数错误：{bad}"}],
+                               "isError": True}}
         try:
             result = fn(**args)
             return {"jsonrpc": "2.0", "id": req_id,
@@ -1871,9 +2156,9 @@ def main():
             continue
         try:
             resp = _sanitize_paths(handle_request(json.loads(line)))
-        except Exception as e:
+        except ValueError:                     # JSON 解析失败：不回显 Python 异常文本
             resp = {"jsonrpc": "2.0", "id": None,
-                    "error": {"code": -32700, "message": f"解析失败：{e}"}}
+                    "error": {"code": -32700, "message": "JSON 解析失败（请检查该行是否为合法 JSON 对象）"}}
         if resp is not None:
             print(json.dumps(resp, ensure_ascii=False), flush=True)
 
