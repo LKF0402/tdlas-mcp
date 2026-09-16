@@ -112,6 +112,11 @@
 | 峰值与灵敏度不同区间 | 反演浓度明显离谱 | `results.S2f1f_peak` 与 `results.sensitivity_k` 同在**有效区**取峰，可用 `S2f1f_peak_interval` 核对是否落进剔除区 |
 | 反演结果越界 | 摩尔分数 > 1（或为 0） | 结果**不静默截断**：读 `mole_frac_status` / `mole_frac_valid` / `warning`；越界即说明 k 与工况不同源或已出弱吸收线性区 |
 | 设备参数非法 | 仿真出 nan、负带宽、非法 ADC 配置 | `tdlas_device save` 与设备引用**双向校验**并报错；保存时返回 `ignored_params` 提示拼错的键 |
+| 按推荐波段选线却报错 | `ValueError: offset_V 越出驱动器 0–5 V` | 默认激光受阈值电流约束，实际只覆盖 **2964.7–2972.6 cm⁻¹**；`adaptive_condition` 的「波段可达性」会给出该波段需要的 `wn_ref`。`auto_laser=True`（默认）会自动重锚 |
+| 以为用了自己的激光器 | 结果与实测对不上 | 当返回里 `laser_auto_aligned` 非空时，`wn_ref` 是**自动重锚的理想假设**（不是你手上的器件）——必须用实测 `wn_ref`/`dν/dI` 覆盖，或用 `tdlas_device` 保存真实激光器后 `laser=` 引用 |
+| 两次同参调用结果不同（旧版） | 论文里写的数别人复现不了 | 已修：`seed` 默认 **0** ⇒ 默认逐位可复现；返回带 `seed_used`。要随机性传 `seed=null` |
+| 以为"理想仿真 = 没噪声" | 把散粒/热当成可关闭项 | 散粒/热是**物理固有、恒在**（默认 ~0.03 mV）；RIN/1f 才是可关项。要完全无噪用 `physical_noise=False` |
+| 一次 502 被读成"该波段没收录" | 据此换波段、甚至断言"该气体无吸收" | 取数失败已**自动重试 3 次**并用离线索引区分服务端故障与"同位素确实不存在"；报错文案会明确写"这是网络/服务端故障，不代表无谱线" |
 | etalon 条纹当噪声处理 | 以为降噪 / 多次平均能消除条纹 | 固定腔长的条纹是**确定性项**，只能物理解决（窗片楔化 / AR 镀膜 / 扫频）；并保证 `step ≤ FSR/10`，否则条纹混叠 |
 
 ---
@@ -132,3 +137,12 @@
   - **设备库参数校验**：`tdlas_device save` 拒绝空设备名与非法参数（`gain/bw/fs/v_range/eta_*` > 0、`adc_bits` 为 4–32 整数、`throughput ∈ (0,1]`、`dnu_dI ≠ 0`）；**设备引用时再校验一次**，兜住历史/手改的非法条目；拼错的键回报在 `ignored_params`。
   - **缺依赖提示**：缺少 `hitran-api` 时给出可操作的安装指引（含当前解释器路径），`--selftest` 以非零码退出。
   - 自检新增第 10 项「二次调谐可达性」（不可达必报错 + 可达时取近根正常反算），自检项数 9 → 10。
+
+- **2026-09-16（第二轮：MCP 接口层审核修复）**
+  - **参数透传**：`edge`/`trim_frac`/`d2nu_dI2`/`am_i0..am_psi2`/`mod_phase_deg` 此前 schema 声明却从未进入引擎（AI 传 `edge="falling"` 得到 `rising` 的结果，无任何提示）。现已透传；并新增**未知键直接报错**（`_validate_args` 按 inputSchema 校验必填/类型/未知键）。
+  - **推荐波段可达性**：`SPECIES_PROFILES` 的 8 个波段横跨 1900–7185 cm⁻¹，而默认激光只覆盖 2964.7–2972.6 cm⁻¹（受驱动量程 **与阈值电流** 双重约束）→ 按文档推荐选波段必然报错。新增 `laser_reach()` + `auto_laser`（默认重锚 `wn_ref` 并如实标注）+ `adaptive_condition.波段可达性/laser_params_needed`；并**新增离线契约测试**（`tools/contract_check.py`）锁死该回归。
+  - **`session_id` 补进 schema**（wms/review），`tdlas_das_instrument` 亦支持会话；`review` 的 schema 改为**从 wms 自动同步**，杜绝两者再次脱节。
+  - **可复现性**：`seed` 默认 `None → 0`（此前默认跑-跑散布 2–8%，论文数字无法复现）；新增 `physical_noise` 开关；校验第 9 项不再谎称"未加噪声（理想仿真）"，改为如实报出恒在的散粒/热。
+  - **取数健壮性**：失败重试 3 次（指数退避）+ 离线同位素索引判据，把"服务端故障"与"无收录"分开结论。
+  - **接口细节**：支持 JSON-RPC 批量请求；解析错误不再回显 Python 异常文本；PNG 文件名净化；会话/设备文件原子写；分析链默认值与仪器链统一（P、L_cm）。
+  - **CI**：矩阵补 3.13；`tools/contract_check.py`（63 项，离线）作为硬门禁；`--selftest` 因依赖 hitran.org 抖动单列为非硬门禁。

@@ -69,8 +69,11 @@ DAQ 电压(三角波+正弦调制) → 激光器调谐 → HITRAN 气体吸收 �
 ```bash
 pip install -r requirements.txt
 
-# 服务器自检
+# 服务器自检（需访问 hitran.org）
 python tools/tdlas_mcp.py --selftest
+
+# 离线契约自检（不需要网络，CI 硬门禁）
+python tools/contract_check.py
 
 # 接入 MCP 客户端（stdio）
 # 将 mcp.config.example.json 中 args 路径改为实际安装路径即可

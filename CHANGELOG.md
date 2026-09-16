@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### 第二轮审核修复：MCP 接口层（参数透传 / 推荐波段 / 可复现性）
+- **参数不再静默丢弃（高）**：`_INSTR_KEYS_WMS` 漏掉 `edge` / `trim_frac` / `d2nu_dI2` / `am_i0..am_psi2` / `mod_phase_deg`，而 `inputSchema` 声明了它们 —— AI 传 `edge="falling"` 得到的是 `rising` 的结果、返回体里还写着 `rising`，全程无提示（"以为改了、实际没改"）。现已透传；并新增**未知键直接报错**（`_validate_args`，按 inputSchema 校验必填/类型/未知键，未知键会列出允许的键），工具内亦保留 `ignored_params` 回报作为第二道防线
+- **推荐波段可跑通（高）**：`SPECIES_PROFILES` 的 8 个推荐波段横跨 1900–7185 cm⁻¹，而默认激光只是一支 3.36 μm DFB（阈值电流约束下实际覆盖 2964.7–2972.6 cm⁻¹）→ 按文档推荐选波段**必然报错**。新增 `laser_reach()`（离线可达性判据，含阈值电流约束）+ `auto_laser`（默认开）：越界时把 `wn_ref` 重锚到"重锚后确实可达"的值并**如实写入 `warnings` 与 `laser_auto_aligned`**（理想激光器假设，须按 `must_disclose⑦` 告知用户）；`adaptive_condition` 新增「波段可达性 / laser_params_needed」，让 AI 能先告诉用户"该波段需要换激光器"。显式给 `wn_ref`/`offset_V` 或引用设备库时不介入；`auto_laser=False` 保留严格报错
+- **`session_id` 真正可达（高）**：`tdlas_wms_instrument` / `tdlas_review` 的 schema 从未声明 `session_id` → 按 schema 驱动的客户端永远传不进来，跨会话工况记忆形同虚设。已补，并让 `tdlas_das_instrument` 也支持会话；`tdlas_review` 的 schema 现在**由 wms 自动同步**，两者不会再脱节
+- **默认可复现 + 噪声语义如实（中）**：`seed` 默认 `None`（每次随机）→ 改为 **0**，两次同参调用逐位相同（此前跑-跑散布实测 2–8%），并在返回里给出 `seed_used`；新增 `physical_noise`（默认 True=只含物理固有的散粒/热；False=严格理想仿真，连散粒/热也不注入）。校验第 9 项原写"未加噪声（理想仿真）"与事实不符，现如实报出散粒/热数值并说明其恒在
+- **驱动量程边界与二次调谐**：`offset_V` 判据加 1e-9 容差（实测 `wn_center=2975.26` 因浮点误差 -1.89e-13 被误拒）；可达性判据纳入**阈值电流**约束（V 在 0–5 V 内不等于出光）
+- **HITRAN 取数重试与归因（中）**：抓取失败改为 3 次指数退避重试；并用 HAPI 离线索引区分"服务端故障"与"同位素不存在" —— 此前一次 502 会被并列报成"该窗口无 HITRAN 收录"，可能被读成"该气体无吸收"（正是模块开头纪律要避免的静默错误）
+- **工程**：PNG 文件名净化（`species="../../x"` 不再越出 `tmp/mcp_out/`）；会话/设备文件改**原子写**（临时文件 + `os.replace`，避免崩溃留下半截 JSON）；JSON-RPC **支持批量请求**且解析错误不再回显 Python 异常文本；分析链默认值与仪器链统一（`P=1.01325`、`L_cm` 缺省 50，消除了同一会话里"未给光程"得到 30/50/100 三套值的矛盾）；`remote_link.py` 提示不要把含 token 的输出重定向到日志
+- **CI 加固**：矩阵补 **3.13**（实际验证环境）；新增 `tools/contract_check.py`（**离线契约自检**，63 项）作为硬门禁：schema↔签名一致性、参数透传、越界重锚、未知键拒绝、批量请求、文件名净化、原子写、默认 seed 等；`--selftest` 因依赖 hitran.org 抖动，作为非硬门禁单独列出
+
 ### 代码审计修复（正确性与输入校验）
 - **峰值区间与灵敏度统一（高）**：`tdlas_wms_instrument` 的 `results.S2f1f_peak` 此前在**全窗**取 `argmax`，与在**有效区**（`trim_frac` 剔除两端后）计算的 `sensitivity_k` 不同区间 → 两者本应配套，直接送 `tdlas_invert` 会得错误浓度。现统一在 `valid_mask` 内取峰；新增 `S2f1f_peak_interval`（`trim_frac` / 取峰点数 / `full_window_peak_in_trimmed_edge` 诊断位）供核对
 - **二次调谐无实根不再伪造（中）**：`_resolve_scan` 此前用 `max(discriminant, 0)` 把判别式 < 0 截成"重根"，凭空造出一个驱动电压、下游照常出谱；现抛 `ValueError`，报错给出可达极值（调谐曲线顶点）与该核对的参数，并提示可用 `d2nu_dI2=0` 退回线性模型
@@ -12,7 +22,7 @@
 ### 工程加固
 - **设备库参数校验**：`tdlas_device save` 拒绝空设备名与非法硬件参数（`gain/bw/fs/v_range/eta_*` 须 > 0、`adc_bits` 须为 4–32 整数、`throughput ∈ (0,1]`、`dnu_dI ≠ 0`、须为有限数值）；**设备引用时再校验一次**，兜住历史或手改过的非法条目；拼错的键回报在 `ignored_params`（防静默忽略）
 - **缺依赖可操作提示**：缺少 `hitran-api`（`import hapi`）时给出安装指引与当前解释器路径；`--selftest` 遇依赖缺失以非零码退出（便于 CI 判断）
-- 自检新增第 10 项「二次调谐可达性」（不可达必报错 + 可达时取近根正常反算），自检项数 9 → 10；`docs/VALIDATION.md` 同步（自检清单、已知局限、修订记录）
+- **自检**新增第 10 项「二次调谐可达性」（不可达必报错 + 可达时取近根正常反算），自检项数 9 → 10（注：与下文 etalon 的「**自动校验**第 10 条」是**两个不同体系**：前者是 `--selftest` 的自测项，后者是 `validation` 的判据）；`docs/VALIDATION.md` 同步（自检清单、已知局限、修订记录）
 - `requirements.txt` 加注 `hitran-api` ↔ `import hapi` 的对应关系与自检命令
 
 ### etalon 干涉条纹（新增，默认关）
@@ -39,7 +49,7 @@
 
 ### 仿真核心
 - TDLAS/WMS 仿真内核：DAS 透过率 + 免标定 WMS（1f、2f 谐波、2f/1f 归一化）
-- 数字锁相：正交解调 + 2 级级联低通（sinc²，非吸收区残留 4.1%→1.5%）
+- 数字锁相：正交解调 + 2 级级联低通（sinc²，非吸收区 2f 残留 4.1%→1.6%）
 - 免标定浓度反演（灵敏度法，闭环误差 <1%）+ 检测限（蒙特卡洛 NEC/LOD）
 - 噪声模型：散粒/热/RIN（白）+ 1/f 慢漂移 + 1/f 粉红（可独立开关）
 - 检测极限扫描：LOD 随光程 L / 参考浓度 x 的网格扫描（LOD∝1/L，用于系统选型）

@@ -351,17 +351,20 @@ $$T(\tilde\nu)=\frac{1}{1+F\sin^2(\delta/2)},\qquad \delta=\frac{2\pi\tilde\nu}{
 | | `d2nu_dI2` | 0 | 调谐二阶非线性 cm⁻¹/mA² |
 | | `am_i0`/`am_i2` | 0 / 0 | RAM 强度调制幅度（0=纯 FM） |
 | | `am_psi1`/`am_psi2` | 0 / 0 | AM 相对 FM 的相位差 rad |
-| | `wn_ref` / `i_ref` | 2964.7 / 120.0 | 激光**固定参考点**（不随 wn_center 变） |
+| | `wn_ref` / `i_ref` | 2964.7 / 120.0 | 激光**参考点**（默认不随 wn_center 变；目标波数超出可达范围时由 `auto_laser` 重锚，见下） |
 | | `i_th` / `eta_IP` | 30.0 mA / 0.15 mW/mA | 阈值电流 / I→P 斜率 |
 | 工况 | `species` | CH4 | 待测气体（HITRAN 分子式，如 CH4 / H2O / CO2） |
 | | `wn_center` | 2968.5 cm⁻¹ | 目标吸收线中心（决定激光调谐到哪条线；`offset_V` 由此反算） |
 | | `T` / `P` | 296 K / 1.01325 atm | 温度 / 气压 |
 | | `x` | 1e-4 | 摩尔分数（= 100 ppm；强吸收分子如 CH4@3.3μm 默认更低，否则 αL 饱和） |
-| | `L_cm` | 50.0 cm | 有效光程（气室；多通池 ≈ 增大 L） |
+| | `L_cm` | 50.0 cm | 有效光程（气室；多通池 ≈ 增大 L）。**两条链已统一**：分析链（`tdlas_simulate`/`invert`/`detection_limit`）与仪器链缺省同为 50，物种推荐值（如 CH4 100）优先 |
 | 光路 | `throughput` | 0.90 | 光学总透过率（窗片/镜片/光纤/连接器**统一折成一个数**）；有效光程见上 `L_cm` |
 | PD | `resp` / `gain` | 0.9 A/W / 700 V/A | InGaAs / 跨阻（700 → 默认工况 v_pd≈7.7 V，不饱和） |
 | | `bw` | 1 MHz | 带宽 |
-| | `rin` / `drift_frac` / `flicker_frac` | **0 / 0 / 0** | 噪声默认全关 |
+| | `rin` / `drift_frac` / `flicker_frac` | **0 / 0 / 0** | 这三项默认关；但**散粒/热是物理固有、恒在**（默认量级 ~0.03 mV）。要完全无噪用 `physical_noise=False` |
+| 复现 | `seed` | **0** | 默认 0 ⇒ 同参调用逐位可复现；返回带 `seed_used`；传 null 则每次随机 |
+| | `physical_noise` | **True** | True=含物理固有散粒/热；False=严格理想仿真（无任何噪声，逐位可复现） |
+| 激光 | `auto_laser` | **True** | 目标波数超出当前激光可达范围（默认激光受阈值电流约束，实际覆盖 2964.7–2972.6 cm⁻¹）时自动重锚 `wn_ref`，并写入 `warnings` + `laser_auto_aligned`（须向用户说明这是理想假设）。显式给 `wn_ref`/`offset_V` 或用 `laser=`/`setup=` 引用设备时不介入 |
 | 调制 | `mod_freq_Hz` | 30 kHz | 调制频率 |
 | | `m_opt` | **"auto"** | 自适应调制深度 |
 | | `lockin_avg` / `lockin_stages` | 1 / 2 | 低通参数 |
@@ -372,7 +375,9 @@ $$T(\tilde\nu)=\frac{1}{1+F\sin^2(\delta/2)},\qquad \delta=\frac{2\pi\tilde\nu}{
 
 > **电压是波数的从变量**：`scan_span_cm`（用户给的波数半宽）与 `wn_center`（目标线）才是自然坐标；
 > `amp_V`、`offset_V` 由它们的电压—波数关系（`V→I→ν`）反算，**不写死**。`wn_center` 不填则按上表默认 2968.5；
-> 若选了不在此 DFB 调谐范围内的线，反算出的 `offset_V` 会越出驱动器 0–5 V 范围 → 仿真直接报错提示换激光参数。
+> 若选了不在此 DFB 调谐范围内的线：① `auto_laser=True`（默认）会把 `wn_ref` 重锚到该波数（理想激光器假设，
+> 会在 `warnings`/`laser_auto_aligned` 中标注，须告知用户）；② `auto_laser=False` 则严格报错，提示换激光参数。
+> 可达性判据见 `tdlas_sim.laser_reach()`：同时受**驱动电压量程 0–5 V** 与**阈值电流**（`η_VI·V > i_th`）约束。
 
 ---
 
