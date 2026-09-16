@@ -46,6 +46,32 @@ description: TDLAS/WMS 光谱仿真 MCP 服务器。触发词：TDLAS、WMS、�
 
 ## AI 操作规范（必须遵守）
 
+### 0. 交互契约（最高优先级：先读返回值，再谈表达）
+
+每次仿真工具返回里都有两个**机器可读**字段，取代了过去散在文档里的散文规范：
+
+```json
+"interaction":  {"stage": "clarify|produced|verified",
+                 "physics_ok": true, "result_usable": true,
+                 "conclusion_allowed": true, "blocking_reason": null,
+                 "disclosure_pending": [...]},
+"next_required_actions": [{"id": "disclose_defaults",
+                           "severity": "must_disclose",
+                           "action": "向用户说明下列参数用了默认值……",
+                           "evidence_fields": ["assumptions"],
+                           "values": {...}, "template": "……"}]
+```
+
+**执行方式：按 `next_required_actions` 逐条照做，`values` 里就是要用的数字（别自己另找）。**
+
+- `severity` 三级：
+  - `block_conclusion` → **不得给出定量结论**（只剩"这个数本身不可用"：校验 fail / 扫描含暗区 / 反演越界）；此时 `interaction.conclusion_allowed=false`，看 `blocking_reason`。
+  - `must_disclose` → 结论可以给，但**必须在同一回答里说明**；缺一条就是把结果当成比它更可信的东西报出去了。
+  - `advisory` → 建议。
+- 该列表是**按需下发**的：本会话已下发过的项不再重复（只留在 `disclosure_pending` 里），但你仍须覆盖它们。
+- `stage=verified` 只表示"该说的都已下发过"，**不等于**你已经照做 —— 服务器看不到你的最终措辞。
+- 缺参数**不阻断**结论（只要求披露）：默认工况下缺省参数有几十项，若据此阻断则 `conclusion_allowed` 恒为 false 就没有意义了；保留默认值时按 `values.condition_defaults` 逐项标注即可。
+
 ### 1. 启动协议
 
 任何 TDLAS 任务开始前，**必须先调用 `tdlas_guide`** 获取交互协议，包括：

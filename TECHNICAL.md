@@ -362,6 +362,47 @@ $$T(\tilde\nu)=\frac{1}{1+F\sin^2(\delta/2)},\qquad \delta=\frac{2\pi\tilde\nu}{
 
 ---
 
+### 4.11 AI 交互契约层（结构化动作，MCP 层）
+
+**动机**：交互规范（必须澄清 / 必须披露）原本写在 `AI_INTERACTION_GUIDE` 的散文里，而
+散文会漂、漂了**不会有任何测试发现** —— 三起真实事故（`edge` 一族被参数白名单丢弃、
+`tdlas_invert` 描述指向 `S2f1f_peak`、`allow_partial_dark` 曾被白名单丢弃）全靠人肉复核才发现。
+本层把它们升级为**机器可读的动作**，随每次返回下发：
+
+```
+out["interaction"] = {
+  "tool": "wms", "stage": "clarify | produced | verified",
+  "physics_ok": bool,          # validation.overall != fail
+  "result_usable": bool,       # 无暗区、反演未越界
+  "conclusion_allowed": bool,  # = physics_ok and result_usable
+  "blocking_reason": str|None,
+  "disclosure_pending": [id…], # 本会话已下发过的项（不重复下发，但仍须覆盖）
+}
+out["next_required_actions"] = [
+  {"id": "disclose_defaults", "severity": "must_disclose",
+   "action": "…", "evidence_fields": ["assumptions"], "values": {…}, "template": "…"}, …]
+```
+
+- **三级严重度**：`block_conclusion`（不得给定量结论）/ `must_disclose`（结论可给但必须说明）/ `advisory`。
+- **`evidence_fields` + `values`**：动作指向本次返回里的具体字段并直接给数字；AI 按 id 执行即可，
+  不必自己归纳"该报什么、去哪找数"。
+- **按需下发**：本会话已下发且语境未变的动作不再重复（沿用 `alpha_report.needs_report` 的既有范式），
+  否则每次返回都重发整张清单只是把散文搬进 payload 并反复计费。
+- **纯函数** `build_next_actions(out)` 与 `validate_wms_result` 平行，可直接单测（契约测试已覆盖）。
+
+**⚠ 两条经过实测标定的口径（别照抄设计稿）**：
+1. **缺参数不阻断结论**。默认工况下 `assumptions` 达 35 项（含全部器件参数）、`clarify.questions` 是
+   36 问题库；若把"未确认"当成阻断，`conclusion_allowed` 会**恒为 false** 并失去信息量。
+   阻断只留给"这个数本身不可用"（校验 fail / 扫描含暗区 / 反演越界），缺参数走 `must_disclose`。
+2. **不隐藏数据**。曾考虑过"结论不被允许时把定量字段置 `null`"，未采纳：首次调用（必然有默认参数）
+   就会拿不到任何数，且用户无法自行复核。改为"数据保留、结论受控"，与 `mole_frac_status` /
+   `*_valid` 的既有范式一致。
+
+**局限（诚实声明）**：服务器看不到模型最终的措辞，故本层只保证"要求已下发且不重复骚扰"，
+`stage=verified` 仅表示"本会话该说的都已下发过"，**不代表模型已照做**（见 `docs/VALIDATION.md` §8）。
+
+---
+
 ## 5. 默认参数表
 
 | 模块 | 参数 | 默认值 | 说明 |

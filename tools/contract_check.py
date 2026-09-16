@@ -385,5 +385,83 @@ check("schema 声明的物理参数全部可达（无死参数）",
       all(not dead for _, dead in FID.audit_parameters()),
       f"-> {[d for _, d in FID.audit_parameters() if d]}")
 
+# ── AI 交互契约（结构化动作） ──────────────────────────────────────────
+# 为什么要有这一节：交互规范原本是散文（AI_INTERACTION_GUIDE / must_disclose），散文会漂、
+# 漂了没有测试会发现。改成机器可读动作后，这些断言就是"防漂"的守门人。
+for _t in ("tdlas_wms_instrument", "tdlas_das_instrument", "tdlas_review", "tdlas_invert"):
+    _src = inspect.getsource(M.DISPATCH[_t])
+    check(f"{_t} 下发交互契约（interaction / next_required_actions / fidelity）",
+          "_interaction_block(" in _src and "fidelity" in _src)
+# DAS 曾有 clarify 不对称（最需要先问清工况的一条链反而没有问句）
+check("DAS 与 WMS 的 clarify 结构对称",
+      "clarify" in inspect.getsource(M.t_das_instrument)
+      and "build_clarify_questions(" in inspect.getsource(M.t_das_instrument))
+check("review 补齐交互字段（assumptions / clarify / fidelity）",
+      all(k in inspect.getsource(M.t_review) for k in ("assumptions", "clarify", "fidelity")))
+
+# A4：工具描述里出现的 `results.xxx` 引用必须在该工具源码里真实存在为键（防漂移 / 拼写错）。
+# ⚠ 诚实边界：这条只能拦"引用了**不存在**的量"，**拦不住"引用错了量"** —— 后者是语义错误
+#   （`S2f1f_peak` 与 `S2f_norm_peak` 那起事故：前者确实还在返回里，只是不该与 k 配对），
+#   只能靠配对说明 + 断言钉住（见上文 _pairing_ok / S2f_norm_peak_note 的检查）。
+# 判据取"全文件出现过该键名"：描述里合法地会**跨工具**引用别人返回的字段
+# （如 tdlas_invert 要你传 wms 的 results.S2f_norm_peak），故不能只在本工具源码里找。
+_all_src = Path("tdlas_mcp.py").read_text(encoding="utf-8") \
+    if Path("tdlas_mcp.py").exists() else inspect.getsource(M)
+_ref_bad = []
+for _t in M.TOOLS:
+    for _m in re.finditer(r"results\.([A-Za-z_]\w*)", json.dumps(_t, ensure_ascii=False)):
+        if f'"{_m.group(1)}"' not in _all_src:
+            _ref_bad.append((_t["name"], _m.group(1)))
+check("工具描述引用的 results.xxx 必须真实存在（防漂移/拼写错）", not _ref_bad, f"-> {_ref_bad}")
+
+_sess = {}
+_ols, _oss = M._load_sessions, M._save_sessions
+M._load_sessions = lambda: _sess          # 内存会话：不碰真实 .tdlas_session.json
+M._save_sessions = lambda s: None
+try:
+    _base = {"species": "CH4", "results": {},
+             "conditions": {"T_K": 296.0, "P_atm": 1.013, "x": 1e-4, "L_cm": 50.0},
+             "assumptions": ["T", "P", "x", "L_cm"],
+             "fidelity": {"not_implemented": ["自展宽"], "rule": "必须说明未建模项"},
+             "validation": {"overall": "pass", "checks": []}}
+    _it1, _a1 = M._interaction_block(dict(_base), "wms", "ctest")
+    check("交互契约：动作只指向本返回里真实存在的字段",
+          all(M._ev_ok(_base, p) for a in _a1 for p in a["evidence_fields"]),
+          f"-> {[(a['id'], a['evidence_fields']) for a in _a1]}")
+    # ★ 回归锁：缺参数是每个新会话的默认状态（默认工况下 assumptions 达 35 项、题库 36 问），
+    #   若把它算作阻断，conclusion_allowed 将**恒为 false** 并失去信息量 —— 已实测到。
+    check("交互契约：缺参数不阻断结论（只要求披露）",
+          _it1["conclusion_allowed"] is True
+          and not any(a["severity"] == M._SEV_BLOCK for a in _a1),
+          f"-> blocking_reason={_it1.get('blocking_reason')}")
+    _it2, _a2 = M._interaction_block(dict(_base), "wms", "ctest")
+    check("交互契约：同语境第二轮不再重复下发（按需下发生效）",
+          _a2 == [] and _it2["stage"] == "verified" and bool(_it2["disclosure_pending"]),
+          f"-> fresh={[a['id'] for a in _a2]} stage={_it2['stage']}")
+    _bad = dict(_base)
+    _bad["validation"] = {"overall": "fail",
+                          "checks": [{"check": "波数轴对齐", "status": "fail"}]}
+    _it3, _a3 = M._interaction_block(_bad, "wms", "ctest")
+    check("交互契约：校验 fail 必须阻断结论并给出证据",
+          _it3["conclusion_allowed"] is False
+          and any(a["id"] == "fix_validation_fail" for a in _a3)
+          and "波数轴对齐" in (_it3["blocking_reason"] or ""),
+          f"-> {_it3.get('blocking_reason')}")
+    _dark = dict(_base, warnings=["⚠ 扫描段有约 46% 无激光输出"])
+    _it4, _a4 = M._interaction_block(_dark, "wms", "ctest")
+    check("交互契约：扫描含暗区必须阻断结论",
+          _it4["conclusion_allowed"] is False
+          and any(a["id"] == "partial_dark_no_conclusion" for a in _a4))
+    # 真实工具（离线路径：显式给 k 时不跑引擎）
+    _inv = M.t_invert(peak_2f1f=1e-3, species="CH4", wn0=2968.5, k=1.0, session_id="ctest2")
+    check("tdlas_invert 真实返回带交互契约且允许结论",
+          {"interaction", "next_required_actions", "fidelity"} <= set(_inv)
+          and _inv["interaction"]["conclusion_allowed"] is True)
+    check("反演未附不确定度时必须要求说明",
+          any(a["id"] == "attach_uncertainty" for a in _inv["next_required_actions"]),
+          f"-> {[a['id'] for a in _inv['next_required_actions']]}")
+finally:
+    M._load_sessions, M._save_sessions = _ols, _oss
+
 print(f"\n===== 契约自检：{_OK} 通过 / {_BAD} 失败 =====")
 raise SystemExit(1 if _BAD else 0)

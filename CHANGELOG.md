@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+### 第五轮：AI 交互契约层（结构化动作 / 按需下发 / 进 CI）
+> 依据 `tdlas-mcp-AI交互层设计.md` 落地**第一步+第二步**；§3.1 的状态机与 §8 的两点做了改造（见下"对设计文档的修正"）。
+
+- **交互契约层**：新增纯函数 `build_next_actions(out)` + `_interaction_block()`，把原本写在散文里的"必须澄清/必须披露"变成**机器可读动作**（wms / das / review / invert 均已下发）：
+  - 每个仿真类工具返回新增 `interaction`（`stage` / `physics_ok` / `result_usable` / `conclusion_allowed` / `blocking_reason` / `disclosure_pending`）与 `next_required_actions`（`id` / `severity` / `action` / `evidence_fields` / `values` / `template`）
+  - `evidence_fields` 让 AI **按 id 执行、无需自己找数据**；`values` 直接给数字（如 `condition_defaults` 逐项给出 T/P/x/L 的实际默认值）
+  - **按需下发**：本会话已下发且语境未变的动作不再重复（只留 id 在 `disclosure_pending`），避免每次调用都重发一整张清单
+- **消除交互不对称**：`tdlas_das_instrument` 补齐 `clarify`（与 wms 同源同形，此前最需要先问清工况的一条链反而没有问句）；`tdlas_review` 补齐 `assumptions` / `param_requests` / `clarify` / `fidelity`（此前连 `assumptions` 都不返回）
+- **保真度随结果披露**：仿真结果新增精简 `fidelity` 块（`not_implemented` 等，真源仍是 `tools/tdlas_fidelity.py`，不复制内容），对应动作 `disclose_fidelity_gaps`
+- **工况回显**：`wms` / `das` 新增 `conditions`（T_K / P_atm / x / L_cm）—— 此前 `assumptions` 只说"哪些用了默认"却不给数值，AI 要披露也报不出数
+- **契约自检 89 → 103 项**：新增交互契约一节（四工具均下发契约 / DAS-clarify 对称 / review 补齐、动作只指向真实存在的字段、校验 fail 与暗区必须阻断、同语境第二轮不重复下发、`tdlas_invert` 真实返回校验、描述引用的 `results.xxx` 必须真实存在）
+
+**对设计文档的修正**（按实测标定，而非照抄）：
+1. **`conclusion_allowed` 不把"缺参数未确认"算作阻断**。文档 §3.2 把 `disclose_defaults` / `clarify_missing` 标为 `blocking: true`；实测按此实现后，**即便显式给全 T/P/x/L，`conclusion_allowed` 仍恒为 false** —— 因为 `assumptions` 是"没显式传的一切"（默认工况 35 项、含全部器件参数）、`clarify.questions` 是 36 问的题库。该布尔随即失去信息量、客户端会学会忽略它。改为：阻断只保留"这个数本身不可用"（校验 fail / 扫描含暗区 / 反演越界），缺参数走 `must_disclose`，与项目既有口径（`confirm_note`："保留默认时须在结论中明确注明"）一致
+2. **§8-Q2（把关键定量字段置 `null`）不采纳**。理由：① `conclusion_allowed=false` 的最常见触发条件是"有默认参数未确认"——这是每个新用户的**默认状态**，据此 null 掉结果等于工具在首次调用就不可用；② 用户付了算力却拿到 null，无法自行复核或做探索性使用；③ 与项目"越界不静默截断"的既有范式冲突（应显式标注 `mole_frac_status`/`*_valid` 而非删数据）。改为：数据保留，结论受控
+3. **§4-A4 的能力被高估**：`results.xxx` 存在性检查只能拦"引用了**不存在**的量"（拼写/漂移），**拦不住"引用错了量"** —— `S2f1f_peak` 那起事故中该字段确实还在返回里，只是不该与 `k` 配对。这类语义错误只能靠配对说明 + 断言钉住（已由 `S2f_norm_peak_note` 与 `_pairing_ok` 覆盖）。A4 已按此标定落地并注明边界
+4. **§3.1 的 `verified` 状态需要回执通道才能成立**，而服务器看不到模型的最终措辞。采用更小的方案：`stage` 由当前状态**派生**（不新增持久状态机），`verified` 定义为"本会话该说的都已下发过"，并在文档与返回值里写明它**不等于**模型已照做；不引入自报回执（为不可验证的目标增加一次往返不划算）
+5. 文档说"契约从未被校验（75 项）"已过期：现在 103 项，且**参数可达性审计已经覆盖了事故①③**（正是为"声明了没接住"造的）
+
 ### 第四轮：第三轮改动的事后审计修复（判据回归 / 不确定度口径 / 缓存并发）
 > 第三轮提交当日做的定向自查，逐条实测复现后修复。凡"改了行为"的都在这条里写清原委。
 

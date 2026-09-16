@@ -163,6 +163,13 @@
   - `tdlas_hitran.absorption()` 增加**进程内缓存**（α(ν) 是参数的纯函数；命中返回副本防就地污染，FIFO 上限 64），供 `measurement_uncertainty` / `detection_limit` 等蒙特卡洛调用复用；**不改变任何数值**，仅改变耗时。
   - 工程：原子写加重试与降级路径（Windows `os.replace` 偶发 WinError 5）；`tdlas_wms_instrument` 的 `allow_partial_dark` / `tdlas_invert` 的 `n_repeats` 缩进归位。
 
+- **2026-09-17（第五轮：AI 交互契约层）**
+  - 新增**结构化交互契约**：`interaction`（`stage` / `physics_ok` / `result_usable` / `conclusion_allowed` / `blocking_reason` / `disclosure_pending`）+ `next_required_actions`（`id` / `severity` / `action` / `evidence_fields` / `values` / `template`），已接入 wms / das / review / invert；`build_next_actions()` 为纯函数、可单测（见 §8 边界）。
+  - 消除两条交互不对称：DAS 补齐 `clarify`（与 wms 同源同形）；review 补齐 `assumptions` / `param_requests` / `clarify` / `fidelity`。
+  - 仿真结果随附精简 `fidelity` 块（真源 `tools/tdlas_fidelity.py`，不复制内容）；wms/das 新增 `conditions` 回显 T/P/x/L 实际值（此前只有"用了默认"没有数值）。
+  - 契约自检 **89 → 103 项**（交互契约一节 + 描述引用的 `results.xxx` 存在性检查）。
+  - **标定修正**：`conclusion_allowed` 不计入"缺参数未确认"（实测会恒为 false）；不采纳"结论不允许时把定量字段置 null"；`stage` 由当前状态派生而非新建持久状态机。
+
 - **2026-09-17（第四轮：第三轮改动的事后审计修复）**
   - **【高】显式 `offset_V` 的越限校验被绕过（第三轮引入的回归）**：`_require_driver_range()` 改用 `laser_reach(wn_center)` 后不再校验**实际生效**的偏置，而显式给 `offset_V` 时扫描中心由它决定、`wn_center` 只是标签。实测两个方向都错：显式 `offset_V=9 V` 被**静默放行**（结果无意义）；显式合法 `offset_V=2 V` + `wn_center=3000` 被**误拒**且报错文本自相矛盾（"扫描区间 [1.29, 2.71] V 未整段高于阈值电压 1.25 V"）。修法：抽出唯一判据 `_scan_window_reason()` 供 `laser_reach()` 与引擎校验共用，引擎侧一律按**实际** `offset_V ± amp_V` 判定；`_partial_dark_note()` 同步改为读实际偏置。
   - **【中】不确定度在错误的浓度上评估**：原按 docstring 的说法"rel_sigma 与浓度无关"在 `x_ref` 处求 σ 再套到 `x_est`；**实测该说法不成立**（见 §6 新增行，跨 4 个量级差约 20 倍）。改为在 `x_est` 处求（越界时退回 `x_ref` 并标注），返回新增 `x_eval` / `x_eval_source`。
@@ -172,3 +179,25 @@
   - **【中】α 缓存**：命中时 `info` 返回同一 dict（注释声称"返回副本"）→ 改浅拷贝；淘汰在 `ThreadingHTTPServer` 下有并发竞态 → 加锁（计算仍在锁外）。
   - **【低】** `k_conditions["wn_ref"]` 未重锚时为 `None`（改取引擎实际值）；`_maybe_align_laser` 报错打印的扫描半宽可能非实际值；`invalid_laser_params` 会走到 `fits_span` 分支并对 `None` 做浮点格式化而抛 `TypeError`（引擎侧同一处一并补）。
   - 契约自检 **84 → 89 项**（新增结构断言 + 三档边界 reason 精确匹配 + 显式 `offset_V` 的两个方向）。
+
+## 8. 交互契约的能力边界（诚实声明）
+
+第五轮把"必须澄清 / 必须披露"从散文升级成了随返回下发的结构化动作（见 §7）。
+它**能**做到、且已被契约测试钉住的：
+
+| 能力 | 说明 |
+|---|---|
+| 要求是否下发 | 每个 `id` 都有 `severity` / `evidence_fields` / `values`，契约测试断言"指向的字段在本次返回里真实存在" |
+| 不重复骚扰 | 本会话已下发且语境未变的动作不再重复下发（只留在 `disclosure_pending`） |
+| 结论受控 | `conclusion_allowed=false` 时 `blocking_reason` 给出原因，且**只**由"这个数本身不可用"触发（校验 fail / 暗区 / 越界） |
+
+它**不能**做到的（任何服务器端方案都做不到，除非引入模型自报回执）：
+
+1. **不能验证模型是否真的照做**。服务器看不到最终的措辞 —— `stage=verified` 只表示
+   "本会话该说的都已下发过"，**不是**"模型已经说了"。要真闭环需让模型调一次回执接口，
+   未做：为不可验证的目标增加一次往返不划算。
+2. **不能拦"语义引用错量"**。存在性检查只能发现"引用了不存在的字段"；
+   `S2f1f_peak` 与 `S2f_norm_peak` 那类"字段存在但配错了"只能靠配对说明与断言钉住
+   （已由 `S2f_norm_peak_note` + 契约 `_pairing_ok` 覆盖）。
+3. **不能替代物理判断**。`validation` 管物理、交互契约管表达，两者**故意不合成一个分数**
+   —— 混在一起会让"物理坏"与"话说得不全"无法区分。

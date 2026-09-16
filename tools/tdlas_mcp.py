@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import math
@@ -182,6 +183,259 @@ def _fringe_report_block(fringe_meta, session_id="default"):
             "report_rule": "needs_report=True 时须向用户说明：① 条纹 FSR 与吸收线宽的关系"
                            "（决定是否会在 2f 上伪造吸收峰）；② 确定性条纹会被背景扣除消除、"
                            "只有漂移残留；③ 压不掉条纹时该做的物理措施（窗片楔化 / AR 镀膜 / 扫频平均）。"}
+
+
+# ══════════════ AI 交互契约：结构化动作（可校验 / 按需下发） ══════════════
+# 为什么要有这一层：项目的"必须澄清 / 必须披露"一直以**散文**形式写在 AI_INTERACTION_GUIDE
+# 里，而散文会漂、漂了不会有任何测试发现 —— 三起真实事故（`edge` 一族被参数白名单丢弃、
+# `tdlas_invert` 描述指向 `S2f1f_peak`、`allow_partial_dark` 曾被白名单丢弃）全靠人肉复核
+# 才发现。本层把它升级为**机器可读的动作**：
+#   ① 每条动作指向返回值里的**具体字段**（evidence_fields），AI 不必自己找数据，也不易漏；
+#   ② 三级严重度；"能不能给定量结论"由服务器算出，而不是靠模型自觉；
+#   ③ **按需下发**：只下"本会话尚未下发过"的动作。每次返回都重发整张清单等于把散文搬进
+#      payload 且反复计费 —— 门控复用 alpha_report / fringe_report 的既有范式；
+#   ④ `build_next_actions()` 是**纯函数**，契约测试可直接断言，不必起 MCP。
+# 诚实的局限：服务器看不到模型最终的措辞，故本层只保证"要求已下发且不重复骚扰"，
+# **不能**保证模型照做。要真正闭环需要模型自报回执（未做：为不可验证的目标增加一次
+# 往返不划算；见 docs/VALIDATION.md §8）。
+_SEV_BLOCK = "block_conclusion"   # 未满足 → 不得给出定量结论（结果照给，结论受控）
+_SEV_DISCLOSE = "must_disclose"   # 结论可给，但必须在同一回答里说明（缺一不可）
+_SEV_ADVISORY = "advisory"        # 建议
+_SEV_ORDER = {_SEV_BLOCK: 0, _SEV_DISCLOSE: 1, _SEV_ADVISORY: 2}
+
+
+def _ev_ok(out, path):
+    """evidence_fields 路径解析：`a.b` 逐层取值；任一层缺失即 False。
+
+    为什么要它：动作必须只指向**本次返回里真实存在**的字段，否则 AI 按 id 执行时会
+    找不到数据（这正是要消灭的那类漂移）。契约测试另有一条断言兜底（见 contract_check）。
+    """
+    cur = out
+    for part in str(path).split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return False
+    return True
+
+
+def _fidelity_digest():
+    """随结果下发的**精简**保真度声明（真源仍是 tools/tdlas_fidelity.py，此处不复制内容）。"""
+    full = _fidelity_summary()
+    if "unavailable" in full:
+        return {"unavailable": full.get("unavailable"),
+                "rule": full.get("disclosure_rule")}
+    return {"modeled_count": len(full.get("implemented") or []),
+            "optional_available": [e.get("id") for e in (full.get("optional") or [])],
+            "not_implemented": [e.get("title") for e in (full.get("not_implemented") or [])],
+            "rule": full.get("disclosure_rule"),
+            "detail": "完整台账见 tdlas_guide 的 fidelity（含每项的实现位置与缺口说明）"}
+
+
+def _condition_values(out):
+    """取值本次**实际生效**的工况参数（T/P/x/L），兼容两种回显形状。
+
+    仪器链（wms/das）给 `conditions` 块；分析链（invert 等）是平铺的 T_K/P_atm/path_cm。
+    `assumptions` 只说"哪些用了默认"，不给数值 —— 缺了本函数，动作就只能要求 AI
+    "说明用了默认值"却报不出数值。
+    """
+    c = out.get("conditions") or {}
+    return {"T": c.get("T_K", out.get("T_K")),
+            "P": c.get("P_atm", out.get("P_atm")),
+            "x": c.get("x", out.get("x_ref", out.get("x"))),
+            "L_cm": c.get("L_cm", out.get("path_cm"))}
+
+
+def build_next_actions(out):
+    """从工具返回**推导**出"AI 接下来必须做什么" —— 纯函数，只读 out，不碰会话/不写盘。
+
+    返回按严重度排序的 list[dict]，每条：{id, severity, action, evidence_fields, values, template}。
+    两条供契约测试断言的不变量：
+      · 每个 evidence_fields 路径都能在**同一次返回**里解析到（否则 AI 找不到数据）；
+      · 存在 block_conclusion 动作时，`interaction.conclusion_allowed` 必须为 False。
+    """
+    acts = []
+    val = out.get("validation") or {}
+    overall = val.get("overall")
+    title = str(out.get("species") or "").upper() or "该物种"
+
+    def add(_id, sev, action, ev, values=None, template=None):
+        if not all(_ev_ok(out, p) for p in ev):        # 数据不在 → 不生成（不指向空气）
+            return
+        acts.append({"id": _id, "severity": sev, "action": action,
+                     "evidence_fields": list(ev), "values": values, "template": template})
+
+    # ① 扫描含暗区：不是措辞问题，而是"这个数不可用"，最高优先级
+    _dark = [str(w) for w in (out.get("warnings") or []) if "无激光输出" in str(w)]
+    if _dark:
+        add("partial_dark_no_conclusion", _SEV_BLOCK,
+            "说明本次扫描含无光暗区、2f/1f 已被截断，**不得给出定量结论**",
+            ["warnings"], template=_dark[0])
+    # ② 物理校验 fail：前提已破
+    if overall == "fail":
+        _fails = [c.get("check") for c in (val.get("checks") or []) if c.get("status") == "fail"]
+        add("fix_validation_fail", _SEV_BLOCK,
+            "先处理 validation 的 fail 项；fail 项不得作为可用结果报出",
+            ["validation.checks"], values={"fail_checks": _fails},
+            template=f"本次校验未通过：{'、'.join(str(f) for f in _fails)}。")
+    # ③ 反演结果越界：摩尔分数不在 (0,1] → 结果本身不可用
+    _st = out.get("mole_frac_status")
+    if _st not in (None, "ok"):
+        add("invert_result_unusable", _SEV_BLOCK,
+            f"反演结果不可用（mole_frac_status={_st}）：先排除 k 不同源 / 出线性区 / 基线未扣，再报数",
+            ["mole_frac_status"], values={"status": _st, "peak_2f1f_in": out.get("peak_2f1f_in")})
+    # ④ 缺参数 → **必须是 must_disclose 而不是 block**。理由（实测标定）：
+    #    `assumptions` 是"没显式传的一切"（默认工况下 35 项，含全部器件参数），
+    #    `clarify.questions` 是 36 问的**题库**（`needed` 只在极端情况才为 False）。若据此
+    #    阻断，则**即使显式给全 T/P/x/L，conclusion_allowed 也恒为 false** —— 这个布尔
+    #    随即失去信息量、客户端会学会忽略它。项目既有口径也正是"保留默认时须在结论中
+    #    明确标注"（见 confirm_note）而非拒绝出结论。真正该阻断的只有"这个数本身不可用"
+    #    （扫描含暗区 / 校验 fail / 反演越界，见 ①②③）。
+    _qb = out.get("clarify") or {}
+    if _qb.get("needed"):
+        _qs = _qb.get("questions") or out.get("param_requests") or []
+        _names = [str(q.get("param")) for q in _qs if isinstance(q, dict)]
+        add("clarify_missing", _SEV_DISCLOSE,
+            "用原生结构化提问工具向用户提出这些缺省参数；用户明确说'用默认值'才可跳过，"
+            "跳过时必须在结论里标注",
+            ["clarify.questions"],
+            values={"count": len(_names), "top": _names[:6],
+                    "priority_hint": "波段 > 浓度/光程 > T/P > 器件 > 噪声；1 次 1–4 题，超 4 题分批"},
+            template=f"有 {len(_names)} 项参数缺省，按优先级前 6：{'、'.join(_names[:6])}。")
+    # ⑤ 默认值披露：**工况类逐项报**（直接决定数值），器件类只报个数
+    #    （35 项全列出来没法读，AI 也会只挑几条说 —— 等于没报）
+    _as = list(out.get("assumptions") or [])
+    if _as:
+        _cond_keys = [k for k in ("T", "P", "x", "L_cm") if k in _as]
+        _cv = _condition_values(out)
+        _vals = {k: _cv.get(k) for k in _cond_keys if _cv.get(k) is not None}
+        _n_hw = len([k for k in _as if k not in _cond_keys])
+        add("disclose_defaults", _SEV_DISCLOSE,
+            "向用户说明哪些参数用了默认值（工况类须逐项给出数值），并指出改为实测值的途径",
+            ["assumptions"],
+            values={"condition_defaults": _vals or None,
+                    "condition_params": _cond_keys or None,
+                    "hardware_default_count": _n_hw},
+            template=(f"本次工况参数 {'、'.join(_cond_keys)} 用了默认值"
+                      f"（另有 {_n_hw} 项器件/扫描参数为默认）" if _cond_keys else
+                      f"本次有 {len(_as)} 项参数用了默认值（均为器件/扫描设置）"))
+    # ⑥ 归一化方法
+    if _ev_ok(out, "normalization.method"):
+        add("disclose_normalization", _SEV_DISCLOSE,
+            "说明本次归一化方法（2f/1f 还是退化为 2f/I0），以及是否做了背景扣除",
+            ["normalization.method"],
+            values={"method": out["normalization"].get("method"),
+                    "background_subtracted": out["normalization"].get("background_subtracted"),
+                    "offband_leak_1f": out["normalization"].get("offband_leak_1f")})
+    # ⑦ α 语境 / ⑧ etalon 条纹 / ⑨ 激光自动重锚：只在"需要播报"时下发
+    if (out.get("alpha_report") or {}).get("needs_report"):
+        add("report_alpha_context", _SEV_DISCLOSE,
+            "给出 α 峰值时必须同时列出 T / P / step / wingHW / 波数窗口（缺一不可）",
+            ["alpha_report.alpha_peak_context"],
+            values=out["alpha_report"].get("alpha_peak_context"),
+            template=out["alpha_report"].get("report_reason"))
+    if (out.get("fringe_report") or {}).get("needs_report"):
+        add("report_fringe_impact", _SEV_DISCLOSE,
+            "说明 etalon 条纹的 FSR/对比度、是否会在 2f 上伪造吸收、以及该采取的物理措施",
+            ["fringe_report.fringe_context"], values=out["fringe_report"].get("fringe_context"),
+            template=out["fringe_report"].get("report_reason"))
+    if out.get("laser_auto_aligned"):
+        _li = out["laser_auto_aligned"]
+        add("disclose_laser_realign", _SEV_DISCLOSE,
+            "说明本次 wn_ref 是**自动重锚**的理想激光器假设（不是用户手上的器件），"
+            "并提示提供实测 wn_ref/dν/dI 或用 tdlas_device 引用真实设备",
+            ["laser_auto_aligned"],
+            values={"wn_ref_before": _li.get("wn_ref_before"), "wn_ref_auto": _li.get("wn_ref_auto")})
+    # ⑩ 保真度缺口：任何定量结论都要说清"哪些没建模"
+    _fid = out.get("fidelity") or {}
+    if _fid.get("not_implemented"):
+        add("disclose_fidelity_gaps", _SEV_DISCLOSE,
+            "说明哪些物理效应本次**未建模**（它们可能主导真实误差），并明确点值≠带误差结果",
+            ["fidelity.not_implemented"], values={"not_modeled": _fid["not_implemented"]})
+    # ⑪ 不确定度：给了浓度就要说清"有没有误差、是什么口径"
+    if _ev_ok(out, "mole_frac") and "uncertainty" not in out:
+        add("attach_uncertainty", _SEV_DISCLOSE,
+            "报出浓度时须说明未附不确定度，或改用 n_repeats>0 得到统计分量",
+            ["mole_frac"], values={"mole_frac": out.get("mole_frac"), "n_repeats": 0})
+    return sorted(acts, key=lambda a: _SEV_ORDER.get(a["severity"], 9))
+
+
+def _action_sig(action):
+    """动作的"语境指纹"：只取与数值有关的部分，用于判断是否需要重新下发。"""
+    payload = {"id": action["id"], "values": action.get("values"),
+               "evidence_fields": action.get("evidence_fields")}
+    return hashlib.md5(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                  default=str).encode("utf-8")).hexdigest()[:10]
+
+
+def _interaction_block(out, tool, session_id="default"):
+    """把 build_next_actions 的结果做成**按需下发**的交互契约块。
+
+    返回 (interaction, next_required_actions)。stage 的语义（写死在这里，别再解释成别的）：
+      · clarify  —— conclusion_allowed=false：校验 fail / 扫描含暗区 / 反演越界，
+                    即"这个数本身不可用"，不得据此给定量结论
+      · produced —— 结论可给，但本轮仍有**新**的必须披露项未下发
+      · verified —— 结论可给，且本会话该说的都已下发过（本轮无新项）
+    ⚠ `verified` 只表示"要求已全部下发过"，**不代表模型已照做**（服务器看不到最终措辞）。
+    ⚠ `conclusion_allowed` **故意不把"缺参数未确认"算作阻断**：缺省参数是每个新会话的默认
+      状态（默认工况下 assumptions 有 35 项、clarify 题库有 36 问），若据此阻断则该布尔恒为
+      false、随即失去信息量。缺参数走 must_disclose（结论可给 + 必须标注），与项目既有口径
+      （confirm_note："保留默认时须在结论中明确注明"）一致。
+    """
+    acts = build_next_actions(out)
+    sessions = _load_sessions()
+    sess = sessions.get(session_id, {"confirmed": {}, "pending": [], "stage": "clarify"})
+    sent = dict(sess.get("interaction_sent") or {})
+    fresh, already, changed = [], [], False
+    for a in acts:
+        # ⚠ 按 **工具+动作** 记账：review 内部会先跑一次 wms，若只按动作 id 记账，
+        # 两个工具写同一份 map 会互相抹掉对方的"已下发"记录（实测序列会来回重复下发）。
+        key = f"{tool}:{a['id']}"
+        sig = _action_sig(a)
+        if sent.get(key) == sig:
+            already.append(a["id"])
+        else:
+            fresh.append(a)
+            sent[key] = sig
+            changed = True
+    keep = {f"{tool}:{a['id']}" for a in acts}            # 剪掉已不适用的条目
+    pruned = {k: v for k, v in sent.items() if k in keep}
+    if pruned != sent:
+        changed = True
+    if changed:
+        sess["interaction_sent"] = pruned
+        sessions[session_id] = sess
+        _save_sessions(sessions)
+
+    val = out.get("validation") or {}
+    physics_ok = val.get("overall") != "fail"
+    blockers = [a for a in acts if a["severity"] == _SEV_BLOCK]      # 只剩"这个数不可用"类
+    result_usable = not blockers
+    allowed = bool(physics_ok and result_usable)
+    has_result = ("results" in out) or ("validation" in out) or _ev_ok(out, "mole_frac")
+    if not allowed:
+        stage = "clarify"
+    elif has_result and not fresh:
+        stage = "verified"
+    else:
+        stage = "produced"
+    reason = None
+    if not allowed:
+        _parts = []
+        if not physics_ok:
+            _fails = [c.get("check") for c in (val.get("checks") or []) if c.get("status") == "fail"]
+            _parts.append("物理校验未通过（validation.overall=fail）"
+                          + (f"：{'、'.join(str(f) for f in _fails)}" if _fails else ""))
+        _parts += [a["action"] for a in blockers]
+        reason = "；".join(_parts) or "结果不可用"
+    interaction = {"tool": tool, "stage": stage,
+                   "physics_ok": bool(physics_ok), "result_usable": bool(result_usable),
+                   "conclusion_allowed": allowed, "blocking_reason": reason,
+                   "disclosure_pending": already,
+                   "rule": "conclusion_allowed=false（见 blocking_reason）时不得给出定量结论；"
+                           "next_required_actions 里 must_disclose 项须在同一回答里说明；"
+                           "disclosure_pending 是本会话已下发过的项（不重复发大 payload，仍须覆盖）。"}
+    return interaction, fresh
 
 
 # ══════════════════ 设备库（仪器统一管理）══════════════════
@@ -904,6 +1158,8 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
         out["uncertainty"] = unc
         # 追加而不是覆盖：第一个 _quiet() 块里是 k 重算的诊断输出，覆盖会让 log 变空
         out["log"] = (out.get("log") or []) + _sanitize_paths(g2.getvalue()).splitlines()
+    out["fidelity"] = _fidelity_digest()          # ⑩ 未建模效应随结果披露
+    out["interaction"], out["next_required_actions"] = _interaction_block(out, "invert", session_id)
     return out
 
 
@@ -1242,6 +1498,11 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                              "how": "① 用户实测值 ② 器件型号（AI 检索规格书）"
                                     "③ 引导现场标定 ④ 保留默认并注明"})
 
+    # 澄清问句：与 wms 同源同形（此前 DAS **没有** clarify，最需要先问清工况的一条链
+    # 反而拿不到问句 → 交互不对称，见 tools/tdlas_mcp.py 的交互契约说明）
+    _used = {k: (scene[k] if k in scene else cfg.get(k)) for k in assumed}
+    _clarify_qs = build_clarify_questions(species, wn_center, assumed, _used)
+
     out = {"species": str(species).upper(), "wn_center_cm-1": float(wn_center),
            "scan_window_cm-1": [round(m["scan_lo"], 4), round(m["scan_hi"], 4)],
            "scan_half_span_cm-1": round(m["span_cm-1"], 4),
@@ -1258,9 +1519,17 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                               "thermal": m["sigma_thermal"] * 1e3,
                                               "rin": m["sigma_rin"] * 1e3},
                        "n_lines_in_window": m["n_lines_in_window"], "table": m["table"]},
+           "conditions": {"T_K": float(cfg["T"]), "P_atm": float(cfg["P"]),
+                          "x": float(cfg["x"]), "L_cm": float(cfg["L_cm"])},
            "assumptions": assumed,
            "param_requests": requests,
            "needs_input": bool(requests),
+           "clarify": {"needed": bool(requests),
+                       "instruction": "needed=True 时：**先向用户提出 questions 里的澄清问题，"
+                                      "收到回答前不要直接出图/下结论**。用户明确说'用默认值'才可跳过。"
+                                      "**用原生结构化提问工具（AskUserQuestion 类点击式选择框）渲染，"
+                                      "禁止纯文字列表**；1 次 1–4 题，超过 4 题按优先级分批多轮。",
+                       "questions": _clarify_qs},
            "confirm_note": "param_requests 为缺省参数：请优先向用户索取实测值或器件型号；"
                            "必要时引导现场标定；保留默认时须在结论中明确注明。",
            "seed_used": m.get("seed_used"),
@@ -1276,6 +1545,8 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                f"允许的键见 tools/list 的 inputSchema")
     out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species, session_id)
     out["fringe_report"] = _fringe_report_block(m.get("fringe"), session_id)
+    out["fidelity"] = _fidelity_digest()
+    out["interaction"], out["next_required_actions"] = _interaction_block(out, "das", session_id)
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"das_instr_{_safe_name(str(species).upper())}_{float(wn_center):g}cm-1.png"
@@ -1426,6 +1697,10 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                            "drift_frac=1/f 慢漂移，flicker_frac=1/f 粉红。散粒/热为物理固有（极小）。",
                        "n_lines_in_window": m["n_lines_in_window"], "table": m["table"]},
            "validation": ts.validate_wms_result(r),
+           # 实际生效的工况：assumptions 只说"哪些用了默认"，数值必须一起回显，
+           # 否则 AI 只能写"用了默认值"却报不出数值（= 拿不到数据）
+           "conditions": {"T_K": float(cfg["T"]), "P_atm": float(cfg["P"]),
+                          "x": float(cfg["x"]), "L_cm": float(cfg["L_cm"])},
            "assumptions": assumed, "param_requests": requests,
            "needs_input": bool(requests),
            "clarify": {"needed": bool(requests),
@@ -1480,6 +1755,8 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                f"允许的键见 tools/list 的 inputSchema")
     out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species, session_id)
     out["fringe_report"] = _fringe_report_block(m.get("fringe"), session_id)
+    out["fidelity"] = _fidelity_digest()
+    out["interaction"], out["next_required_actions"] = _interaction_block(out, "wms", session_id)
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"wms_instr_{_safe_name(str(species).upper())}_{float(wn_center):g}cm-1.png"
@@ -1499,7 +1776,7 @@ def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
     """
     out = t_wms_instrument(species=species, wn_center=wn_center, T=T, P=P, x=x, L_cm=L_cm,
                            seed=seed, session_id=session_id, save_png=False, **kw)
-    return {"species": out["species"], "wn_center_cm-1": out["wn_center_cm-1"],
+    _rev = {"species": out["species"], "wn_center_cm-1": out["wn_center_cm-1"],
             "validation": out["validation"], "warnings": out["warnings"],
             "key_metrics": {"alpha_L_peak": out["results"]["alpha_L_peak"],
                             "n_lines_in_window": out["results"]["n_lines_in_window"],
@@ -1507,8 +1784,17 @@ def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
                             "scan_window_cm-1": out["scan_window_cm-1"]},
             "alpha_report": out.get("alpha_report"),
             "fringe_report": out.get("fringe_report"),
+            # ★ 复核工具是最需要"先确认工况再下结论"的一环，此前它连 assumptions 都不返回
+            #   （交互相对于 wms 是残缺的）→ 这里补齐同源交互字段：
+            "assumptions": out.get("assumptions") or [],
+            "param_requests": out.get("param_requests") or [],
+            "clarify": out.get("clarify"),
+            "fidelity": out.get("fidelity"),
             "suggestion": "若 validation.overall != 'pass'，先处理 fail 项再下结论；"
                           "warn 项须向用户说明。"}
+    _rev["interaction"], _rev["next_required_actions"] = _interaction_block(_rev, "review",
+                                                                           session_id)
+    return _rev
 
 
 def t_session(action="view", session_id="default", **fields):
