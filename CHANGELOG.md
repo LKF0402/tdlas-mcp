@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### 第四轮：第三轮改动的事后审计修复（判据回归 / 不确定度口径 / 缓存并发）
+> 第三轮提交当日做的定向自查，逐条实测复现后修复。凡"改了行为"的都在这条里写清原委。
+
+- **【高】显式 `offset_V` 的越限校验被绕过（第三轮引入的真回归）**：`_require_driver_range()` 改用 `laser_reach(wn_center)` 后，**不再校验实际生效的 `cfg["offset_V"]`**。而 `_resolve_scan()` 只在"用户没显式给 offset_V"时才由 wn_center 反算偏置；用户一旦显式给 `offset_V`，扫描中心就由它决定、**wn_center 只是标签**。实测两个方向都错：① 显式 `offset_V=9 V`（越驱动器上限）+ `wn_center=2968.5` → **静默放行**，引擎照常出谱（ν 轴跑到 2969.5–2972.5 之外、只剩"ADC 饱和"之类的下游症状）；② 显式 `offset_V=2 V`（合法）+ `wn_center=3000` → **误拒**，且报错文本自相矛盾（"扫描区间 [1.29, 2.71] V 未整段高于阈值电压 1.25 V"——该区间明明高于 1.25 V，因为区间用的是实际偏置、而 reason 来自另一个反算偏置）。修法：抽出**唯一判据** `_scan_window_reason(off, amp, v_lo_eff, v_hi)` 供 `laser_reach()` 与 `_require_driver_range()` 共用，且引擎侧一律按**实际** `offset_V ± amp_V` 判定；仅在"偏置确实由 wn_center 反算"时才附 `wn_ref` 重锚建议（显式给 offset_V 时给重锚建议是误导）；`_partial_dark_note()` 同样改为直接读实际偏置（不再经 wn_center 反算，并去掉无用的 `wn_center` 形参）
+- **【中】测量不确定度在错误的浓度上评估**：`tdlas_invert(n_repeats>0)` 原先把 σ 算在**参考浓度 `x_ref`** 上、再套到**反演浓度 `x_est`** 上，依据是 docstring 里"rel_sigma 与浓度无关、任意 x 都适用"的说法——**实测该说法不成立**：噪声中有一部分（热噪声、ADC 量化、RIN）不随吸收信号等比缩放，rel_sigma 随 x 明显变化（实测 CH4@2968.5、L=50 cm、n=5：x=1e-3 → 1.08%，1e-5 → 0.21%，1e-7 → 4.04%，跨 4 个量级差约 20 倍）。实测调用里 `x_ref=1e-4` 而 `x_est=6.5e-11`（差 6 个量级）时，报出的 σ 已不可用。修法：改为在 `x_est`（`mole_frac_status == "ok"` 时）处求 σ，并新增 `x_eval` / `x_eval_source` 明示求值点；`x_est` 越界时退回 x_ref 并标注"本次结果本身不可用"
+- **【中】`mean_rel_ci` 数值无意义**：原为 `[max(0, rel−half), rel+half]`，把"散布本身"当成了区间中心（实测输出 `[0.0, 0.1389]`，起点被夹断）。改为两个语义明确的标量：`single_rel_ci95_halfwidth`（单次测量）与 `mean_rel_ci95_halfwidth`（n 次平均，÷√n），并注明是"围绕 0 的半宽"而非"围绕 σ"
+- **【中】σ=0 时消息里出现 `nan`**：`physical_noise=False` 时各次重复逐位一致 → `rel_sigma=0` → χ² 换算退化为 0/0，`low_sample_warning` 会打印"±nan%"、`rel_sigma_of_sigma_pct` 为 nan。修法：`rel==0` 单独处理（数值归零），并改为明确告知"逐位一致 = 随机噪声没起作用，该散布**不是**实验重复性、不可作为不确定度引用"
+- **【中】`t_invert` 的 `log` 被覆盖**：第二个 `_quiet()` 块把 `out["log"]` 直接赋成它自己的内容，于是 k 重算阶段的诊断输出（HAPI 版本横幅、线表加载条数…）被丢弃——冷启动实测"带 n_repeats 的 log 行数 = 0"。改为**追加**（实测冷启动 173 行保留）
+- **【中】α 缓存的两处**：① 命中时 `info` 返回的是**同一个 dict**（注释却写"返回副本"）→ 任何调用方给它加键都会污染缓存，实测污染会回传；改为返回 `dict(...)` 浅拷贝。② 淘汰用 `pop(next(iter(_ALPHA_CACHE)))`，而 HTTP 模式是 `ThreadingHTTPServer`——并发下两个线程会取到同一个最老键（`KeyError`）或让迭代器看到 size 变化（`RuntimeError`）；改为只在改字典时加 `threading.Lock`（0.6 s 的 Voigt 计算仍在锁外）
+- **【低】`t_invert.k_conditions["wn_ref"]` 在未重锚时是 `None`**（实际用的是默认 2964.7）→ 改为取引擎 `meta.cfg` 里**实际生效**的 wn_ref
+- **【低】`_maybe_align_laser` 报错打印的扫描半宽可能不是实际值**（用户只给 `amp_V` 时仍打 `scan_span_cm` 默认值）；同时补上 `invalid_laser_params` 分支——原先它会走到 `fits_span` 分支并对 `None` 做 `:.3g` 格式化而抛 `TypeError`（引擎侧同一处也已补）
+- **契约自检 84 → 89 项**：新增"两边都调用 `_scan_window_reason`（结构）"、"三档边界 reason 精确匹配"、"显式 offset_V 越上限必须被拒"、"显式合法 offset_V 不因 wn_center 标签被误拒"、"反算路径的部分出光档仍被拒"
+- 文档：`docs/VALIDATION.md` §6/§7、`TECHNICAL.md` §4.10 同步订正"rel_sigma 可跨浓度外推"的旧说法
+
 ### 第三轮：可达性判据收敛 / 保真度台账 / 不确定度
 - **可达性判据三版收敛（高）**：`laser_reach()` 的最终判据 = **整段扫描都在阈值之上且不出电压上限**（`offset_V − amp_V ≥ v_th` 且 `offset_V + amp_V ≤ 5`）。前两版分别只查"偏移落在驱动器 0–5 V 内"与"扫描中心出光"，都会让 **2971.0–2974.1 cm⁻¹** 这一档**不报错、但扫描波形被截断**（2f/1f 静默失真）。引擎侧 `_require_driver_range()` 与判据**共用同一实现**，杜绝两处漂移
 - **`allow_partial_dark`（新增，默认 False）**：明知扫描段含暗区、就是要看"越界之后长什么样"时可显式放行；放行后 `warnings` 报出暗区占比，返回里声明**定量结论不可用**（不给静默残谱留后门）

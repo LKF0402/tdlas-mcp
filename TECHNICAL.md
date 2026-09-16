@@ -352,9 +352,13 @@ $$T(\tilde\nu)=\frac{1}{1+F\sin^2(\delta/2)},\qquad \delta=\frac{2\pi\tilde\nu}{
 
 当前台账：默认生效 **11** 项、需显式开启 **6** 项、**未实现 7 项**（自展宽、线混合、Dicke 变窄、PD 暗电流、前放 1/f、跨阻放大器输入电压噪声、光束几何）。这 7 项**不在仿真里**，在相应工况下可能主导真实误差——例如痕量检测的 LOD 会因缺"前放 1/f"而**偏乐观**。
 
-**测量不确定度**（`tdlas_invert` 的 `n_repeats`，默认 0 = 不算）：对同一工况重复仿真 $n$ 次，取浓度估计的 run-to-run 散布，返回 $\sigma$、$x$ 的 95% 区间与小样本说明。**它只含统计（随机）分量**，**不含** $k$ 标定误差、HITRAN 数据库不确定度、线型近似（自展宽 / 线混合）与 etalon 条纹；$n<10$ 时 $\sigma$ 自身的相对不确定度很大（返回里给出警告）。故它回答的是"同样的仿真跑两遍有多一致"，**不是**"这个数离真值有多远"。
+**测量不确定度**（`tdlas_invert` 的 `n_repeats`，默认 0 = 不算）：对同一工况重复仿真 $n$ 次（逐次用 `seed+i`，只换噪声实现），取归一化 2f 峰的 run-to-run 散布，返回 $\sigma$、单次/均值的 95% 半宽（`single_rel_ci95_halfwidth` / `mean_rel_ci95_halfwidth`）与 $n<10$ 的小样本警告。**它只含统计（随机）分量**，**不含** $k$ 标定误差、HITRAN 数据库不确定度、线型近似（自展宽 / 线混合）与 etalon 条纹。故它回答的是"同样的仿真跑两遍有多一致"，**不是**"这个数离真值有多远"。
 
-**缓存**：`measurement_uncertainty` / `detection_limit` 会对**完全相同**的 (species, 窗口, T, P, step, wingHW) 反复调用 `tdlas_hitran.absorption()`，而单次 Voigt 计算实测 0.6–0.9 s。故 `absorption()` 加进程内缓存：键含全部影响 α 的参数；命中返回**副本**（防调用方就地修改污染缓存）；FIFO 上限 64，可用 `alpha_cache_clear()` 清空。$\alpha(\nu)$ 是参数的纯函数，**缓存不改变任何数值**，仅改变耗时。
+> ⚠ **σ 必须在"要报告的那个浓度"上求**。噪声中相当一部分（热噪声、ADC 量化、RIN）**不随吸收信号等比缩放**，因此 `rel_sigma` 随 $x$ 明显变化：实测 CH4@2968.5、$L=50$ cm、$n=5$ 时 $x=10^{-3}\to1.08\%$、$10^{-5}\to0.21\%$、$10^{-7}\to4.04\%$（跨 4 个量级差约 20 倍）。早先按"与浓度无关"的说法在参考浓度 `x_ref` 处求 σ 再套到反演浓度 `x_est` 上，浓度差得远时误差可达一个量级；现在改为在 `x_est` 处求（`x_est` 越界时退回 `x_ref` 并在 `x_eval_source` 里标注"本次结果本身不可用"）。
+
+**缓存**：`measurement_uncertainty` / `detection_limit` 会对**完全相同**的 (species, 窗口, T, P, step, wingHW) 反复调用 `tdlas_hitran.absorption()`，而单次 Voigt 计算实测 0.6–0.9 s。故 `absorption()` 加进程内缓存：键含全部影响 α 的参数；命中返回**副本**（数组与 `info` 都是，防调用方就地修改污染缓存）；FIFO 上限 64，可用 `alpha_cache_clear()` 清空；改字典时加锁（HTTP 模式是 `ThreadingHTTPServer`，淘汰那一步在并发下会竞态，0.6 s 的计算仍在锁外）。$\alpha(\nu)$ 是参数的纯函数，**缓存不改变任何数值**，仅改变耗时。
+
+**驱动可行性校验的对象**（易错点）：`_scan_window_reason(off, amp, v_lo_eff, v_hi)` 是"整段扫描是否都在有效输出区"的唯一判据，`laser_reach()` 与引擎的 `_require_driver_range()` 共用它。但引擎侧**必须用 `cfg` 里实际生效的 `offset_V ± amp_V`** 去判定：`_resolve_scan()` 只在"用户没显式给 `offset_V`"时才由 `wn_center` 反算偏置，用户一旦显式给出，**扫描中心就由 `offset_V` 决定、`wn_center` 只是标签**。若拿 `laser_reach(wn_center)` 的结果顶替，会同时错两个方向——显式合法 `offset_V` 被误拒、显式越限 `offset_V`（如 9 V）被静默放行（坏结果只因下游"ADC 饱和"之类的警告才露出痕迹）。重锚 `wn_ref` 的建议也只在"偏置确实由 `wn_center` 反算"时才给出。
 
 ---
 

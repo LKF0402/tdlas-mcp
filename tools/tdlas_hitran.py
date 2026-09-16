@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -242,19 +243,27 @@ def _absorption_uncached(name, numin, numax, T=296.0, P=1.01325, step=5e-4, wing
 # 为什么需要：蒙特卡洛类调用（measurement_uncertainty / detection_limit）会对
 # **完全相同**的 (species, 窗口, T, P, step, wingHW) 反复调用本函数，而每次
 # Voigt 计算实测约 0.6–0.9 s，成为重复仿真的主要开销。
-# 缓存键包含全部影响 α 的参数；命中时返回**副本**，防止调用方就地修改污染缓存。
-# α(ν) 是参数的纯函数，故缓存不改变任何数值结果（仅改变耗时）。
+# 缓存键包含全部影响 α 的参数；命中时返回**副本**（数组与 info 都是），
+# 防止调用方就地修改污染缓存。α(ν) 是参数的纯函数，故缓存不改变任何数值结果。
+#
+# ⚠ 并发：HTTP 模式用的是 ThreadingHTTPServer，多请求会同时碰这个字典。
+#   dict.get 本身是原子的，但"取最老键 + 淘汰 + 写入"不是 —— 两个线程同时走到淘汰
+#   会拿到同一个键（KeyError），或让迭代器看到 size 变化（RuntimeError）。
+#   故只在**改字典**时加锁（锁内微不足道，真正的 0.6 s 计算在锁外）。
 _ALPHA_CACHE = {}
 _ALPHA_CACHE_MAX = 64
+_ALPHA_CACHE_LOCK = threading.Lock()
 
 
 def alpha_cache_clear():
     """清空吸收谱缓存（改过线表/换物种批次后建议调用）。"""
-    _ALPHA_CACHE.clear()
+    with _ALPHA_CACHE_LOCK:
+        _ALPHA_CACHE.clear()
 
 
 def alpha_cache_info():
-    return {"entries": len(_ALPHA_CACHE), "max": _ALPHA_CACHE_MAX}
+    with _ALPHA_CACHE_LOCK:
+        return {"entries": len(_ALPHA_CACHE), "max": _ALPHA_CACHE_MAX}
 
 
 def absorption(name, numin, numax, T=296.0, P=1.01325, step=5e-4, wingHW=20.0,
@@ -271,10 +280,12 @@ def absorption(name, numin, numax, T=296.0, P=1.01325, step=5e-4, wingHW=20.0,
            bool(hitran_units))
     hit = _ALPHA_CACHE.get(key)
     if hit is not None:
-        return hit[0].copy(), hit[1].copy(), hit[2]
+        # info 也必须给副本：它是可变 dict，共享出去迟早被某个调用方加键污染
+        return hit[0].copy(), hit[1].copy(), dict(hit[2])
     val = _absorption_uncached(name, numin, numax, T=T, P=P, step=step, wingHW=wingHW,
                                iso=iso, hitran_units=hitran_units)
-    if len(_ALPHA_CACHE) >= _ALPHA_CACHE_MAX:
-        _ALPHA_CACHE.pop(next(iter(_ALPHA_CACHE)))      # FIFO 淘汰，避免无界增长
-    _ALPHA_CACHE[key] = val
-    return val[0].copy(), val[1].copy(), val[2]
+    with _ALPHA_CACHE_LOCK:
+        if len(_ALPHA_CACHE) >= _ALPHA_CACHE_MAX:
+            _ALPHA_CACHE.pop(next(iter(_ALPHA_CACHE)), None)   # FIFO 淘汰，避免无界增长
+        _ALPHA_CACHE[key] = val
+    return val[0].copy(), val[1].copy(), dict(val[2])

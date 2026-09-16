@@ -121,7 +121,9 @@
 | etalon 条纹当噪声处理 | 以为降噪 / 多次平均能消除条纹 | 固定腔长的条纹是**确定性项**，只能物理解决（窗片楔化 / AR 镀膜 / 扫频）；并保证 `step ≤ FSR/10`，否则条纹混叠 |
 | 把点值当带误差的结果 | 报浓度 / LOD / 灵敏度时未说明未建模项 | 未实现项（自展宽、线混合、PD 暗电流、前放 1/f …）在该工况下可能主导真实误差；按返回的 `fidelity` 台账（或 `tdlas_guide` 的 `fidelity`）披露"哪些已建模、哪些未实现"——**点值 ≠ 带误差结果** |
 | 把 run-to-run 散布当总不确定度 | `tdlas_invert(n_repeats=…)` 的 `uncertainty` 被当作总误差引用 | 它**只含统计（随机）分量**：同工况重复仿真的散布；**不含** k 标定误差、HITRAN 数据库不确定度、线型近似、etalon 条纹。且 n<10 时 σ 自身相对不确定度很大（返回里有警告） |
-| 明知有暗区仍据此下定量结论 | 传 `allow_partial_dark=True` 拿到 2f/1f 曲线就报浓度 | 暗区 PD 信号为 0、锁相波形被截断 → 2f/1f 失真；该开关**只用于诊断**"扫描越界后长什么样"，返回的 `warnings` 会报出暗区占比，定量结论不可用 |
+| 明知有暗区仍据此下定量结论 | 传 `allow_partial_dark=True` 拿到 2f/1f 曲线就报浓度 | 暗区 PD 信号为 0、锁相波形被截断 → 2f/1f 失真；该开关**只用于诊断"扫描越界后长什么样"**，返回的 `warnings` 会报出暗区占比，定量结论不可用 |
+| 把 σ 从别的浓度外推 | 用 A 浓度算出的 `rel_sigma` 去报 B 浓度的不确定度 | `rel_sigma` **随浓度变化**（噪声中的热噪声/ADC 量化/RIN 不随吸收信号等比缩放；实测 CH4@2968.5、L=50 cm、n=5：x=1e-3 → 1.08%、1e-5 → 0.21%、1e-7 → 4.04%，跨 4 个量级差约 20 倍）。必须在**要报告的那个浓度**上求；返回里的 `x_eval` / `x_eval_source` 明示求值点 |
+| 显式 `offset_V` 与 `wn_center` 不一致 | 以为 `wn_center` 决定扫描中心 | 显式给 `offset_V` 时，**扫描中心由 `offset_V` 决定、`wn_center` 只是标签**；引擎的整段出光校验一律按**实际** `offset_V ± amp_V` 做（显式 `offset_V` 越出驱动器上下限直接拒绝），不再拿 `wn_center` 反算的偏置顶替 |
 
 ---
 
@@ -160,3 +162,13 @@
   - 新增 **测量不确定度**：`tdlas_invert` 的 `n_repeats`（默认 0 = 不算）返回 `uncertainty`（σ、x 的 95% 区间、n<10 的小样本警告）。**只含统计分量**，不得当总不确定度用（见 §6）。
   - `tdlas_hitran.absorption()` 增加**进程内缓存**（α(ν) 是参数的纯函数；命中返回副本防就地污染，FIFO 上限 64），供 `measurement_uncertainty` / `detection_limit` 等蒙特卡洛调用复用；**不改变任何数值**，仅改变耗时。
   - 工程：原子写加重试与降级路径（Windows `os.replace` 偶发 WinError 5）；`tdlas_wms_instrument` 的 `allow_partial_dark` / `tdlas_invert` 的 `n_repeats` 缩进归位。
+
+- **2026-09-17（第四轮：第三轮改动的事后审计修复）**
+  - **【高】显式 `offset_V` 的越限校验被绕过（第三轮引入的回归）**：`_require_driver_range()` 改用 `laser_reach(wn_center)` 后不再校验**实际生效**的偏置，而显式给 `offset_V` 时扫描中心由它决定、`wn_center` 只是标签。实测两个方向都错：显式 `offset_V=9 V` 被**静默放行**（结果无意义）；显式合法 `offset_V=2 V` + `wn_center=3000` 被**误拒**且报错文本自相矛盾（"扫描区间 [1.29, 2.71] V 未整段高于阈值电压 1.25 V"）。修法：抽出唯一判据 `_scan_window_reason()` 供 `laser_reach()` 与引擎校验共用，引擎侧一律按**实际** `offset_V ± amp_V` 判定；`_partial_dark_note()` 同步改为读实际偏置。
+  - **【中】不确定度在错误的浓度上评估**：原按 docstring 的说法"rel_sigma 与浓度无关"在 `x_ref` 处求 σ 再套到 `x_est`；**实测该说法不成立**（见 §6 新增行，跨 4 个量级差约 20 倍）。改为在 `x_est` 处求（越界时退回 `x_ref` 并标注），返回新增 `x_eval` / `x_eval_source`。
+  - **【中】`mean_rel_ci` 数值无意义**（区间中心取了"散布本身"，实测 `[0.0, 0.1389]`）→ 改为 `single_rel_ci95_halfwidth` / `mean_rel_ci95_halfwidth` 两个语义明确的标量。
+  - **【中】σ=0 时消息里出现 `nan`**（`physical_noise=False` → 各次逐位一致）→ 单独处理并改为明确告知"该散布不是实验重复性，不可作为不确定度引用"。
+  - **【中】`t_invert` 的 `log` 被第二个 `_quiet()` 块覆盖**（冷启动实测带 `n_repeats` 时 log 行数 = 0，k 重算诊断全丢）→ 改为追加。
+  - **【中】α 缓存**：命中时 `info` 返回同一 dict（注释声称"返回副本"）→ 改浅拷贝；淘汰在 `ThreadingHTTPServer` 下有并发竞态 → 加锁（计算仍在锁外）。
+  - **【低】** `k_conditions["wn_ref"]` 未重锚时为 `None`（改取引擎实际值）；`_maybe_align_laser` 报错打印的扫描半宽可能非实际值；`invalid_laser_params` 会走到 `fits_span` 分支并对 `None` 做浮点格式化而抛 `TypeError`（引擎侧同一处一并补）。
+  - 契约自检 **84 → 89 项**（新增结构断言 + 三档边界 reason 精确匹配 + 显式 `offset_V` 的两个方向）。

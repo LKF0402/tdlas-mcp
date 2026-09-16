@@ -836,7 +836,10 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
             _mc = r["meta"]
             k_cond = {"species": str(species).upper(), "wn_center_cm-1": float(wn0),
                       "T_K": float(T), "P_atm": float(P), "L_cm": float(L),
-                      "x_ref": float(x_ref), "wn_ref": _inst.get("wn_ref"),
+                      "x_ref": float(x_ref),
+                      # 取引擎 meta 里**实际生效**的 wn_ref（未重锚时 _inst 里没有该键，
+                      # 早先会写成 None，调用方无从判断 k 到底在哪支"激光器"上算的）
+                      "wn_ref": _mc.get("cfg", {}).get("wn_ref"),
                       "scan_span_cm-1": _mc.get("cfg", {}).get("scan_span_cm"),
                       "mod_freq_Hz": _mc.get("mod_freq_Hz"), "mod_amp_V": _mc.get("mod_amp_V"),
                       "mod_coeff_m": _mc.get("mod_coeff_m"),
@@ -875,12 +878,21 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
     # ── 测量不确定度（可选）：同工况重复仿真 → run-to-run 相对散布 → 换算到本浓度 ──
     # 默认 0 = 不算（保持原有耗时与返回形状不变）；建议定量结论用 n_repeats≥10。
     if int(n_repeats) > 0:
+        # ★ σ 必须在**要报告的那个浓度**上求：噪声里有一部分（热噪声/ADC 量化/RIN）不随
+        #   吸收信号等比缩放，故 rel_sigma 随 x 变化（实测跨 4 个量级差约 20×）。
+        #   早先固定用 x_ref（参考浓度）评估、再套到 x_est 上，浓度差得远时误差可达一个量级。
+        #   x_est 越界（≤0 / >1）时本次结果本身已不可用，退回到参考浓度只作"给个数"的兜底。
+        if x_status == "ok":
+            _x_eval, _x_src = float(x_est), "本次反演浓度 x_est（与该结论同一工作点）"
+        else:
+            _x_eval, _x_src = float(x_ref), f"参考浓度 x_ref（x_est 状态={x_status}，本次结果本身不可用）"
         with _quiet() as g2:
             unc = ts.measurement_uncertainty(str(species), float(wn0), float(T), float(P),
-                                             float(x_ref), float(L), seed=0,
+                                             float(_x_eval), float(L), seed=0,
                                              n_repeats=int(n_repeats), **_inst)
+        unc["x_eval_source"] = _x_src
         if unc.get("valid"):
-            _, xs, x95 = ts.rel_uncertainty_for_x(x_est, unc["rel_sigma"])
+            _, xs, x95 = ts.rel_uncertainty_for_x(x_est, unc["rel_sigma"], unc["ci_level"])
             unc["mole_frac"] = x_est
             unc["mole_frac_sigma"] = xs
             unc["mole_frac_ci95_halfwidth"] = x95
@@ -890,7 +902,8 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
                              "自展宽与线混合等线型近似、etalon 条纹、带宽钳位、"
                              "光程与温度测量误差。真实总不确定度 ≥ 本值。")
         out["uncertainty"] = unc
-        out["log"] = _sanitize_paths(g2.getvalue()).splitlines()
+        # 追加而不是覆盖：第一个 _quiet() 块里是 k 重算的诊断输出，覆盖会让 log 变空
+        out["log"] = (out.get("log") or []) + _sanitize_paths(g2.getvalue()).splitlines()
     return out
 
 
@@ -1068,30 +1081,37 @@ def _safe_name(s):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", str(s))[:40] or "x"
 
 
-def _partial_dark_note(wn_center, cfg):
+def _partial_dark_note(cfg):
     """扫描段存在"无激光输出"的暗区时返回警告（含暗区占比与处置建议），否则 None。
 
     为什么必须警告：暗区里的 PD 信号为 0，锁相解调的是**被截断的波形**，2f/1f 归一化失真，
     而引擎**不会报错** —— 属"不报错但结果不可信"。默认已由引擎拒绝；只有用户显式
     `allow_partial_dark=True`（或历史工况复算）时才会走到这里，故必须把话说明白。
+
+    ⚠ 用 cfg 里**实际生效**的 offset_V / amp_V 直接算，不拿 wn_center 反算：用户显式给
+    offset_V 时扫描中心由它决定、wn_center 只是标签（与 `_require_driver_range` 同一个坑）。
     """
-    dnu_dV = abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
-    span_cm = abs(float(cfg.get("amp_V", 0.0))) * dnu_dV or float(cfg.get("scan_span_cm", 1.5))
-    r = ts.laser_reach(float(wn_center), eta_VI=cfg["eta_VI"], dnu_dI=cfg["dnu_dI"],
-                       i_ref=cfg["i_ref"], wn_ref=cfg["wn_ref"], scan_span_cm=span_cm,
-                       d2nu_dI2=cfg.get("d2nu_dI2", 0.0), i_th=cfg.get("i_th", 30.0))
-    if r["reachable"] or r["reason"] not in ("scan_partially_dark", "below_threshold_current"):
+    off = float(cfg["offset_V"])
+    amp = float(cfg.get("amp_V") or 0.0)
+    eta_VI = float(cfg["eta_VI"])
+    i_th = float(cfg.get("i_th", 30.0))
+    if amp <= 0.0:
         return None
-    off, amp = r["offset_V"], r["amp_V"]
-    vth = float(cfg.get("i_th", 30.0)) / float(cfg["eta_VI"])
-    dark_frac = min(1.0, max(0.0, (vth - (off - amp)) / (2.0 * amp))) if amp > 0 else 0.0
-    if dark_frac <= 0.0:
+    vth = i_th / eta_VI if eta_VI > 0 else 0.0
+    lo, hi = off - amp, off + amp
+    dark = 0.0
+    if lo < vth:                                     # 扫描下端落进"阈值以下"的暗区
+        dark += (min(vth, hi) - lo) / (2.0 * amp)
+    if hi > ts.DRIVER_V_HI:                          # 扫描上端越过驱动器上限
+        dark += (hi - max(ts.DRIVER_V_HI, lo)) / (2.0 * amp)
+    dark = min(1.0, max(0.0, dark))
+    if dark <= 0.0:
         return None
-    return (f"⚠ 扫描段有约 {dark_frac * 100:.0f}% 无激光输出（扫描区间 "
-            f"[{off - amp:.3g}, {off + amp:.3g}] V，阈值电压 {vth:.3g} V）：该段 PD 信号为 0，"
-            f"锁相解调的是被截断的波形，2f/1f 失真 —— **定量结论不可用**。"
-            f"建议：减小 scan_span_cm、换到更靠近 wn_ref 的谱线、或改用匹配该波段的激光参数；"
-            f"若确实要看这段的行为，请显式 allow_partial_dark=True（本结果即属该情形）。")
+    return (f"⚠ 扫描段有约 {dark * 100:.0f}% 无激光输出（扫描电压区间 "
+            f"[{lo:.3g}, {hi:.3g}] V，阈值电压 {vth:.3g} V，驱动器上限 {ts.DRIVER_V_HI:.0f} V）："
+            f"该段 PD 信号为 0，锁相解调的是被截断的波形，2f/1f 失真 —— **定量结论不可用**。"
+            f"建议：减小 scan_span_cm、抬高 offset_V、换到更靠近 wn_ref 的谱线，"
+            f"或改用匹配该波段的激光参数；本结果属「明知有暗段仍要算」（allow_partial_dark=True）。")
 
 
 def _maybe_align_laser(wn_center, inst, explicit_keys, device_used=False):
@@ -1122,9 +1142,15 @@ def _maybe_align_laser(wn_center, inst, explicit_keys, device_used=False):
                        wn_ref=wn_ref0, scan_span_cm=span_cm, d2nu_dI2=d2, i_th=i_th)
     if r.get("reachable"):
         return None, None
-    if not r.get("fits_span"):
+    if r.get("reason") == "invalid_laser_params":
         raise ValueError(
-            f"扫描半宽 {float(inst.get('scan_span_cm', 1.5)):g} cm⁻¹ 需要 ±{r['amp_V']:.3g} V 驱动，"
+            f"激光参数非法：η_VI={float(eta_VI):g} 必须 >0、dν/dI={float(dnu_dI):g} 必须非零"
+            f"（否则电压与波数之间没有可用的映射）。")
+    if not r.get("fits_span"):
+        # ⚠ 报错里必须用**实际生效**的扫描半宽 span_cm（可能来自 amp_V 反推），
+        #   不能用 inst.get("scan_span_cm") —— 用户只给 amp_V 时它还是默认值，会报错数字。
+        raise ValueError(
+            f"扫描半宽 {float(span_cm):g} cm⁻¹ 需要 ±{r['amp_V']:.3g} V 驱动，"
             f"超出驱动器 {ts.DRIVER_V_LO:.0f}–{ts.DRIVER_V_HI:.0f} V 量程 → 任何 wn_ref 都盖不住，"
             f"请减小 scan_span_cm 或核对 η_VI。")
     old = float(wn_ref0)
@@ -1205,7 +1231,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                        fit_frac=float(scene["fit_frac"]), seed=seed, **inst)
     m = r["meta"]
     cfg = m["cfg"]
-    _dark_note = _partial_dark_note(wn_center, cfg)     # 暗区披露（allow_partial_dark 时才可能非空）
+    _dark_note = _partial_dark_note(cfg)     # 暗区披露（allow_partial_dark 时才可能非空）
 
     requests = []
     for k in assumed:
@@ -1324,7 +1350,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                        seed=seed, **inst)
     m = r["meta"]
     cfg = m["cfg"]
-    _dark_note = _partial_dark_note(wn_center, cfg)     # 暗区披露（allow_partial_dark 时才可能非空）
+    _dark_note = _partial_dark_note(cfg)     # 暗区披露（allow_partial_dark 时才可能非空）
     s2f1f = np.abs(r["S2f1f_cyc"])
     valid_i = r["valid_mask"]
     # ★ 取峰值必须限定在**有效区**（valid_mask，已剔除扫描两端 trim_frac）内：

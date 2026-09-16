@@ -232,6 +232,40 @@ except ValueError as e:
     check("引擎侧放行'整段出光'档", False, f"-> {str(e)[:46]}")
 check("_require_driver_range 与 laser_reach 共用判据（防两处漂移）",
       "laser_reach(" in inspect.getsource(ts._require_driver_range))
+# 加固：不只是"出现过 laser_reach("，而是两边都真的走共享判据 _scan_window_reason
+check("laser_reach 与 _require_driver_range 都调用共享判据 _scan_window_reason",
+      "_scan_window_reason(" in inspect.getsource(ts.laser_reach)
+      and "_scan_window_reason(" in inspect.getsource(ts._require_driver_range))
+check("三档边界 reason 精确匹配（ok / 部分出光 / 全段无光 / 越上限）",
+      ts.laser_reach(2970.0, **_KW)["reason"] == "ok"
+      and ts.laser_reach(2972.0, **_KW)["reason"] == "scan_partially_dark"
+      and ts.laser_reach(2975.0, **_KW)["reason"] == "below_threshold_current"
+      and ts.laser_reach(2900.0, **_KW)["reason"] == "out_of_driver_range",
+      f"-> 2970:{ts.laser_reach(2970.0, **_KW)['reason']} "
+      f"2972:{ts.laser_reach(2972.0, **_KW)['reason']} "
+      f"2975:{ts.laser_reach(2975.0, **_KW)['reason']} "
+      f"2900:{ts.laser_reach(2900.0, **_KW)['reason']}")
+
+# ★ 显式 offset_V 必须按**实际生效**的偏置校验（不得拿 wn_center 反算的偏置代替）。
+#   曾踩到：`_require_driver_range` 改用 laser_reach(wn_center) 后，offset_V=9 V（越上限）
+#   被静默放行（ν 轴跑到线表窗口外，只剩 ADC 饱和之类的下游症状）；而显式合法 offset_V
+#   配上不可达的 wn_center 标签又会被误拒，报错文本自相矛盾。
+try:
+    ts._require_driver_range(dict(_cfg, offset_V=9.0), 2968.5, False)
+    check("显式 offset_V 越驱动器上限必须被拒", False, "offset_V=9 V 被静默放行")
+except ValueError as e:
+    check("显式 offset_V 越驱动器上限必须被拒", "越出驱动器上限" in str(e), f"-> {str(e)[:40]}")
+try:
+    ts._require_driver_range(dict(_cfg, offset_V=2.0), 3000.0, False)
+    check("显式合法 offset_V 不因 wn_center 标签不可达被误拒", True)
+except ValueError as e:
+    check("显式合法 offset_V 不因 wn_center 标签不可达被误拒", False, f"-> {str(e)[:40]}")
+# 未显式给 offset_V 时，偏置由 wn_center 反算 → 该档必须仍然被拒（整段出光判据不许放松）
+try:
+    ts._require_driver_range(dict(_cfg), 2972.0, True)
+    check("反算路径的‘部分出光’档仍被拒", False, "却放行了")
+except ValueError as e:
+    check("反算路径的‘部分出光’档仍被拒", "未整段高于阈值电压" in str(e), f"-> {str(e)[:40]}")
 
 _adv = M.adaptive_condition("H2O")
 check("adaptive_condition 带波段可达性",
