@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -234,6 +235,36 @@ check("session_id 已在 wms/review/das 的 schema 中",
 check("review 的 schema 与 wms 同源（除出图开关）",
       set(next(t for t in M.TOOLS if t["name"] == "tdlas_review")["inputSchema"]["properties"])
       >= set(next(t for t in M.TOOLS if t["name"] == "tdlas_wms_instrument")["inputSchema"]["properties"]) - {"save_png"})
+# 反演的**配对量**必须是 S2f_norm_peak（sensitivity_k 的分子），不是 S2f1f_peak ——
+# 后者只在归一化方法为 2f/1f 时才相等，退化为 2f/I0 时配 k 会算错浓度。
+# 该指引曾漂移过一次，用断言钉死：允许提到 S2f1f_peak，但必须在"否定/仅当/退化"语境里。
+def _pairing_ok(text, where):
+    if "S2f_norm_peak" not in text:
+        return False, f"{where} 未提到配对量 S2f_norm_peak"
+    for sent in re.split(r"[。；\n]", text):
+        if "S2f1f_peak" in sent and not any(w in sent for w in
+                                            ("不是", "不等于", "仅当", "才等于", "退化", "勿", "而配")):
+            return False, f"{where} 疑似仍把 S2f1f_peak 当配对量：{sent.strip()[:48]}"
+    return True, ""
+
+
+_inv = next(t for t in M.TOOLS if t["name"] == "tdlas_invert")
+_ok, _why = _pairing_ok(_inv["description"], "tdlas_invert.description")
+check("invert 指引配对量为 S2f_norm_peak（且未推荐 S2f1f_peak）", _ok, f"-> {_why}")
+_ok2, _why2 = _pairing_ok(_inv["inputSchema"]["properties"]["peak_2f1f"]["description"],
+                          "peak_2f1f.description")
+check("peak_2f1f 参数说明点明配对量", _ok2, f"-> {_why2}")
+_wms_src = inspect.getsource(M.t_wms_instrument)
+check("wms 返回里带 S2f_norm_peak_note 说明与 k 的配对关系",
+      "S2f_norm_peak_note" in _wms_src and "sensitivity_k 的分子" in _wms_src)
+_ok3, _why3 = _pairing_ok(inspect.getsource(M.t_invert), "t_invert 文档串")
+check("t_invert 文档串同样说明配对量", _ok3, f"-> {_why3}")
+# 激光参数回显：数值不受影响，但没有它就无法核对"引擎按哪组激光参数算的"（尤其自动重锚后）
+check("激光参数回显键含 wn_ref（重锚后会变的那一项）", "wn_ref" in M._LASER_ECHO_KEYS)
+check("WMS/DAS 均回显生效的激光参数",
+      "_LASER_ECHO_KEYS" in inspect.getsource(M.t_wms_instrument)
+      and "_LASER_ECHO_KEYS" in inspect.getsource(M.t_das_instrument))
+
 _old = M._SESSION_FILE
 M._SESSION_FILE = Path(tempfile.mkdtemp()) / "_s.json"
 M._save_sessions({"a": {"confirmed": {"x": 1}}})

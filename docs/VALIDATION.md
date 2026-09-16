@@ -109,7 +109,7 @@
 | `2f/1f` 无背景扣除 | 超线性、偏离标定 | 保持 `background_subtract=True`；1f 过零是物理奇点，非失效 |
 | 越界工况 | 抛 `ValueError`（offset_V 超 0–5 V） | `wn_center` 须落在该激光器调谐范围内，或提供对应 `wn_ref` / `dν/dI` / `η_VI` |
 | 二次调谐目标波数不可达 | 抛 `ValueError`（判别式 < 0，附提示可达极值） | 核对 `wn_ref` / `dν/dI` 数值与符号、`d²ν/dI²` 是否合理；该波数本应可达时置 `d2nu_dI2=0` 改用线性模型（**不会**再伪造出一个驱动电压） |
-| 峰值与灵敏度不同区间 | 反演浓度明显离谱 | `results.S2f1f_peak` 与 `results.sensitivity_k` 同在**有效区**取峰，可用 `S2f1f_peak_interval` 核对是否落进剔除区 |
+| 峰值与灵敏度配错量 | 反演浓度明显离谱 | 与 `results.sensitivity_k` 配对的是 **`results.S2f_norm_peak`**（k 的分子），**不是** `S2f1f_peak`：仅当归一化方法为 `2f/1f` 时二者相等，退化为 `2f/I0` 时可达 2 倍之差（实测偏高 99.7%）。两者都在有效区取峰，可用 `S2f1f_peak_interval` 核对是否落进剔除区 |
 | 反演结果越界 | 摩尔分数 > 1（或为 0） | 结果**不静默截断**：读 `mole_frac_status` / `mole_frac_valid` / `warning`；越界即说明 k 与工况不同源或已出弱吸收线性区 |
 | 设备参数非法 | 仿真出 nan、负带宽、非法 ADC 配置 | `tdlas_device save` 与设备引用**双向校验**并报错；保存时返回 `ignored_params` 提示拼错的键 |
 | 按推荐波段选线却报错 | `ValueError: offset_V 越出驱动器 0–5 V` | 默认激光受阈值电流约束，实际只覆盖 **2964.7–2972.6 cm⁻¹**；`adaptive_condition` 的「波段可达性」会给出该波段需要的 `wn_ref`。`auto_laser=True`（默认）会自动重锚 |
@@ -131,7 +131,8 @@
   - 新增 **etalon 干涉条纹模型**（默认关）：光路 Airy 透过率 `T = 1/(1 + F·sin²(δ/2))`、`FSR = 1/(2nd)`；新增校验第 10 项（`step > FSR/10` 判混叠 fail；FSR 为线宽数倍判 warn）；新增自适应 `fringe_report`。自动校验 9 → 10 项。
 
 - **2026-09-16（代码审计修复，4 项 + 2 项工程加固）**
-  - **`results.S2f1f_peak` 与 `sensitivity_k` 统一到有效区取峰**：此前 `S2f1f_peak` 用**全窗** `argmax`，被 `trim_frac` 剔除的边缘点（三角波转折处伪影）可能被当成"峰值"，导致这对**本应配套**的数不自洽、直接送 `tdlas_invert` 会算错浓度。现改在 `valid_mask` 内取峰，并新增 `S2f1f_peak_interval`（含 `full_window_peak_in_trimmed_edge` 诊断位）供核对。
+  - **`results.S2f1f_peak` 与 `sensitivity_k` 统一到有效区取峰**：此前 `S2f1f_peak` 用**全窗** `argmax`，被 `trim_frac` 剔除的边缘点（三角波转折处伪影）可能被当成"峰值"（区间口径不一致）。现改在 `valid_mask` 内取峰，并新增 `S2f1f_peak_interval`（含 `full_window_peak_in_trimmed_edge` 诊断位）供核对。
+  - **配对口径澄清（同日后续修正）**：与 `sensitivity_k` 真正配对的量是 **`S2f_norm_peak`**（k 的分子），不是 `S2f1f_peak`；后者仅在归一化方法为 `2f/1f` 时相等，退化为 `2f/I0` 时可达 2 倍之差（实测该工况下用 `S2f1f_peak` 反演偏高 **99.7%**）。已改 `tdlas_invert` 描述、`peak_2f1f` 参数说明、返回里的 `S2f_norm_peak_note`，并加契约断言防止再漂移。
   - **二次调谐判别式 < 0 改为硬报错**：此前 `max(disc, 0)` 把无实根情形截成"重根"，**伪造**出一个驱动电压让下游照常出谱；现抛 `ValueError` 并给出可达极值与该查的参数。
   - **`tdlas_invert` 输入/输出域校验**：`peak_2f1f` 须为有限值且 ≥0、`k` 须为有限正数（否则报错）；结果超出摩尔分数定义域 `(0,1]` 时**不静默截断**，改以 `mole_frac_status` / `mole_frac_valid` / `warning` 显式标注越界。
   - **设备库参数校验**：`tdlas_device save` 拒绝空设备名与非法参数（`gain/bw/fs/v_range/eta_*` > 0、`adc_bits` 为 4–32 整数、`throughput ∈ (0,1]`、`dnu_dI ≠ 0`）；**设备引用时再校验一次**，兜住历史/手改的非法条目；拼错的键回报在 `ignored_params`。

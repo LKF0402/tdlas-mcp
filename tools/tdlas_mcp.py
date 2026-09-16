@@ -755,6 +755,8 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
 
     k 是**完整链路**灵敏度：优先用调用方传入的 k（来自 tdlas_wms_instrument 返回的
     results.sensitivity_k）；未给 k 时，内部跑一遍**完整仪器链路**在参考浓度 x_ref 下重算 k。
+    与 k **配对**的峰高是 results.**S2f_norm_peak**（k 的分子就是它，故 x = peak/k 精确）；
+    results.S2f1f_peak 只在归一化方法为 2f/1f 时才等于它，退化为 2f/I0 时配 k 会算错。
     **勿用解析版 simulate() 的灵敏度**——它与完整链路的 S2f/1f 差 ~6×，混用会严重偏差。
     仅适用弱吸收（αL ≪ 1）。a/i0/i2/psi/span 为解析版遗留参数，完整链路下不再使用。
 
@@ -982,6 +984,10 @@ _NO_CONFIRM = {"amp_V", "offset_V", "background_subtract"}
 _SCENE_DEFAULTS = {"T": 296.0, "P": 1.01325, "x": 1e-3, "L_cm": 50.0,
                    "edge": "rising", "fit_order": 3, "fit_frac": 0.3}
 
+# 返回里回显**实际生效**的激光参数（含 auto_laser 重锚后的 wn_ref）：数值本身不受回显影响，
+# 但没有它就无法核对"引擎到底按哪组激光参数算的"，尤其在自动重锚发生后。
+_LASER_ECHO_KEYS = ("eta_VI", "dnu_dI", "d2nu_dI2", "wn_ref", "i_ref", "i_th", "eta_IP")
+
 
 def _safe_name(s):
     """净化拼进 PNG 文件名的字段：只留字母数字._-，长度上限 40。
@@ -1114,7 +1120,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            "scan_window_cm-1": [round(m["scan_lo"], 4), round(m["scan_hi"], 4)],
            "scan_half_span_cm-1": round(m["span_cm-1"], 4),
            "tri_wave": {k: cfg[k] for k in ("amp_V", "freq_Hz", "offset_V", "phase_deg")},
-           "laser": {k: cfg[k] for k in ("eta_VI", "dnu_dI", "wn_ref", "i_ref", "i_th", "eta_IP")},
+           "laser": {k: cfg[k] for k in _LASER_ECHO_KEYS},
            "pd": {k: cfg[k] for k in ("resp", "gain", "bw", "rin", "throughput")},
            "adc": {"fs_Hz": cfg["fs"], "n_samples": cfg["n_samples"],
                    "bits": cfg["adc_bits"], "v_range_V": cfg["v_range"], "lsb_V": m["lsb_V"]},
@@ -1246,6 +1252,8 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            "condition_advice": adaptive_condition(species, wn_center),
            "scan_window_cm-1": [round(float(r["nu_axis"].min()), 4),
                                 round(float(r["nu_axis"].max()), 4)],
+           # 实际生效的激光参数（含 auto_laser 重锚后的 wn_ref）——与 tdlas_das_instrument 同键
+           "laser": {k: cfg[k] for k in _LASER_ECHO_KEYS},
            "wms": {"fscan_Hz": m["fscan_Hz"], "mod_freq_Hz": m["mod_freq_Hz"],
                    "mod_amp_V": m["mod_amp_V"], "auto_optimized": m["auto_mod"],
                    "mod_depth_cm-1": m["mod_depth_cm-1"], "HWHM_cm-1": m["hwhm_cm-1"],
@@ -1264,16 +1272,22 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            "results": {"alpha_L_peak": m["alpha_L_peak"],
                        "S2f_norm_peak": float(np.abs(r["S2f_norm_cyc"])[valid_i].max())
                        if valid_i.any() else None,
+                       "S2f_norm_peak_note": "**这就是 tdlas_invert 的 peak_2f1f 应传的量**："
+                                             "sensitivity_k 的分子就是本值（k = S2f_norm_peak / x），"
+                                             "故 x = S2f_norm_peak / k 精确成立",
                        "S2f1f_peak": float(s2f1f[kpk]),
                        "S2f1f_peak_interval": {
                            "region": "valid_mask（已剔除扫描两端 trim_frac 的转折点区）",
                            "trim_frac": m["trim_frac"], "n_points_used": int(valid_i.sum()),
                            "n_points_total": int(valid_i.size),
                            "full_window_peak_in_trimmed_edge": bool(int(s2f1f.argmax()) != kpk),
-                           "note": "与 sensitivity_k 同区间取峰（否则两者不自洽，不可一起送 tdlas_invert）"},
+                           "note": "与 sensitivity_k 同区间取峰。⚠ 但配反演用的量是 S2f_norm_peak，"
+                                   "**不是**本值：只有归一化方法为 2f/1f 时二者才相等，"
+                                   "1f 失效自动退化为 2f/I0 时二者不同"},
                        "sensitivity_k": m["sensitivity_k"],
-                       "sensitivity_note": "sensitivity_k = S2f_norm_peak / x（完整链路），"
-                                           "供 tdlas_invert 的 k 参数直接复用，勿用解析版灵敏度",
+                       "sensitivity_note": "sensitivity_k = S2f_norm_peak / x（完整链路）；"
+                                           "tdlas_invert 的 k 传本值、peak_2f1f 传 S2f_norm_peak，"
+                                           "二者成对（勿用解析版灵敏度）",
                        "S2f1f_peak_nu_cm-1": float(r["nu_axis"][kpk]),
                        "v_pd_mean_V": m["v_pd_mean"], "saturated_points": m["n_sat"],
                        "noise_breakdown_mV": {"shot": m["sigma_shot"] * 1e3,
@@ -1822,11 +1836,18 @@ TOOLS = [
                     "否则直接报错而非返回负浓度。"
                     "输出校验：结果超出摩尔分数定义域 (0,1] 时不静默截断，"
                     "而以 mole_frac_status / mole_frac_valid / warning 显式标注越界（该结果不可用）。"
-                    "⚠ 请用 tdlas_wms_instrument 返回的 results.S2f1f_peak 与 results.sensitivity_k ——"
-                    "两者在同一有效区内取峰，配对使用才自洽。",
+                    "⚠ 配对量必须是 tdlas_wms_instrument 返回的 **results.S2f_norm_peak** ——"
+                    "它才是 sensitivity_k 的分子（k = S2f_norm_peak / x），所以 x = peak / k 精确成立。"
+                    "**不是** results.S2f1f_peak：只有归一化方法为 2f/1f 时二者才相等，"
+                    "1f 失效自动退化为 2f/I0 时二者不同，拿 S2f1f_peak 配 k 会得到错误浓度。",
      "inputSchema": {"type": "object",
                      "properties": {
-                         "peak_2f1f": {"type": "number", "description": "测得的归一化 2f 峰高（≥0，取绝对值后的量）"},
+                         "peak_2f1f": {"type": "number",
+                                      "description": "测得的**归一化** 2f 峰高（≥0，取绝对值后的量）；"
+                                                     "配对量 = tdlas_wms_instrument 的 results.S2f_norm_peak"
+                                                     "（与 sensitivity_k 同源，保证 x=peak/k 精确）。"
+                                                     "注意：**不是** S2f1f_peak —— 仅当归一化方法为 2f/1f 时"
+                                                     "两者才相等，退化为 2f/I0 时用它会把浓度算错"},
                          "species": {"type": "string"}, "wn0": {"type": "number"},
                          "T": {"type": "number"}, "P": {"type": "number"},
                          "L": {"type": "number"}, "a": {"type": "number"},

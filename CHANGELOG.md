@@ -15,7 +15,8 @@
 - **CI 加固**：矩阵补 **3.13**（实际验证环境）；新增 `tools/contract_check.py`（**离线契约自检**，63 项）作为硬门禁：schema↔签名一致性、参数透传、越界重锚、未知键拒绝、批量请求、文件名净化、原子写、默认 seed 等；`--selftest` 因依赖 hitran.org 抖动，作为非硬门禁单独列出
 
 ### 代码审计修复（正确性与输入校验）
-- **峰值区间与灵敏度统一（高）**：`tdlas_wms_instrument` 的 `results.S2f1f_peak` 此前在**全窗**取 `argmax`，与在**有效区**（`trim_frac` 剔除两端后）计算的 `sensitivity_k` 不同区间 → 两者本应配套，直接送 `tdlas_invert` 会得错误浓度。现统一在 `valid_mask` 内取峰；新增 `S2f1f_peak_interval`（`trim_frac` / 取峰点数 / `full_window_peak_in_trimmed_edge` 诊断位）供核对
+- **峰值区间与灵敏度统一（高）**：`tdlas_wms_instrument` 的 `results.S2f1f_peak` 此前在**全窗**取 `argmax`，与在**有效区**（`trim_frac` 剔除两端后）计算的 `sensitivity_k` 不同区间，被剔除的边缘伪影可能被当成"峰值"。现统一在 `valid_mask` 内取峰；新增 `S2f1f_peak_interval`（`trim_frac` / 取峰点数 / `full_window_peak_in_trimmed_edge` 诊断位）供核对
+  - **配对口径澄清（后续修正）**：与 `sensitivity_k` 真正成对的是 **`results.S2f_norm_peak`**（k 的分子），**不是** `S2f1f_peak` —— 二者仅在归一化方法为 `2f/1f` 时相等；1f 失效自动退化为 `2f/I0` 时两者可达 **2 倍**之差（实测 `background_subtract=False, am_i0=1.0` 工况：`S2f_norm_peak=0.166994` vs `S2f1f_peak=0.333511`，用后者反演浓度偏高 **99.7%**）。`tdlas_invert` 的 description / `peak_2f1f` 说明 / 返回里的 `S2f_norm_peak_note` 均已按此改写，并有契约断言钉死（防再漂移）
 - **二次调谐无实根不再伪造（中）**：`_resolve_scan` 此前用 `max(discriminant, 0)` 把判别式 < 0 截成"重根"，凭空造出一个驱动电压、下游照常出谱；现抛 `ValueError`，报错给出可达极值（调谐曲线顶点）与该核对的参数，并提示可用 `d2nu_dI2=0` 退回线性模型
 - **浓度反演输入/输出域校验（中）**：`tdlas_invert` 现校验 `peak_2f1f` 为有限值且 ≥0、`k` 为有限正数（此前负峰高会静默返回负浓度）；结果超出摩尔分数定义域 `(0,1]` 时**不静默截断**，改以 `mole_frac_status` / `mole_frac_valid` / `warning` 显式标注越界（越界即 k 与工况不同源 / 已出弱吸收线性区）
 
