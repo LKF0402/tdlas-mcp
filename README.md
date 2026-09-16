@@ -34,13 +34,25 @@ DAQ 电压(三角波+正弦调制) → 激光器调谐 → HITRAN 气体吸收 �
 
 服务器自包含 HITRAN 线表获取与吸收谱计算模块（基于 HAPI 1.x，无需 API key），通过 MCP 协议接入 AI 助手，以自然语言完成波长调制光谱（WMS）与直接吸收光谱（DAS）仿真。
 
+## ✨ 核心特性
+
+- **仪器级全链路建模**：DAQ 三角波 + 正弦调制 → 激光调谐（含二次非线性）→ HITRAN 吸收 → PD 一阶带宽 → ADC 中平量化 → 数字锁相（整数调制周期滑动平均）→ 2f/1f 与 2f/I0 归一化，另可选 etalon 条纹、RIN、1/f 漂移等效应
+- **AI 交互契约（结构化动作）**：每次返回都带 `interaction`（`stage` / `physics_ok` / `result_usable` / `conclusion_allowed` / `blocking_reason`）与 `next_required_actions`（`id` / `severity` / `action` / `evidence_fields` / `values`）。"必须澄清 / 必须披露"不是写在文档里的建议，而是**随返回值下发、并被契约测试钉住**的机器可读动作
+- **保真度台账（单一真源）**：`tools/tdlas_fidelity.py` 把"效应 ↔ 实现位置 ↔ 是否真生效 ↔ 已知缺口"写成可执行表，并对源码证据与参数可达性做离线审计。当前 **11 项默认生效 / 6 项需显式开启 / 7 项未建模**；未建模项随结果披露，避免把点值当成带误差的结果
+- **测量不确定度（统计分量）**：`tdlas_invert(n_repeats>0)` 给出 run-to-run 散布、σ 的 95% 区间与小样本警告；口径明确为**只含随机分量**，不含 k 标定误差、数据库不确定度、线型近似与 etalon 条纹
+- **可信度分层**：出结果时给出 10 项自动校验（物理判据），与交互合规**分开**计分——"物理坏"和"话说得不全"不会被混成一个分数
+- **可复现**：默认 `seed=0` ⇒ 同参调用逐位可复现；散粒 / 热噪声是物理固有项（默认注入），需严格理想仿真时用 `physical_noise=False`
+- **离线双门禁**：`tools/contract_check.py` 与 `tools/tdlas_fidelity.py` 均为 CI 硬门禁，不依赖网络
+
 ## 🔄 交互工作流
 
 自然语言请求如何经 AI 助手 → MCP 服务器 → 仿真内核 → 校验与交付：
 
 ![tdlas-mcp 交互工作流](docs/assets/interaction-workflow.png)
 
-> 四泳道流程：① **启动协议**（AI 助手读取 `tdlas_guide` 约定）→ ② **参数与澄清**（四级优先级索取 + 设备库注入 + 必要时结构化追问）→ ③ **仿真执行**（12 工具路由 → 链路仿真 DAQ→锁相）→ ④ **校验与交付**（10 项校验、失败项修复闭环、结果播报 α/条纹语境）。红色节点为硬约束闸门：需要澄清时不得进入仿真；校验 fail 不得直接下结论。
+> 四泳道流程：① **启动协议**（AI 助手读取 `tdlas_guide` 约定与保真度台账）→ ② **参数与澄清**（四级优先级索取 + 设备库注入 + 结构化追问）→ ③ **仿真执行**（12 工具路由 → 链路仿真 DAQ→锁相）→ ④ **校验与交付**（10 项校验、失败项修复闭环、α / 条纹语境播报、**未建模效应披露**）。
+>
+> 硬约束闸门由**返回值**承载，而不是文档：需要澄清时 `next_required_actions` 给出 `clarify_missing`；物理校验 fail、扫描含暗区或反演越界时 `interaction.conclusion_allowed=false` 并给出 `blocking_reason`。
 
 ## 📊 效果展示
 
@@ -100,13 +112,13 @@ python tools/tdlas_fidelity.py
 | tdlas_das_instrument | 仪器级 DAS 仿真（DAQ→激光→光路→PD→ADC） |
 | tdlas_simulate | 解析模型正向计算：DAS 透过率、1f、2f 峰高 |
 | tdlas_das_chain | 三角波 DAS 链路：PD 原始信号 → 多项式基线拟合 → 吸光度 |
-| tdlas_review | 结果自动校验（10 项检查，不绘图） |
+| tdlas_review | 结果自动校验（10 项检查，不绘图）；随返回下发交互契约与保真度声明 |
 | tdlas_invert | 免标定浓度反演：2f/1f 峰高 → 摩尔分数；`n_repeats>0` 额外给测量不确定度（仅统计分量） |
 | tdlas_detection_limit | 噪声等效浓度（NEC）与检测限（LOD）计算 |
 | tdlas_detection_limit_scan | LOD 随光程与参考浓度的二维扫描（系统选型） |
 | tdlas_session | 跨会话工况参数持久化 |
 | tdlas_device | 硬件参数库管理（激光器/探测器/DAQ/光学） |
-| tdlas_guide | AI 交互协议与术语表 |
+| tdlas_guide | AI 交互协议、术语表与保真度台账（`fidelity`） |
 | tdlas_selftest | 全链路自检 |
 
 ## 🌐 远程部署
@@ -127,7 +139,8 @@ python tools/remote_link.py
 |------|------|
 | [TECHNICAL.md](./TECHNICAL.md) | 物理原理、算法实现、参数表、已知近似 |
 | [docs/VALIDATION.md](./docs/VALIDATION.md) | 可信度分层、校验判据口径、已知局限 |
-| [SKILL.md](./SKILL.md) | AI 交互规范与工具使用协议 |
+| [SKILL.md](./SKILL.md) | AI 交互规范与工具使用协议（含"按 `next_required_actions` 执行"） |
+| [tools/tdlas_fidelity.py](./tools/tdlas_fidelity.py) | 保真度能力登记表：单一真源 + 离线审计 |
 | [CHANGELOG.md](./CHANGELOG.md) | 版本更新记录 |
 
 ## 📝 引用
