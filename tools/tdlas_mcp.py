@@ -22,6 +22,7 @@ import math
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -73,17 +74,34 @@ def _load_sessions():
     return {}
 
 
-def _atomic_write_text(path, text):
-    """原子写盘：先写同目录临时文件再 os.replace 覆盖。
+def _atomic_write_text(path, text, tries=5):
+    """原子写盘：先写同目录临时文件再 os.replace 覆盖（带重试与降级）。
 
     为什么：会话/设备文件的读-改-写不是原子操作，MCP 崩溃或断电时会留下**半截 JSON**
     （下次 _load_* 直接 JSONDecodeError → 静默丢失全部已确认工况）。os.replace 在
-    同一文件系统上是原子操作，要么旧内容、要么新内容，不会出现半截文件。
+    同一文件系统上是原子操作，要么旧内容、要么新内容。
+
+    ⚠ Windows 上的坑（实测）：**两个进程同时写同一个文件**时，`os.replace` 会抛
+    `PermissionError WinError 5`（目标被另一方短暂占用）。多客户端（IDE + CLI）或
+    并行测试都会踩到 → 这里重试几次；仍失败则降级为直接写（放弃原子性，
+    但绝不让一次工具调用因为"写会话状态"而失败）。临时文件名带 pid，避免两进程互相覆盖。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    for i in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.05 * (i + 1))
+    try:                                   # 兜底：直接写，别把工具调用搞崩
+        path.write_text(text, encoding="utf-8")
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def _save_sessions(sessions):
@@ -642,6 +660,21 @@ AI_INTERACTION_GUIDE = {
                     "以及压不掉条纹时应采取的物理措施（窗片楔化 / AR 镀膜 / 扫频平均）。",
         "禁止": "不得把 etalon 条纹当成可被降噪 / 多次平均消掉的随机噪声——固定腔长的条纹是确定性项。",
     },
+    "fidelity_reporting": {
+        "原则": "仿真只包含**已建模的效应**；未建模项（自展宽、线混合、暗电流、前放 1/f…）"
+                "在当前工况下可能主导真实误差。**点值不等于带误差的结果。**",
+        "单一真源": "能力登记表在 tools/tdlas_fidelity.py（EFFECTS）：每项效应的实现位置、"
+                    "是否默认生效、已知缺口写在同一张表里，并由 audit 与源码证据交叉核对。"
+                    "本工具返回的 fidelity 块即该表的结构化快照，**以它为准**，勿凭记忆复述。",
+        "何时报": "① 用户问「这个结果可信吗 / 误差多大」；② 给出任何定量结论（浓度、LOD、灵敏度）时；"
+                  "③ 结论涉及 fidelity.not_implemented 中某项时——例：高浓度（自展宽）、"
+                  "密集谱区（线混合）、痕量 LOD（前放 1/f 未建模 ⇒ LOD 偏乐观）。",
+        "报什么": "① 本次实际生效的效应（fidelity.implemented）；"
+                  "② 会影响该结论的未实现项（fidelity.not_implemented）；"
+                  "③ 明确「这是点值，未含系统不确定度」。",
+        "禁止": "不得把未实现项说成「已建模」；不得把点值当带误差的结果呈现；"
+                "不得用 n_repeats 的统计散布冒充总不确定度（它只含 run-to-run 随机分量）。",
+    },
     "clarify_protocol": {
         "触发": "返回的 clarify.needed=True（有缺省参数）时，必须进入澄清流程。",
         "流程": "① 按 clarify.questions 向用户提问；② 收到回答后填入对应参数重跑；"
@@ -750,7 +783,8 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
 
 def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
              a=0.10, x_ref=None, k=None, i0=0.1671, i2=2.48e-3,
-             psi1_pi=1.9356, psi2_pi=4.4138, span=0.8, session_id="default"):
+             psi1_pi=1.9356, psi2_pi=4.4138, span=0.8, session_id="default",
+             n_repeats=0):
     """免标定浓度反演：由测得的归一化 2f 峰高求摩尔分数 x = peak / k。
 
     k 是**完整链路**灵敏度：优先用调用方传入的 k（来自 tdlas_wms_instrument 返回的
@@ -763,6 +797,10 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
     ⚠ 闭环精度不等于反演精度：k 的定义就是 S2f_norm_peak / x，故"用同一次仿真的
     peak 配 k"必然精确还原（误差恒为 0），这**不是**验证。真实误差来自换工况 ——
     k 与 T/P/x/L_cm/调制深度/fm/扫描半宽 强绑定，换任一条件都必须重新取 k。
+
+    n_repeats > 0 时额外给出**测量不确定度**（同一工况重复仿真的 run-to-run 散布）；
+    返回的 uncertainty 只含统计（随机）分量，不含 k 标定误差、数据库不确定度、
+    线型近似等系统项 —— 不得当作总不确定度（见该字段的 scope/note）。
     """
     _xd, _Ld = _species_defaults(species)
     T, P, x_ref, L, assumed = _resolve_conditions(T, P, x_ref, L, session_id, x_default=_xd, L_default=_Ld)
@@ -776,6 +814,11 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
     if peak_2f1f < 0.0:
         raise ValueError(f"peak_2f1f 必须 ≥ 0（2f/1f 峰高取绝对值），收到 {peak_2f1f:g}")
     k_cond = None
+    # 与仪器链同一策略：目标波数超出激光"整段出光"范围时把 wn_ref 重锚到目标波数
+    # （t_invert 没有激光参数入口，故总是允许重锚），并如实披露。
+    # 不加这一步，它的默认参数（H2O@7185.596）会直接撞上"默认激光只覆盖 2964.7–2971.0"。
+    _inst = {}
+    _laser_note, _laser_info = _maybe_align_laser(float(wn0), _inst, set(), False)
     with _quiet() as g:
         if k is not None:
             k = float(k)
@@ -785,7 +828,7 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
             k_src = "调用方提供（tdlas_wms_instrument.sensitivity_k）"
         else:
             r = ts.simulate_wms_instrument(str(species), wn_center=float(wn0), T=float(T),
-                                           P=float(P), x=float(x_ref), L_cm=float(L))
+                                           P=float(P), x=float(x_ref), L_cm=float(L), **_inst)
             k = float(r["meta"]["sensitivity_k"])
             k_src = "完整链路重算（@x_ref）"
             # 回传内部重算 k 所用的**完整工况**：调用方只有拿到这些才能判断 k 是否与自己的
@@ -793,7 +836,8 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
             _mc = r["meta"]
             k_cond = {"species": str(species).upper(), "wn_center_cm-1": float(wn0),
                       "T_K": float(T), "P_atm": float(P), "L_cm": float(L),
-                      "x_ref": float(x_ref), "scan_span_cm-1": _mc.get("cfg", {}).get("scan_span_cm"),
+                      "x_ref": float(x_ref), "wn_ref": _inst.get("wn_ref"),
+                      "scan_span_cm-1": _mc.get("cfg", {}).get("scan_span_cm"),
                       "mod_freq_Hz": _mc.get("mod_freq_Hz"), "mod_amp_V": _mc.get("mod_amp_V"),
                       "mod_coeff_m": _mc.get("mod_coeff_m"),
                       "fs_Hz": _mc.get("fs"), "seed_used": _mc.get("seed_used")}
@@ -821,8 +865,32 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
            "log": _sanitize_paths(g.getvalue()).splitlines()}
     if k_cond:                      # 内部重算 k 时，回传它用的完整工况，供判断 k 是否同源
         out["k_conditions"] = k_cond
+    if _laser_info:
+        out["laser_auto_aligned"] = _laser_info
+    if _laser_note:
+        out["warnings"] = [_laser_note]
     if x_warn:
         out["warning"] = x_warn
+
+    # ── 测量不确定度（可选）：同工况重复仿真 → run-to-run 相对散布 → 换算到本浓度 ──
+    # 默认 0 = 不算（保持原有耗时与返回形状不变）；建议定量结论用 n_repeats≥10。
+    if int(n_repeats) > 0:
+        with _quiet() as g2:
+            unc = ts.measurement_uncertainty(str(species), float(wn0), float(T), float(P),
+                                             float(x_ref), float(L), seed=0,
+                                             n_repeats=int(n_repeats), **_inst)
+        if unc.get("valid"):
+            _, xs, x95 = ts.rel_uncertainty_for_x(x_est, unc["rel_sigma"])
+            unc["mole_frac"] = x_est
+            unc["mole_frac_sigma"] = xs
+            unc["mole_frac_ci95_halfwidth"] = x95
+            unc["interpretation"] = (f"x = {x_est:.4g} ± {xs:.2g}（1σ，**仅统计分量**）；"
+                                     f"95% 区间半宽 ±{x95:.2g}")
+            unc["caveat"] = ("系统项未计入：k 标定误差、HITRAN 线强/展宽数据库不确定度、"
+                             "自展宽与线混合等线型近似、etalon 条纹、带宽钳位、"
+                             "光程与温度测量误差。真实总不确定度 ≥ 本值。")
+        out["uncertainty"] = unc
+        out["log"] = _sanitize_paths(g2.getvalue()).splitlines()
     return out
 
 
@@ -968,6 +1036,9 @@ _INSTR_KEYS = ("scan_span_cm", "amp_V", "freq_Hz", "offset_V", "phase_deg", "eta
                "d2nu_dI2",
                # 严格理想仿真开关：False = 连散粒/热也不注入
                "physical_noise",
+               # 明知扫描段有暗区（激光未出光）仍要计算的显式开关：
+               # 默认 False ⇒ 引擎拒绝"部分出光"的扫描（那里的 2f/1f 是失真的，且旧版不报错）
+               "allow_partial_dark",
                # etalon 干涉条纹（默认关，仅显式 fringe=True 时生效）
                "fringe", "fringe_n", "fringe_d_cm", "fringe_R", "fringe_fsr",
                "fringe_contrast", "fringe_phase_rad", "fringe_drift_frac")
@@ -997,6 +1068,32 @@ def _safe_name(s):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", str(s))[:40] or "x"
 
 
+def _partial_dark_note(wn_center, cfg):
+    """扫描段存在"无激光输出"的暗区时返回警告（含暗区占比与处置建议），否则 None。
+
+    为什么必须警告：暗区里的 PD 信号为 0，锁相解调的是**被截断的波形**，2f/1f 归一化失真，
+    而引擎**不会报错** —— 属"不报错但结果不可信"。默认已由引擎拒绝；只有用户显式
+    `allow_partial_dark=True`（或历史工况复算）时才会走到这里，故必须把话说明白。
+    """
+    dnu_dV = abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
+    span_cm = abs(float(cfg.get("amp_V", 0.0))) * dnu_dV or float(cfg.get("scan_span_cm", 1.5))
+    r = ts.laser_reach(float(wn_center), eta_VI=cfg["eta_VI"], dnu_dI=cfg["dnu_dI"],
+                       i_ref=cfg["i_ref"], wn_ref=cfg["wn_ref"], scan_span_cm=span_cm,
+                       d2nu_dI2=cfg.get("d2nu_dI2", 0.0), i_th=cfg.get("i_th", 30.0))
+    if r["reachable"] or r["reason"] not in ("scan_partially_dark", "below_threshold_current"):
+        return None
+    off, amp = r["offset_V"], r["amp_V"]
+    vth = float(cfg.get("i_th", 30.0)) / float(cfg["eta_VI"])
+    dark_frac = min(1.0, max(0.0, (vth - (off - amp)) / (2.0 * amp))) if amp > 0 else 0.0
+    if dark_frac <= 0.0:
+        return None
+    return (f"⚠ 扫描段有约 {dark_frac * 100:.0f}% 无激光输出（扫描区间 "
+            f"[{off - amp:.3g}, {off + amp:.3g}] V，阈值电压 {vth:.3g} V）：该段 PD 信号为 0，"
+            f"锁相解调的是被截断的波形，2f/1f 失真 —— **定量结论不可用**。"
+            f"建议：减小 scan_span_cm、换到更靠近 wn_ref 的谱线、或改用匹配该波段的激光参数；"
+            f"若确实要看这段的行为，请显式 allow_partial_dark=True（本结果即属该情形）。")
+
+
 def _maybe_align_laser(wn_center, inst, explicit_keys, device_used=False):
     """目标波数超出当前激光可达范围时，把 wn_ref 重锚到该波数（理想激光器假设）。
 
@@ -1017,6 +1114,8 @@ def _maybe_align_laser(wn_center, inst, explicit_keys, device_used=False):
     i_ref = inst.get("i_ref", 120.0)
     wn_ref0 = inst.get("wn_ref", 2964.7)
     span_cm = inst.get("scan_span_cm", 1.5)
+    if inst.get("amp_V"):                       # 显式给了三角波幅值 → 由它反推等效扫描半宽
+        span_cm = abs(float(inst["amp_V"]) * float(eta_VI) * float(dnu_dI))
     d2 = inst.get("d2nu_dI2", 0.0)
     i_th = inst.get("i_th", 30.0)
     r = ts.laser_reach(float(wn_center), eta_VI=eta_VI, dnu_dI=dnu_dI, i_ref=i_ref,
@@ -1106,6 +1205,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                        fit_frac=float(scene["fit_frac"]), seed=seed, **inst)
     m = r["meta"]
     cfg = m["cfg"]
+    _dark_note = _partial_dark_note(wn_center, cfg)     # 暗区披露（allow_partial_dark 时才可能非空）
 
     requests = []
     for k in assumed:
@@ -1139,7 +1239,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "必要时引导现场标定；保留默认时须在结论中明确注明。",
            "seed_used": m.get("seed_used"),
            "physical_noise": m.get("physical_noise", True),
-           "warnings": ([_note] if _note else []) + m["warnings"],
+           "warnings": ([_note] if _note else []) + ([_dark_note] if _dark_note else []) + m["warnings"],
            "edge_note": EDGE_TECH_NOTE,
            "log": _sanitize_paths(g.getvalue()).splitlines()}
     if laser_info:
@@ -1224,6 +1324,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                        seed=seed, **inst)
     m = r["meta"]
     cfg = m["cfg"]
+    _dark_note = _partial_dark_note(wn_center, cfg)     # 暗区披露（allow_partial_dark 时才可能非空）
     s2f1f = np.abs(r["S2f1f_cyc"])
     valid_i = r["valid_mask"]
     # ★ 取峰值必须限定在**有效区**（valid_mask，已剔除扫描两端 trim_frac）内：
@@ -1321,6 +1422,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "das_baseline_method": AI_INTERACTION_GUIDE["das_baseline_method"],
                            "alpha_reporting": AI_INTERACTION_GUIDE["alpha_reporting"],
                            "fringe_reporting": AI_INTERACTION_GUIDE["fringe_reporting"],
+                           "fidelity_reporting": AI_INTERACTION_GUIDE["fidelity_reporting"],
                            "next_step": "若 param_requests 非空：先向用户索取实测值或器件型号；"
                                         "保留默认时须在结论中标注；alpha_report.needs_report=True 时"
                                         "按 alpha_reporting 播报 α 语境。",
@@ -1334,11 +1436,15 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                              "是否会在 2f 上伪造吸收、以及该采取的物理措施",
                                              "⑦ 当 laser_auto_aligned 非空时：必须说明本次 wn_ref 是**自动重锚**的"
                                              "理想激光器假设（不是你手上的器件），并提示用户提供实测 "
-                                             "wn_ref/dν/dI，或用 tdlas_device 保存真实激光器后以 laser= 引用"],
+                                             "wn_ref/dν/dI，或用 tdlas_device 保存真实激光器后以 laser= 引用",
+                                             "⑧ 给出任何定量结论时：按 tdlas_guide 的 fidelity_reporting 与其中的 "
+                                             "fidelity 台账，说明**哪些效应已建模、哪些未实现**；"
+                                             "未实现项可能主导真实误差，点值≠带误差结果"],
                            "interaction_rule": "MCP 必须**多与用户交互**：主动告知以上 must_disclose 各项，"
                                                "并在解读结果前先向用户确认工况（物种/波段/T/P/浓度/光程）。"},
            "seed_used": m.get("seed_used"), "physical_noise": m.get("physical_noise", True),
-           "warnings": ([_note] if _note else []) + m["warnings"], "edge_note": EDGE_TECH_NOTE,
+           "warnings": ([_note] if _note else []) + ([_dark_note] if _dark_note else []) + m["warnings"],
+           "edge_note": EDGE_TECH_NOTE,
            "log": _sanitize_paths(g.getvalue()).splitlines()}
     if laser_info:
         out["laser_auto_aligned"] = laser_info
@@ -1510,11 +1616,26 @@ def t_device(action="list", device_type=None, name=None,
     return {"error": f"unknown action {action!r}"}
 
 
+def _fidelity_summary():
+    """保真度审计（能力登记表）的结构化快照。
+
+    真源是 ``tools/tdlas_fidelity.py`` 的 ``EFFECTS``；此处只做转发，不复制内容，
+    避免"表漂了"这一本项目已踩过两次的坑。模块不可用时降级为最小披露规则，不阻断 guide。
+    """
+    try:
+        import tdlas_fidelity as F
+        return F.fidelity_summary()
+    except Exception as exc:                     # pragma: no cover - 仅作兜底
+        return {"unavailable": f"{type(exc).__name__}: {exc}",
+                "disclosure_rule": "必须说明本次哪些效应已建模、哪些未实现；点值≠带误差结果。"}
+
+
 def t_guide(topic=None):
     """返回 AI 主动指导协议（面向实验新手）：参数索取优先级、交互流程、术语表、参数索取指南。"""
     out = dict(AI_INTERACTION_GUIDE)
     out["param_guide"] = {k: {"cn": v[0], "unit": v[1], "why": v[2]}
                           for k, v in PARAM_ACQ_GUIDE.items()}
+    out["fidelity"] = _fidelity_summary()
     if topic:
         t = str(topic).upper()
         out["glossary_hit"] = {k: v for k, v in AI_INTERACTION_GUIDE["glossary"].items()
@@ -1665,6 +1786,10 @@ TOOLS = [
                          "physical_noise": {"type": "boolean",
                                             "description": "是否注入物理固有噪声（散粒+热），默认 True；"
                                                            "False = 严格理想仿真（连散粒/热也不加，结果逐位可复现）"},
+                        "allow_partial_dark": {"type": "boolean",
+                                               "description": "明知扫描段有暗区（激光在该电压段未出光）仍要计算，默认 False。"
+                                                              "暗区 PD 信号为 0、锁相波形被截断 → 2f/1f 失真、**定量结论不可用**；"
+                                                              "仅在诊断「扫描越界后长什么样」时开启（开启后 warnings 会报出暗区占比）"},
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                          "required": ["species", "wn_center"]}},
                          {"name": "tdlas_wms_instrument",
@@ -1736,6 +1861,10 @@ TOOLS = [
                          "physical_noise": {"type": "boolean",
                                             "description": "是否注入物理固有噪声（散粒+热），默认 True；"
                                                            "False = 严格理想仿真（结果逐位可复现）"},
+                         "allow_partial_dark": {"type": "boolean",
+                                                "description": "明知扫描段有暗区（激光在该电压段未出光）仍要计算，默认 False。"
+                                                               "暗区 PD 信号为 0、锁相波形被截断 → 2f/1f 失真、**定量结论不可用**；"
+                                                               "仅在诊断「扫描越界后长什么样」时开启（开启后 warnings 会报出暗区占比）"},
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                          "required": ["species", "wn_center"]}},
                          {"name": "tdlas_review",
@@ -1839,7 +1968,10 @@ TOOLS = [
                     "⚠ 配对量必须是 tdlas_wms_instrument 返回的 **results.S2f_norm_peak** ——"
                     "它才是 sensitivity_k 的分子（k = S2f_norm_peak / x），所以 x = peak / k 精确成立。"
                     "**不是** results.S2f1f_peak：只有归一化方法为 2f/1f 时二者才相等，"
-                    "1f 失效自动退化为 2f/I0 时二者不同，拿 S2f1f_peak 配 k 会得到错误浓度。",
+                    "1f 失效自动退化为 2f/I0 时二者不同，拿 S2f1f_peak 配 k 会得到错误浓度。"
+                    "n_repeats>0 时额外返回 uncertainty（同工况重复仿真的 run-to-run 散布）："
+                    "它**只含统计（随机）分量**，不含 k 标定误差、HITRAN 数据库不确定度、"
+                    "自展宽/线混合等线型近似与 etalon 条纹 —— 不得当作总不确定度。",
      "inputSchema": {"type": "object",
                      "properties": {
                          "peak_2f1f": {"type": "number",
@@ -1858,7 +1990,9 @@ TOOLS = [
                          "i0": {"type": "number", "description": "【遗留参数】解析版 1f 基线，完整链路下不生效"},
                          "i2": {"type": "number", "description": "【遗留参数】解析版 2f 基线，完整链路下不生效"},
                          "psi1_pi": {"type": "number", "description": "【遗留参数】完整链路下不生效"},
-                         "psi2_pi": {"type": "number", "description": "【遗留参数】完整链路下不生效"}},
+                         "psi2_pi": {"type": "number", "description": "【遗留参数】完整链路下不生效"},
+                         "n_repeats": {"type": "integer",
+                                       "description": "测量不确定度：同工况重复仿真次数（默认 0=不算）。建议 ≥10 才可引用；耗时 ≈ n_repeats × 单次链路。只含统计（随机）分量，系统项未计入"}},
                      "required": ["peak_2f1f", "species", "wn0"]}},
     {"name": "tdlas_detection_limit",
      "description": "检测极限 LOD：给定等效透过率噪声 σ_τ，蒙特卡洛给出噪声等效浓度 NEC 与 LOD(nσ)。",

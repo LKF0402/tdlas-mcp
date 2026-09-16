@@ -178,16 +178,61 @@ finally:
 check("auto_laser=False 时不介入（交给引擎严格报错）",
       store5.get("wn_ref") is None, f"wn_ref={store5.get('wn_ref')}（应为 None = 未改）")
 
-# ───────────────────── 4. 推荐波段可达性 ─────────────────────
-print("=== 4. SPECIES_PROFILES 推荐波段可达性 ===")
+# ───────────────────── 4. 推荐波段可达性（判据：整段出光）─────────────────────
+print("=== 4. SPECIES_PROFILES 推荐波段可达性（整段出光口径）===")
 _dflt = ts.LASER_DEFAULTS
+_KW = dict(eta_VI=_dflt["eta_VI"], dnu_dI=_dflt["dnu_dI"], i_ref=_dflt["i_ref"],
+           wn_ref=_dflt["wn_ref"], scan_span_cm=1.5, i_th=_dflt["i_th"])
+
+
+def _usable(wn, **over):
+    """按 MCP 层的同一策略判定：默认不可达 ⇒ 用建议的 wn_ref 重锚后再判一次。"""
+    kw = {**_KW, **over}
+    r0 = ts.laser_reach(wn, **kw)
+    if r0["reachable"]:
+        return True, r0
+    r1 = ts.laser_reach(wn, **{**kw, "wn_ref": r0["wn_ref_needed"]})
+    return bool(r1["reachable"]), r1
+
+
+def _fmt(wn, info):
+    off, amp = info.get("offset_V"), info.get("amp_V")
+    band = (f"扫描 [{off - amp:.3f}, {off + amp:.3f}] V" if (off is not None and amp is not None)
+            else "扫描区间无解")
+    return (f"-> wn_ref={info.get('wn_ref_needed'):.6g}, offset_V={off}, {band}, "
+            f"reason={info.get('reason')}")
+
+
 for sp, p in M.SPECIES_PROFILES.items():
     for label, wn in p.get("bands", []):
-        info = ts.laser_reach(wn, _dflt["eta_VI"], _dflt["dnu_dI"], _dflt["i_ref"],
-                              _dflt["wn_ref"], 1.5)
-        check(f"{sp} {label}({wn:g}) 自动重锚后有解",
-              bool(info.get("fits_span")) and info.get("wn_ref_needed") is not None,
-              f"-> wn_ref_needed={info.get('wn_ref_needed')}")
+        ok, info = _usable(wn)
+        # 断言不止"不报错"：必须整段扫描都在阈值之上（否则波形被截断、2f/1f 失真）
+        check(f"{sp} {label}({wn:g}) 重锚后**整段出光**可用", ok, _fmt(wn, info))
+
+# 判据回归：默认激光的三档边界（曾出现"扫描中心出光即算可达"→ 部分出光被静默放行）
+check("≤2971.0 判为可达（整段出光）", _usable(2971.0)[0] is True)
+check("2971.5 判为不可达（部分出光）", ts.laser_reach(2971.5, **_KW)["reachable"] is False,
+      f'-> reason={ts.laser_reach(2971.5, **_KW)["reason"]}')
+check("2972.0 判为不可达（部分出光）",
+      ts.laser_reach(2972.0, **_KW)["reachable"] is False)
+check("2975.0 判为不可达（全段无输出）",
+      ts.laser_reach(2975.0, **_KW)["reachable"] is False)
+# 引擎侧必须共用同一判据，否则"引擎放行 / MCP 层认为不可达"会两处漂移
+_cfg = {"eta_VI": 24.0, "dnu_dI": -0.088, "i_ref": 120.0, "wn_ref": 2964.7, "i_th": 30.0,
+        "amp_V": 0.7102272727272727, "scan_span_cm": 1.5, "d2nu_dI2": 0.0, "offset_V": 1.544}
+try:
+    ts._require_driver_range(dict(_cfg), 2972.0)
+    check("引擎侧拒绝'部分出光'档", False, "却放行了")
+except ValueError as e:
+    check("引擎侧拒绝'部分出光'档", "未整段高于阈值电压" in str(e), f"-> {str(e)[:46]}")
+try:
+    ts._require_driver_range(dict(_cfg, offset_V=3.2), 2968.5)
+    check("引擎侧放行'整段出光'档", True)
+except ValueError as e:
+    check("引擎侧放行'整段出光'档", False, f"-> {str(e)[:46]}")
+check("_require_driver_range 与 laser_reach 共用判据（防两处漂移）",
+      "laser_reach(" in inspect.getsource(ts._require_driver_range))
+
 _adv = M.adaptive_condition("H2O")
 check("adaptive_condition 带波段可达性",
       "波段可达性" in _adv and _adv["波段可达性"][0]["默认激光可达"] is False,
@@ -270,13 +315,41 @@ M._SESSION_FILE = Path(tempfile.mkdtemp()) / "_s.json"
 M._save_sessions({"a": {"confirmed": {"x": 1}}})
 check("会话写盘为原子替换（无 .tmp 残留）",
       json.loads(M._SESSION_FILE.read_text(encoding="utf-8"))["a"]["confirmed"]["x"] == 1
-      and not M._SESSION_FILE.with_name(M._SESSION_FILE.name + ".tmp").exists())
+      and not list(M._SESSION_FILE.parent.glob(M._SESSION_FILE.name + "*.tmp")))
+# 并发写同一文件不得抛异常（Windows 上 os.replace 会 WinError 5 → 已加重试+降级）
+try:
+    M._save_sessions({"b": {"confirmed": {"y": 2}}})
+    M._save_sessions({"c": {"confirmed": {"z": 3}}})
+    check("连续写盘不抛异常（含重试/降级路径）",
+          json.loads(M._SESSION_FILE.read_text(encoding="utf-8"))["c"]["confirmed"]["z"] == 3)
+except Exception as e:                                  # noqa: BLE001
+    check("连续写盘不抛异常（含重试/降级路径）", False, f"-> {type(e).__name__}: {e}")
 M._SESSION_FILE = _old
 
 import tdlas_hitran as TH                    # noqa: E402  （离线：HAPI 自带索引表）
 check("同位素判据正确（HAPI 的 ISO 以 (M, I) 元组为键）",
       TH._isotope_known(1, 1) is True and TH._isotope_known(999, 1) is False,
       f"-> (1,1)={TH._isotope_known(1, 1)}, (999,1)={TH._isotope_known(999, 1)}")
+
+# ── 保真度台账不得与 MCP 层脱节 ────────────────────────────────────────
+# 本项目已因"声明了却没接上"栽过两次（`edge`/`trim_frac` 一族、DAS 的 etalon 几何参数），
+# 所以 guide 里发给 AI 的保真度台账也必须与真源同源，否则等于又开一个静默错误入口。
+import tdlas_fidelity as FID                  # noqa: E402
+_fid = (M.t_guide().get("fidelity") or {})
+check("tdlas_guide 返回保真度台账（非降级兜底）",
+      "not_implemented" in _fid and "unavailable" not in _fid,
+      f"-> keys={sorted(_fid)[:6]}")
+check("台账与登记表同源（未实现项数量一致）",
+      len(_fid.get("not_implemented") or []) == len(FID.missing_effects()),
+      f"-> guide={len(_fid.get('not_implemented') or [])} / table={len(FID.missing_effects())}")
+check("AI_INTERACTION_GUIDE 含 fidelity_reporting（披露口径）",
+      "fidelity_reporting" in M.AI_INTERACTION_GUIDE)
+check("wms 的 must_disclose 含保真度项（⑧）", "⑧" in inspect.getsource(M.t_wms_instrument))
+check("登记表证据 ↔ 源码一致（审计无问题）", not FID.audit_effects(),
+      f"-> {FID.audit_effects()[:3]}")
+check("schema 声明的物理参数全部可达（无死参数）",
+      all(not dead for _, dead in FID.audit_parameters()),
+      f"-> {[d for _, d in FID.audit_parameters() if d]}")
 
 print(f"\n===== 契约自检：{_OK} 通过 / {_BAD} 失败 =====")
 raise SystemExit(1 if _BAD else 0)

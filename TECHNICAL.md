@@ -336,6 +336,28 @@ $$T(\tilde\nu)=\frac{1}{1+F\sin^2(\delta/2)},\qquad \delta=\frac{2\pi\tilde\nu}{
 
 ---
 
+### 4.10 保真度台账与测量不确定度（MCP 层）
+
+**为什么需要**：本项目已两次踩**同一类**坑——`inputSchema` 声明了参数、MCP 层却从未把它交给引擎，于是 AI 传了值、拿到的是默认值算出的结果，**全程零提示**（`edge`/`trim_frac` 一族、`tdlas_das_instrument` 的整族 etalon 几何参数）。根因不是疏忽，而是**缺一个单一真源**："物理效应 / 参数 / 证据"分散在代码、文档、测试三处，人一改就漂。
+
+因此把三者收进一张**可执行**的表——`tools/tdlas_fidelity.py` 的 `EFFECTS`。每项效应声明：在哪实现（`evidence`，须为源码里真实存在的字面量）、是否真的生效（`status`：`on` 默认生效 / `opt` 需显式开启 / `off` 未实现）、控制它的参数（`params`）、已知缺口（`limit`）。三项**离线**审计互相钉住：
+
+| 审计 | 问什么 | 手段 |
+|---|---|---|
+| `audit_effects()` | 表里声称的符号/常量真的在源码里吗？（防"表漂了"） | 在 `tdlas_sim.py` / `tools/*.py` 中检索 `evidence` 字面量 |
+| `audit_parameters()` | 有没有"`inputSchema` 声明了却从未进入引擎"的死参数？ | 用假引擎截获真正进入引擎的 `kwargs`，与 schema 的 `properties` 求差（设备引用 / 会话 / 出图开关在**显式白名单**内） |
+| `missing_effects()` | 哪些效应**没**建模（必须向用户披露）？ | 筛 `status == "off"` |
+
+**对 AI 的接口**：`tdlas_guide` 返回 `fidelity = {implemented, optional, not_implemented, disclosure_rule}`，由 `fidelity_summary()` **转发**而成——不复制内容，因为复制就会重新引入"表漂了"。配套 `AI_INTERACTION_GUIDE["fidelity_reporting"]` 规定披露口径，`must_disclose` 第 **⑧** 项即指向它。
+
+当前台账：默认生效 **11** 项、需显式开启 **6** 项、**未实现 7 项**（自展宽、线混合、Dicke 变窄、PD 暗电流、前放 1/f、跨阻放大器输入电压噪声、光束几何）。这 7 项**不在仿真里**，在相应工况下可能主导真实误差——例如痕量检测的 LOD 会因缺"前放 1/f"而**偏乐观**。
+
+**测量不确定度**（`tdlas_invert` 的 `n_repeats`，默认 0 = 不算）：对同一工况重复仿真 $n$ 次，取浓度估计的 run-to-run 散布，返回 $\sigma$、$x$ 的 95% 区间与小样本说明。**它只含统计（随机）分量**，**不含** $k$ 标定误差、HITRAN 数据库不确定度、线型近似（自展宽 / 线混合）与 etalon 条纹；$n<10$ 时 $\sigma$ 自身的相对不确定度很大（返回里给出警告）。故它回答的是"同样的仿真跑两遍有多一致"，**不是**"这个数离真值有多远"。
+
+**缓存**：`measurement_uncertainty` / `detection_limit` 会对**完全相同**的 (species, 窗口, T, P, step, wingHW) 反复调用 `tdlas_hitran.absorption()`，而单次 Voigt 计算实测 0.6–0.9 s。故 `absorption()` 加进程内缓存：键含全部影响 α 的参数；命中返回**副本**（防调用方就地修改污染缓存）；FIFO 上限 64，可用 `alpha_cache_clear()` 清空。$\alpha(\nu)$ 是参数的纯函数，**缓存不改变任何数值**，仅改变耗时。
+
+---
+
 ## 5. 默认参数表
 
 | 模块 | 参数 | 默认值 | 说明 |
@@ -364,7 +386,10 @@ $$T(\tilde\nu)=\frac{1}{1+F\sin^2(\delta/2)},\qquad \delta=\frac{2\pi\tilde\nu}{
 | | `rin` / `drift_frac` / `flicker_frac` | **0 / 0 / 0** | 这三项默认关；但**散粒/热是物理固有、恒在**（默认量级 ~0.03 mV）。要完全无噪用 `physical_noise=False` |
 | 复现 | `seed` | **0** | 默认 0 ⇒ 同参调用逐位可复现；返回带 `seed_used`；传 null 则每次随机 |
 | | `physical_noise` | **True** | True=含物理固有散粒/热；False=严格理想仿真（无任何噪声，逐位可复现） |
-| 激光 | `auto_laser` | **True** | 目标波数超出当前激光可达范围（默认激光受阈值电流约束，实际覆盖 2964.7–2972.6 cm⁻¹）时自动重锚 `wn_ref`，并写入 `warnings` + `laser_auto_aligned`（须向用户说明这是理想假设）。显式给 `wn_ref`/`offset_V` 或用 `laser=`/`setup=` 引用设备时不介入 |
+| 激光 | `auto_laser` | **True** | 目标波数超出当前激光可达范围时自动重锚 `wn_ref`，并写入 `warnings` + `laser_auto_aligned`（须向用户说明这是理想假设）。显式给 `wn_ref`/`offset_V` 或用 `laser=`/`setup=` 引用设备时不介入 |
+| | 默认激光可达范围（三档） | ≤ **2971.0 cm⁻¹** | **整段扫描都在阈值之上 → 干净可用**（`v_th=i_th/η_VI=1.25 V`；三角波半幅 `amp_V=0.710 V`，默认 `scan_span_cm=1.5`） |
+| | | 2971.0 – 2974.1 | **部分出光**：扫描段有一段是黑的 → 2f/1f 失真且**不会报错**，故判定为不可达（`auto_laser=False` 时明确拒绝） |
+| | | > 2974.1 | **全段无输出** → 必报错 |
 | 调制 | `mod_freq_Hz` | 30 kHz | 调制频率 |
 | | `m_opt` | **"auto"** | 自适应调制深度 |
 | | `lockin_avg` / `lockin_stages` | 1 / 2 | 低通参数 |

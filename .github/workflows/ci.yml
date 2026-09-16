@@ -34,12 +34,18 @@ jobs:
         python -m py_compile tools/tdlas_hitran.py
         python -m py_compile tools/remote_link.py
         python -m py_compile tools/contract_check.py
+        python -m py_compile tools/tdlas_fidelity.py
 
     # 硬门禁（离线、确定性）：schema↔签名一致性、参数透传、越界重锚、
     # 未知键拒绝、批量请求、文件名净化等。这些是不依赖 HITRAN 的契约，必须每次全绿。
     # -X utf8：Windows runner 控制台默认 CP1252，脚本虽已自行 reconfigure，这里再加一道。
     - name: Contract check (offline)
       run: python -X utf8 tools/contract_check.py
+
+    # 保真度审计（同样离线、确定性）：能力登记表 ↔ 源码证据 ↔ 参数可达性。
+    # 它守住的是"声明了却没实现 / 声明了却没接上"这一类静默错误——本项目已因此栽过两次。
+    - name: Fidelity audit (offline)
+      run: python -X utf8 tools/tdlas_fidelity.py
 
     # 全链路自检需要访问 hitran.org，偶发网络/服务端抖动（代码内已带 3 次指数退避重试）；
     # 因此不作为硬门禁，但失败会在日志里明确记录，便于区分"代码坏了"与"HITRAN 抖了"。

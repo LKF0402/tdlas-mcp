@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 第三轮：可达性判据收敛 / 保真度台账 / 不确定度
+- **可达性判据三版收敛（高）**：`laser_reach()` 的最终判据 = **整段扫描都在阈值之上且不出电压上限**（`offset_V − amp_V ≥ v_th` 且 `offset_V + amp_V ≤ 5`）。前两版分别只查"偏移落在驱动器 0–5 V 内"与"扫描中心出光"，都会让 **2971.0–2974.1 cm⁻¹** 这一档**不报错、但扫描波形被截断**（2f/1f 静默失真）。引擎侧 `_require_driver_range()` 与判据**共用同一实现**，杜绝两处漂移
+- **`allow_partial_dark`（新增，默认 False）**：明知扫描段含暗区、就是要看"越界之后长什么样"时可显式放行；放行后 `warnings` 报出暗区占比，返回里声明**定量结论不可用**（不给静默残谱留后门）
+- **保真度台账 `tools/tdlas_fidelity.py`（新增）**：把"物理效应 ↔ 实现位置 ↔ 是否真生效 ↔ 已知缺口"收进**一张可执行的表**（`EFFECTS`），并提供三项离线审计：① **证据一致性**——表里声称的符号/常量必须在源码里真的存在（防"表漂了"）；② **参数可达性**——用假引擎截获真正进入引擎的 kwargs，找出"schema 声明了却从未接上"的死参数（本项目已因此栽过两次：`edge` 一族、`tdlas_das_instrument` 的整族 etalon 几何参数）；③ **已知缺口清单**（默认生效 11 项 / 需显式开启 6 项 / **未实现 7 项**）。`tdlas_guide` 新增 `fidelity_reporting` 披露口径与 `fidelity` 台账（与真源同源转发，**不复制内容**），`must_disclose` 增加第 **⑧** 项；`tools/tdlas_fidelity.py` 进入 CI 硬门禁
+- **测量不确定度（新增，默认关）**：`tdlas_invert` 新增 `n_repeats`（默认 0 = 不算）。返回 `uncertainty`：同工况重复仿真的 run-to-run 散布、σ、x 的 95% 区间，并在 n<10 时给出"σ 自身的相对不确定度约 ±X%"的小样本警告。**只含统计（随机）分量**，不含 k 标定误差、HITRAN 数据库不确定度、线型近似与 etalon 条纹——description 与 `docs/VALIDATION.md` 均写明**不得当总不确定度用**
+- **吸收谱进程内缓存**：`tdlas_hitran.absorption()` 按 (物种, 窗口, T, P, step, wingHW, iso, 单位) 做缓存（命中返回副本，防就地修改污染；FIFO 上限 64），并提供 `alpha_cache_clear()` / `alpha_cache_info()`。蒙特卡洛类调用（`measurement_uncertainty` / `detection_limit`）会反复算**完全相同**的 Voigt 积分（单次实测 0.6–0.9 s），故这一步主要是在给不确定度功能兜底；α(ν) 是参数的纯函数，缓存**不改变任何数值**
+- **工程**：原子写增加重试与降级路径（Windows 上 `os.replace` 偶发 WinError 5）；契约自检 78 → **84 项**（新增"guide 台账与真源同源 / must_disclose⑧ / 无死参数 / 证据一致性"6 项）；CI 新增 **Fidelity audit (offline)** 硬门禁
+
 ### 第二轮审核修复：MCP 接口层（参数透传 / 推荐波段 / 可复现性）
 - **参数不再静默丢弃（高）**：`_INSTR_KEYS_WMS` 漏掉 `edge` / `trim_frac` / `d2nu_dI2` / `am_i0..am_psi2` / `mod_phase_deg`，而 `inputSchema` 声明了它们 —— AI 传 `edge="falling"` 得到的是 `rising` 的结果、返回体里还写着 `rising`，全程无提示（"以为改了、实际没改"）。现已透传；并新增**未知键直接报错**（`_validate_args`，按 inputSchema 校验必填/类型/未知键，未知键会列出允许的键），工具内亦保留 `ignored_params` 回报作为第二道防线
 - **推荐波段可跑通（高）**：`SPECIES_PROFILES` 的 8 个推荐波段横跨 1900–7185 cm⁻¹，而默认激光只是一支 3.36 μm DFB（阈值电流约束下实际覆盖 2964.7–2972.6 cm⁻¹）→ 按文档推荐选波段**必然报错**。新增 `laser_reach()`（离线可达性判据，含阈值电流约束）+ `auto_laser`（默认开）：越界时把 `wn_ref` 重锚到"重锚后确实可达"的值并**如实写入 `warnings` 与 `laser_auto_aligned`**（理想激光器假设，须按 `must_disclose⑦` 告知用户）；`adaptive_condition` 新增「波段可达性 / laser_params_needed」，让 AI 能先告诉用户"该波段需要换激光器"。显式给 `wn_ref`/`offset_V` 或引用设备库时不介入；`auto_laser=False` 保留严格报错

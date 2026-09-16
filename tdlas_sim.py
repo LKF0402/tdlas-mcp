@@ -892,9 +892,14 @@ def laser_reach(wn_center, eta_VI=24.0, dnu_dI=-0.088, i_ref=120.0, wn_ref=2964.
                 v_lo=DRIVER_V_LO, v_hi=DRIVER_V_HI):
     """判断目标波数能否被该激光器 + 驱动器达到；给出「需要的 wn_ref」与不可达原因。
 
+    判据 = **整段扫描**都落在有效输出区（高于阈值电压 `i_th/η_VI`、且不出驱动器上限）。
+    只要求"扫描中心出光"是不够的：扫描段有一段是黑的时，锁相解调的是被截断的波形，
+    2f/1f 归一化失真，而引擎**不会报错** —— 属"不报错但结果不可信"的静默档。
+
     这是**离线可算**的判据（纯算术，不依赖线表），因此既用于报错提示，也用于：
       · MCP 层在目标波数越界时自动重锚 wn_ref（详见 tools/tdlas_mcp.py 的 _maybe_align_laser）；
-      · 回归测试对 SPECIES_PROFILES 的每个推荐波段做可达性断言。
+      · 引擎侧 `_require_driver_range()` 的硬校验（共用同一套判据，避免两处漂移）；
+      · 回归测试对 SPECIES_PROFILES 的每个推荐波段做"重锚后整段出光"断言。
 
     返回 dict：
       reachable        目标波数是否落在驱动器量程内（且扫描半宽不越界）
@@ -952,10 +957,16 @@ def laser_reach(wn_center, eta_VI=24.0, dnu_dI=-0.088, i_ref=120.0, wn_ref=2964.
 
     offset_V = (di + i_ref) / eta_VI
     info["offset_V"] = offset_V
+    # 判据：**整段扫描**都要在阈值之上、且不出驱动器电压上限 —— 只要扫描段有一段是黑的，
+    # 锁相解调的就是一段被截断的波形（2f/1f 归一化失真），而引擎**不会报错**，
+    # 属"不报错但结果不可信"的静默档。只有整段出光才判 reachable。
     if offset_V > v_hi + _V_EPS:
         info["reason"] = "out_of_driver_range"
-    elif offset_V < v_lo_eff - _V_EPS:
-        info["reason"] = "below_threshold_current"
+    elif offset_V + amp_V > v_hi + _V_EPS:
+        info["reason"] = "scan_exceeds_driver_voltage"
+    elif offset_V - amp_V < v_lo_eff - _V_EPS:
+        info["reason"] = ("below_threshold_current" if offset_V < v_lo_eff - _V_EPS
+                          else "scan_partially_dark")
     else:
         info["reachable"] = True
     return info
@@ -1005,22 +1016,50 @@ def _resolve_scan(cfg, wn_center, user_keys):
 
 
 def _require_driver_range(cfg, wn_center):
-    """offset_V 越出驱动器量程 → 硬报错（含可达性诊断与可操作建议）。
+    """激光/驱动可行性校验 → 不可行则硬报错（含可达性诊断与可操作建议）。
 
-    边界留 1e-9 容差：目标波数恰好落在量程端点时，浮点误差会把 5.0 算成 5.0000000001，
-    旧实现用严格比较会把一个**合法**工况误判为越界（实测 wn_center=2975.26 得
-    offset_V=-1.89e-13 V 就被拒了）。
+    **判据与 `laser_reach()` 共用同一套实现**（整段扫描都在阈值之上、且不出电压上限），
+    避免"引擎放行、MCP 层却认为不可达"这类两处漂移。边界留 1e-9 容差：目标波数恰好
+    落在端点时，浮点误差会把 5.0 算成 5.0000000001，严格比较会把**合法**工况误拒
+    （实测 wn_center=2975.26 得 offset_V=-1.89e-13 V 就被拒了）。
     """
     off = float(cfg["offset_V"])
-    if (DRIVER_V_LO - _V_EPS) <= off <= (DRIVER_V_HI + _V_EPS):
-        return
+    dnu_dV = abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
+    # 用 cfg 里**实际生效**的三角波幅值反推等效扫描半宽（用户可能显式给了 amp_V）
+    span_cm = abs(float(cfg.get("amp_V", 0.0))) * dnu_dV or float(cfg.get("scan_span_cm", 1.5))
     r = laser_reach(wn_center, eta_VI=cfg["eta_VI"], dnu_dI=cfg["dnu_dI"], i_ref=cfg["i_ref"],
-                    wn_ref=cfg["wn_ref"], scan_span_cm=cfg.get("scan_span_cm", 1.5),
+                    wn_ref=cfg["wn_ref"], scan_span_cm=span_cm,
                     d2nu_dI2=cfg.get("d2nu_dI2", 0.0), i_th=cfg.get("i_th", 30.0))
+    if r.get("reachable"):
+        return
+    vth = float(cfg.get("i_th", 30.0)) / float(cfg["eta_VI"])
     hint = ""
     if r.get("wn_ref_needed") is not None:
-        hint = (f"该目标波数需 wn_ref≈{r['wn_ref_needed']:.6g} cm⁻¹"
+        hint = (f" 该目标波数需 wn_ref≈{r['wn_ref_needed']:.6g} cm⁻¹"
                 f"（或传 laser= 你的真实激光器参数）；MCP 层默认 auto_laser=True 会自动重锚并如实标注。")
+    if r["reason"] == "span_too_wide":
+        raise ValueError(
+            f"扫描半宽 {span_cm:g} cm⁻¹ 需要 ±{r['amp_V']:.3g} V 驱动，而可用区间只有 "
+            f"{DRIVER_V_LO:.0f}–{DRIVER_V_HI:.0f} V 且必须高于阈值电压 {vth:.3g} V → "
+            f"任何 wn_ref 都放不下。请减小 scan_span_cm 或核对 η_VI/i_th。")
+    if r["reason"] == "scan_exceeds_driver_voltage":
+        raise ValueError(
+            f"扫描上端 = offset_V + 幅值 = {off:.4g} + {r['amp_V']:.4g} V 超出驱动器上限 "
+            f"{DRIVER_V_HI:.0f} V。请减小 scan_span_cm 或降低 offset_V。")
+    if r["reason"] in ("scan_partially_dark", "below_threshold_current"):
+        # 显式接受暗段（allow_partial_dark=True）时放行：用户可能正想看"扫描越界后实际长什么样"。
+        # 但**全段无光**永远是错的（引擎随后的功率检查也会拦），所以只对"部分出光"放行。
+        if bool(cfg.get("allow_partial_dark")) and (off + r["amp_V"]) > vth:
+            return
+        raise ValueError(
+            f"扫描区间 [{off - r['amp_V']:.4g}, {off + r['amp_V']:.4g}] V 未整段高于阈值电压 "
+            f"{vth:.3g} V（偏移 offset_V={off:.4g} V，阈值电流 {float(cfg.get('i_th', 30.0)):g} mA）："
+            f"wn_center={float(wn_center):g} cm⁻¹ 在此激光器/驱动器的**有效输出区**之外"
+            f"（wn_ref={cfg['wn_ref']:g}, dν/dI={cfg['dnu_dI']:g}）。"
+            f"扫描段无光会让 2f/1f 失真且**不会报错**，故默认拒绝。"
+            f"可选：① 改用对应激光器参数（wn_ref/dν/dI/eta_VI）或手填 offset_V；"
+            f"② 减小 scan_span_cm 让整段落进有效区；"
+            f"③ 若你明知有暗段仍要算，显式传 allow_partial_dark=True。{hint}")
     raise ValueError(
         f"反算 offset_V={off:.3g} V 越出驱动器典型 {DRIVER_V_LO:.0f}–{DRIVER_V_HI:.0f} V 范围："
         f"wn_center={float(wn_center):g} cm⁻¹ 不在此 DFB 调谐范围内"
@@ -1641,6 +1680,105 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "alphaL_cyc": alphaL_cyc, "offband_mask": off, "valid_mask": valid,
             "das_cyc": das_cyc, "v_das_cyc": v_das_cyc,
             "t_cyc": t[idx], "n_per": n_sel, "edge": edge, "meta": meta}
+
+
+def measurement_uncertainty(species, wn_center, T, P, x, L_cm, seed=0, n_repeats=5,
+                           ci=0.95, **kw):
+    """**测量不确定度**：同一工况重复仿真，给出归一化 2f 峰的散布与相对不确定度。
+
+    为什么需要
+    ──────────
+    本工具此前只给点值（浓度、k、LOD），用户无法判断"这个数能用几位"。而"仪器级
+    逼近真实实验"的核心诉求之一，就是让定量结论**带误差**。
+
+    物理含义与口径（重要，避免误读）
+    ──────────────────────────────
+    · 本函数量化的是**有限噪声实现带来的统计散布**（run-to-run）：同一工况下改变
+      噪声随机种子重复测量，取归一化 2f 峰的标准差。它对应真实实验中"短时重复测量
+      的重复性"，**不等于**总不确定度。
+    · 它**不包含**系统项：k 的标定误差、线强/展宽系数的数据库不确定度、线型近似
+      （自展宽/线混合/Dicke）、etalon 条纹、带宽钳位、光程与温度测量误差等。
+      这些须由 instruments/器件手册或实验标定给出（见 tools/tdlas_fidelity.py 的
+      not_implemented 清单）。
+    · 故本函数返回的 `note` 明确声明其为**统计（随机）分量**，不得当作总误差。
+
+    实现要点
+    ────────
+    · 逐次重复用 seed+i，其余参数完全一致 → 只改变随机噪声实现；
+    · 相对不确定度 rel_sigma = std(peak) / mean(peak)，与浓度**无关**（弱吸收下
+      x = peak/k 是线性映射），因此它对任意 x 估计都适用；
+    · 用 Student-t 小样本区间（n<30 时比正态更稳），自由度 = n-1。
+    """
+    from scipy import stats as _st
+
+    n = int(n_repeats)
+    if n < 2:
+        raise ValueError("n_repeats 至少 2 才能估计散布")
+    peaks = np.empty(n, dtype=float)
+    for i in range(n):
+        r = simulate_wms_instrument(species, wn_center=wn_center, T=T, P=P, x=x,
+                                    L_cm=L_cm, seed=int(seed) + i, **kw)
+        peaks[i] = float(np.abs(r["S2f_norm_cyc"])[r["valid_mask"]].max())
+
+    mean_p = float(np.mean(peaks))
+    sd = float(np.std(peaks, ddof=1))
+    if mean_p <= 0:
+        return {"n_repeats": n, "peaks": [float(v) for v in peaks],
+                "mean_peak": mean_p, "std_peak": sd, "rel_sigma": None,
+                "valid": False,
+                "note": "峰值非正，无法给出相对不确定度（检查工况与有效区）"}
+
+    rel = sd / mean_p
+    dof = n - 1
+    tcrit = float(_st.t.ppf(0.5 + float(ci) / 2.0, dof))
+    half = tcrit * rel / np.sqrt(n)          # 均值（k 估计）的标准误 × t
+
+    # ★ σ 自身的统计不确定度：小样本下 σ 的估计很不可靠（n=3 时约 ±50%），
+    #   必须一并给出，否则用户会把"7% ± ?"误当成精确的 7%。
+    #   σ 的抽样分布近似 χ²(dof)/dof，取其 95% 区间换算回 rel。
+    try:
+        chi_lo = float(_st.chi2.ppf(0.025, dof))
+        chi_hi = float(_st.chi2.ppf(0.975, dof))
+        rel_lo = rel * np.sqrt(dof / chi_hi)
+        rel_hi = rel * np.sqrt(dof / chi_lo)
+        # σ 自身的相对标准差：直接由上面 95% 区间反推，保证与区间**自洽**
+        # （早先用 1/√(2·dof) 的近似式，与 χ² 区间在中小样本下不一致）。
+        sigma_sd = (rel_hi - rel_lo) / (2.0 * 1.959964) if rel > 0 else float("nan")
+    except Exception:
+        rel_lo = rel_hi = rel
+        sigma_sd = float("nan")
+
+    low_n = n < 10
+    return {
+        "n_repeats": n,
+        "peaks": [float(v) for v in peaks],
+        "mean_peak": mean_p,
+        "std_peak": sd,
+        "rel_sigma": rel,                    # 单次测量的相对散布（1σ）
+        "rel_sigma_pct": 100.0 * rel,
+        "rel_sigma_ci95": [float(rel_lo), float(rel_hi)],
+        "rel_sigma_of_sigma_pct": 100.0 * sigma_sd,
+        "mean_rel_ci": [float(max(0.0, rel - half)), float(rel + half)],
+        "ci_level": float(ci),
+        "valid": True,
+        "scope": "统计（随机）分量：有限噪声实现的 run-to-run 重复性",
+        "low_sample_warning": (f"n_repeats={n} 偏少：σ 自身的相对不确定度约 "
+                               f"±{100.0 * sigma_sd:.0f}%；定量引用前建议 n_repeats≥10"
+                               if low_n else None),
+        "note": "不含系统项（k 标定、线强/展宽数据库不确定度、自展宽/线混合/Dicke 等"
+                "线型近似、etalon 条纹、带宽钳位、光程与温度误差）→ **不得当作总不确定度**。"
+                "对定量结论须同时说明：这只是随机分量。",
+    }
+
+
+def rel_uncertainty_for_x(x_value, rel_sigma):
+    """把相对散布换算到某个浓度值上的绝对不确定度（弱吸收下 x = peak/k 线性）。
+
+    返回 (x, x_sigma, x_ci95)，x_sigma = x · rel_sigma。
+    """
+    x = float(x_value)
+    rel = float(rel_sigma)
+    return x, abs(x) * rel, abs(x) * rel * 1.96
 
 
 def validate_wms_result(r):

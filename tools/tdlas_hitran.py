@@ -208,15 +208,9 @@ def fetch_table(formula, M, I, numin, numax, force=False):
     return wtable, cov
 
 
-def absorption(name, numin, numax, T=296.0, P=1.01325, step=5e-4, wingHW=20.0,
-               iso=None, hitran_units=False):
-    """纯组分吸收系数 α(ν)。
-
-    返回 (nu, alpha, info)：
-      · hitran_units=False → α [cm^-1]（该组分纯气、总压 P、空气浴）
-      · hitran_units=True  → σ [cm^2/molecule]
-    混合气请自行按 α_i = x_i · α_pure_i 叠加（本函数不代劳，避免口径混淆）。
-    """
+def _absorption_uncached(name, numin, numax, T=296.0, P=1.01325, step=5e-4, wingHW=20.0,
+                         iso=None, hitran_units=False):
+    """纯组分吸收系数 α(ν) —— **无缓存**实现（见下方 absorption 的缓存包装）。"""
     _ensure_db()
     h = _hapi()
     formula, M = resolve(name)
@@ -242,3 +236,45 @@ def absorption(name, numin, numax, T=296.0, P=1.01325, step=5e-4, wingHW=20.0,
                               "step_cm-1": float(step), "wingHW_cm-1": float(wingHW),
                               "diluent": "air"}}
     return np.asarray(nu, dtype=float), np.asarray(coef, dtype=float), info
+
+
+# ── 吸收谱的进程内缓存 ────────────────────────────────────────────────
+# 为什么需要：蒙特卡洛类调用（measurement_uncertainty / detection_limit）会对
+# **完全相同**的 (species, 窗口, T, P, step, wingHW) 反复调用本函数，而每次
+# Voigt 计算实测约 0.6–0.9 s，成为重复仿真的主要开销。
+# 缓存键包含全部影响 α 的参数；命中时返回**副本**，防止调用方就地修改污染缓存。
+# α(ν) 是参数的纯函数，故缓存不改变任何数值结果（仅改变耗时）。
+_ALPHA_CACHE = {}
+_ALPHA_CACHE_MAX = 64
+
+
+def alpha_cache_clear():
+    """清空吸收谱缓存（改过线表/换物种批次后建议调用）。"""
+    _ALPHA_CACHE.clear()
+
+
+def alpha_cache_info():
+    return {"entries": len(_ALPHA_CACHE), "max": _ALPHA_CACHE_MAX}
+
+
+def absorption(name, numin, numax, T=296.0, P=1.01325, step=5e-4, wingHW=20.0,
+               iso=None, hitran_units=False):
+    """纯组分吸收系数 α(ν)（带进程内缓存）。
+
+    返回 (nu, alpha, info)：
+      · hitran_units=False → α [cm^-1]（该组分纯气、总压 P、空气浴）
+      · hitran_units=True  → σ [cm^2/molecule]
+    混合气请自行按 α_i = x_i · α_pure_i 叠加（本函数不代劳，避免口径混淆）。
+    """
+    key = (str(name).strip().upper(), float(numin), float(numax), float(T), float(P),
+           float(step), float(wingHW), None if iso is None else int(iso),
+           bool(hitran_units))
+    hit = _ALPHA_CACHE.get(key)
+    if hit is not None:
+        return hit[0].copy(), hit[1].copy(), hit[2]
+    val = _absorption_uncached(name, numin, numax, T=T, P=P, step=step, wingHW=wingHW,
+                               iso=iso, hitran_units=hitran_units)
+    if len(_ALPHA_CACHE) >= _ALPHA_CACHE_MAX:
+        _ALPHA_CACHE.pop(next(iter(_ALPHA_CACHE)))      # FIFO 淘汰，避免无界增长
+    _ALPHA_CACHE[key] = val
+    return val[0].copy(), val[1].copy(), val[2]

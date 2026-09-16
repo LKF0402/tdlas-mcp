@@ -75,6 +75,9 @@ python tools/tdlas_mcp.py --selftest
 # 离线契约自检（不需要网络，CI 硬门禁）
 python tools/contract_check.py
 
+# 离线保真度审计：能力台账 ↔ 源码证据 ↔ 参数可达性（CI 硬门禁）
+python tools/tdlas_fidelity.py
+
 # 接入 MCP 客户端（stdio）
 # 将 mcp.config.example.json 中 args 路径改为实际安装路径即可
 ```
@@ -98,7 +101,7 @@ python tools/contract_check.py
 | tdlas_simulate | 解析模型正向计算：DAS 透过率、1f、2f 峰高 |
 | tdlas_das_chain | 三角波 DAS 链路：PD 原始信号 → 多项式基线拟合 → 吸光度 |
 | tdlas_review | 结果自动校验（10 项检查，不绘图） |
-| tdlas_invert | 免标定浓度反演：2f/1f 峰高 → 摩尔分数 |
+| tdlas_invert | 免标定浓度反演：2f/1f 峰高 → 摩尔分数；`n_repeats>0` 额外给测量不确定度（仅统计分量） |
 | tdlas_detection_limit | 噪声等效浓度（NEC）与检测限（LOD）计算 |
 | tdlas_detection_limit_scan | LOD 随光程与参考浓度的二维扫描（系统选型） |
 | tdlas_session | 跨会话工况参数持久化 |
