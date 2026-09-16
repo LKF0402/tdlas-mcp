@@ -37,11 +37,12 @@ jobs:
 
     # 硬门禁（离线、确定性）：schema↔签名一致性、参数透传、越界重锚、
     # 未知键拒绝、批量请求、文件名净化等。这些是不依赖 HITRAN 的契约，必须每次全绿。
+    # -X utf8：Windows runner 控制台默认 CP1252，脚本虽已自行 reconfigure，这里再加一道。
     - name: Contract check (offline)
-      run: python tools/contract_check.py
+      run: python -X utf8 tools/contract_check.py
 
     # 全链路自检需要访问 hitran.org，偶发网络/服务端抖动（代码内已带 3 次指数退避重试）；
     # 因此不作为硬门禁，但失败会在日志里明确记录，便于区分"代码坏了"与"HITRAN 抖了"。
     - name: Selftest (needs hitran.org)
       continue-on-error: true
-      run: python tools/tdlas_mcp.py --selftest
+      run: python -X utf8 tools/tdlas_mcp.py --selftest

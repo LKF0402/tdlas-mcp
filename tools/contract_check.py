@@ -33,6 +33,15 @@ if str(_ROOT) not in sys.path:
 if str(_ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(_ROOT / "tools"))
 
+# 本脚本的断言文案含 → ↔ ⚠ 等符号；Windows 控制台默认 GBK/CP1252 会直接
+# UnicodeEncodeError 崩在 print 上（CI 四个 Python 版本全挂过）。这里强制 UTF-8，
+# 与 tools/tdlas_mcp.py 的 main() 同一做法，避免依赖调用方是否加了 -X utf8。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 import tdlas_sim as ts                      # noqa: E402
 import tdlas_mcp as M                       # noqa: E402
 
