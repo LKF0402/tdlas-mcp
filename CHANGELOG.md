@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+### 代码审计修复（正确性与输入校验）
+- **峰值区间与灵敏度统一（高）**：`tdlas_wms_instrument` 的 `results.S2f1f_peak` 此前在**全窗**取 `argmax`，与在**有效区**（`trim_frac` 剔除两端后）计算的 `sensitivity_k` 不同区间 → 两者本应配套，直接送 `tdlas_invert` 会得错误浓度。现统一在 `valid_mask` 内取峰；新增 `S2f1f_peak_interval`（`trim_frac` / 取峰点数 / `full_window_peak_in_trimmed_edge` 诊断位）供核对
+- **二次调谐无实根不再伪造（中）**：`_resolve_scan` 此前用 `max(discriminant, 0)` 把判别式 < 0 截成"重根"，凭空造出一个驱动电压、下游照常出谱；现抛 `ValueError`，报错给出可达极值（调谐曲线顶点）与该核对的参数，并提示可用 `d2nu_dI2=0` 退回线性模型
+- **浓度反演输入/输出域校验（中）**：`tdlas_invert` 现校验 `peak_2f1f` 为有限值且 ≥0、`k` 为有限正数（此前负峰高会静默返回负浓度）；结果超出摩尔分数定义域 `(0,1]` 时**不静默截断**，改以 `mole_frac_status` / `mole_frac_valid` / `warning` 显式标注越界（越界即 k 与工况不同源 / 已出弱吸收线性区）
+
+### 工程加固
+- **设备库参数校验**：`tdlas_device save` 拒绝空设备名与非法硬件参数（`gain/bw/fs/v_range/eta_*` 须 > 0、`adc_bits` 须为 4–32 整数、`throughput ∈ (0,1]`、`dnu_dI ≠ 0`、须为有限数值）；**设备引用时再校验一次**，兜住历史或手改过的非法条目；拼错的键回报在 `ignored_params`（防静默忽略）
+- **缺依赖可操作提示**：缺少 `hitran-api`（`import hapi`）时给出安装指引与当前解释器路径；`--selftest` 遇依赖缺失以非零码退出（便于 CI 判断）
+- 自检新增第 10 项「二次调谐可达性」（不可达必报错 + 可达时取近根正常反算），自检项数 9 → 10；`docs/VALIDATION.md` 同步（自检清单、已知局限、修订记录）
+- `requirements.txt` 加注 `hitran-api` ↔ `import hapi` 的对应关系与自检命令
+
 ### etalon 干涉条纹（新增，默认关）
 - 物理模型 `etalon_transmission()`：两平行面 F-P 腔 Airy 透过率 `T = 1/(1 + F·sin²(δ/2))`，`F = 4R/(1−R)²`、`FSR = 1/(2nd)`（或直接给 `fringe_fsr` / `fringe_contrast` 覆盖）
 - 注入为**光路乘性透过率**：信号支路含漂移，参考谱（背景 / DAS 的 I0）用确定性条纹 → 背景扣除后只留漂移残留
