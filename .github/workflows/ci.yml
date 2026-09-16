@@ -7,11 +7,12 @@ on:
     branches: [ main ]
 
 jobs:
-  syntax-check:
+  checks:
     runs-on: windows-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        # 3.13 是本机实际验证环境，必须纳入（此前矩阵只到 3.12，与实际使用脱节）
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
     - uses: actions/checkout@v4
@@ -32,3 +33,15 @@ jobs:
         python -m py_compile tools/tdlas_mcp.py
         python -m py_compile tools/tdlas_hitran.py
         python -m py_compile tools/remote_link.py
+        python -m py_compile tools/contract_check.py
+
+    # 硬门禁（离线、确定性）：schema↔签名一致性、参数透传、越界重锚、
+    # 未知键拒绝、批量请求、文件名净化等。这些是不依赖 HITRAN 的契约，必须每次全绿。
+    - name: Contract check (offline)
+      run: python tools/contract_check.py
+
+    # 全链路自检需要访问 hitran.org，偶发网络/服务端抖动（代码内已带 3 次指数退避重试）；
+    # 因此不作为硬门禁，但失败会在日志里明确记录，便于区分"代码坏了"与"HITRAN 抖了"。
+    - name: Selftest (needs hitran.org)
+      continue-on-error: true
+      run: python tools/tdlas_mcp.py --selftest
