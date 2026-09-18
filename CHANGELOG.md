@@ -36,6 +36,13 @@
 - **结构保持向后兼容**：多浓度模式仍用首个浓度跑完整详细报告（T/P/L/α/噪声等全保留），`x_list` 只额外叠加扫描汇总；单浓度路径行为不变。
 - **契约自检 103 → 113 项**：新增第 8 节（x_list 透传为 x、越界/二选一/空列表三道防呆、multi_conc 结构、线性诊断生效）；`tdlas_fidelity.NON_ENGINE_CHANNELS` 增列 `x_list`（逻辑参数，MCP 层循环驱动、不进引擎）。
 
+### 第七轮：多浓度同图（兼容性操作）+ BUG-D 修复
+> 用户需求："把多浓度曲线画到同一张图，应该是兼容性操作，当用户指令语义是混合气的情况时，使用。"
+
+- **多浓度同图 `png_overlay`（兼容性操作）**：四工具在 `x_list` + `save_png=true` 时，额外输出一张 `png_overlay`——把各浓度的代表曲线叠加到同一坐标轴：`tdlas_simulate` 叠 **α(ν)**、`tdlas_das_chain` 叠 **DAS 吸光度**、`tdlas_das_instrument` 叠 **吸收光学厚度 αL**、`tdlas_wms_instrument` 叠 **归一化 2f/1f**（含有效区着色、剔除区灰虚线，与 `plot_wms_instrument` 同源画法）。图例按 ppm 标注浓度。**向后兼容**：单浓度、或没开 `save_png`，都不产出 `png_overlay`（既有单浓度详图不受影响）。触发语义：用户指令是"混合气 / 多浓度标定对照"且要图时（即 `x_list` + `save_png`）才用，不默认强加。
+- **BUG-D 修复（锁相正交分量此前从未返回）**：`simulate_wms_instrument` 早已算出 `X1f_c/Y1f_c/X2f_c/Y2f_c`（信号支路）与 `X1f_bg_c/…`（无吸收参考谱），但它们只用于内部背景扣除、**从未出现在返回里**——用户拿不到 2f/1f 复减的原始输入，无法自做 RAM/AM 基线诊断。新增 `return_xy` 开关（默认 **false**，避免每次返回多 8 条等长数组撑大返回体）；`tdlas_wms_instrument` 透传该开关并在 `return_xy=true` 时返回 `wms_raw_xy`（8 个分量）+ 说明（2f/1f 复减 = X2f_c/X1f_c − X2f_bg_c/X1f_bg_c）。
+- **契约自检 113 → 119 项**：新增第 9 节（x_list+save_png 产出 png_overlay、单浓度/无 save_png 不产出、BUG-D 透出 X/Y、return_xy 默认不返回）。
+
 ### 第四轮：第三轮改动的事后审计修复（判据回归 / 不确定度口径 / 缓存并发）
 > 第三轮提交当日做的定向自查，逐条实测复现后修复。凡"改了行为"的都在这条里写清原委。
 

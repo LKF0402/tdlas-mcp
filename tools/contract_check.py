@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 import sys
 import tempfile
@@ -521,6 +522,35 @@ check("x_list 返回 multi_conc 扫描结构",
 check("multi_conc 线性诊断生效（≥2 点则判线性）",
       _here and _here.get("linearity", {}).get("checked") is True,
       f"-> {_here.get('linearity') if _here else None}")
+
+# ───────────────────── 9. 多浓度同图 png_overlay + BUG-D 透出 X/Y ─────────────────────
+print("=== 9. 多浓度同图 png_overlay + BUG-D 透出 X/Y ===")
+# 兼容性操作：x_list + save_png 必须产出多浓度同图（覆盖在单浓度详图之外）
+_ov = M.t_simulate("CH4", wn0=2968.5, x_list=["1e-4", "1e-3"], save_png=True)
+check("x_list+save_png 产出 png_overlay（多浓度同图）",
+      "png_overlay" in _ov and os.path.exists(_ov["png_overlay"]),
+      f"-> {_ov.get('png_overlay')}")
+_ovw = M.t_wms_instrument("CH4", wn_center=2968.5, x_list=["1e-4", "1e-3"], save_png=True)
+check("WMS x_list+save_png 产出 png_overlay",
+      "png_overlay" in _ovw and os.path.exists(_ovw["png_overlay"]),
+      f"-> {_ovw.get('png_overlay')}")
+# 向后兼容：单浓度或没有 save_png 都不应产出 png_overlay
+_single = M.t_simulate("CH4", wn0=2968.5, save_png=True)
+check("单浓度+save_png 不产出 png_overlay（兼容性）", "png_overlay" not in _single,
+      f"-> keys={list(_single)}")
+_nosvg = M.t_simulate("CH4", wn0=2968.5, x_list=["1e-4", "1e-3"])
+check("多浓度但不 save_png 不产出 png_overlay（兼容性）", "png_overlay" not in _nosvg,
+      f"-> keys={list(_nosvg)}")
+# BUG-D 修复：return_xy=True 透出锁相正交 X/Y 分量
+_xy = M.t_wms_instrument("CH4", wn_center=2968.5, return_xy=True)
+check("BUG-D 修复：return_xy=True 透出 X/Y 正交分量",
+      "wms_raw_xy" in _xy and {"X1f_c", "Y1f_c", "X2f_c", "Y2f_c",
+                               "X1f_bg_c", "Y1f_bg_c", "X2f_bg_c", "Y2f_bg_c"}.issubset(
+          _xy.get("wms_raw_xy", {}).keys()),
+      f"-> {sorted(_xy.get('wms_raw_xy', {}).keys())}")
+_xy0 = M.t_wms_instrument("CH4", wn_center=2968.5, return_xy=False)
+check("return_xy 默认 false 不返回 X/Y（避免返回体膨胀）", "wms_raw_xy" not in _xy0,
+      f"-> keys={list(_xy0)}")
 
 print(f"\n===== 契约自检：{_OK} 通过 / {_BAD} 失败 =====")
 raise SystemExit(1 if _BAD else 0)

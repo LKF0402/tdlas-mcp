@@ -1151,6 +1151,14 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
                         "wms_2f_peak": float(rr["S2f"].max()),
                         "alpha_peak_cm-1": float(rr["alpha"].max()),
                         "das_tau_min": float(rr["tau"].min())})
+        if save_png:                                   # 多浓度同图（兼容性操作）：叠加 α(ν)
+            OUT_DIR.mkdir(parents=True, exist_ok=True)
+            _ov = OUT_DIR / f"tdlas_{str(species).upper()}_{float(wn0):g}cm-1_xlist_overlay.png"
+            ts.plot_multi_x(str(_ov), [xi * 1e6 for xi in _xs],
+                            [s["alpha"] for s in _samples], _samples[0]["nu"],
+                            r"波数 (cm$^{-1}$)", r"吸收系数 $\alpha$ (cm$^{-1}$)",
+                            f"{str(species).upper()} 多浓度吸收谱 (α vs ν)")
+            out["png_overlay"] = str(_ov)
     return out
 
 
@@ -1429,6 +1437,14 @@ def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
             _xs, _samples, ["das_absorbance_peak", "alpha_L_true_peak"],
             lambda rr: {"das_absorbance_peak": float(rr["das"].max()),
                         "alpha_L_true_peak": float(rr["alpha_L_true"].max())})
+        if save_png:                                   # 多浓度同图：叠加 DAS 吸光度
+            OUT_DIR.mkdir(parents=True, exist_ok=True)
+            _ov = OUT_DIR / f"das_chain_{str(species).upper()}_{float(wn0):g}cm-1_xlist_overlay.png"
+            ts.plot_multi_x(str(_ov), [xi * 1e6 for xi in _xs],
+                            [s["das"] for s in _samples], _samples[0]["wn_das"],
+                            r"波数 (cm$^{-1}$)", "吸光度 (DAS)",
+                            f"{str(species).upper()} 多浓度 DAS 吸光度")
+            out["png_overlay"] = str(_ov)
     return out
 
 
@@ -1697,6 +1713,14 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
             _xs, _samples, ["alpha_L_peak", "v_pd_mean_V"],
             lambda rr: {"alpha_L_peak": rr["meta"]["alpha_L_peak"],
                         "v_pd_mean_V": rr["meta"]["v_pd_mean"]})
+        if save_png:                                   # 多浓度同图：叠加吸收光学厚度 αL
+            OUT_DIR.mkdir(parents=True, exist_ok=True)
+            _ov = OUT_DIR / f"das_instr_{_safe_name(str(species).upper())}_{float(wn_center):g}cm-1_xlist_overlay.png"
+            ts.plot_multi_x(str(_ov), [xi * 1e6 for xi in _xs],
+                            [s["alphaL_cyc"] for s in _samples], _samples[0]["nu_axis"],
+                            r"波数 (cm$^{-1}$)", r"吸收光学厚度 $\alpha L$",
+                            f"{str(species).upper()} 多浓度吸收谱 (αL vs ν)")
+            out["png_overlay"] = str(_ov)
     out["fidelity"] = _fidelity_digest()
     out["interaction"], out["next_required_actions"] = _interaction_block(out, "das", session_id)
     if save_png:
@@ -1720,7 +1744,8 @@ _INSTR_KEYS_WMS = _INSTR_KEYS + _WMS_ONLY_KEYS
 
 def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
                      seed=0, session_id="default", auto_laser=True, save_png=False,
-                     setup=None, laser=None, pd=None, daq=None, optics=None, x_list=None, **kw):
+                     return_xy=False, x_list=None,
+                     setup=None, laser=None, pd=None, daq=None, optics=None, **kw):
     """WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相（2f/1f）。
 
     调制幅值默认按**最优调制系数 m≈2.2** 自动优化（2f 峰值最大处）。
@@ -1776,7 +1801,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
         r = ts.simulate_wms_instrument(species, wn_center=float(wn_center),
                                        T=float(scene["T"]), P=float(scene["P"]),
                                        x=float(scene["x"]), L_cm=float(scene["L_cm"]),
-                                       seed=seed, **inst)
+                                       seed=seed, return_xy=bool(return_xy), **inst)
     m = r["meta"]
     cfg = m["cfg"]
     _dark_note = _partial_dark_note(cfg)     # 暗区披露（allow_partial_dark 时才可能非空）
@@ -1929,6 +1954,16 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                     "sensitivity_k": rr["meta"]["sensitivity_k"]}
         out["multi_conc"] = _build_multi_conc(
             _xs, _samples, ["S2f_norm_peak", "alpha_L_peak", "sensitivity_k"], _wms_metrics)
+        if save_png:                                   # 多浓度同图：叠加归一化 2f/1f（含有效区着色）
+            OUT_DIR.mkdir(parents=True, exist_ok=True)
+            _ov = OUT_DIR / f"wms_instr_{_safe_name(str(species).upper())}_{float(wn_center):g}cm-1_xlist_overlay.png"
+            ts.plot_multi_x(str(_ov), [xi * 1e6 for xi in _xs],
+                            [np.abs(s["S2f_norm_cyc"]) for s in _samples],
+                            _samples[0]["nu_axis"],
+                            [s["valid_mask"] for s in _samples],
+                            r"波数 (cm$^{-1}$)", "归一化 2f/1f (a.u.)",
+                            f"{str(species).upper()} 多浓度 WMS 2f/1f")
+            out["png_overlay"] = str(_ov)
     out["fidelity"] = _fidelity_digest()
     out["interaction"], out["next_required_actions"] = _interaction_block(out, "wms", session_id)
     if save_png:
@@ -1937,6 +1972,11 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
         with _quiet():
             ts.plot_wms_instrument(r, png)
         out["png"] = str(png)
+    if return_xy and "X1f_c" in r:                  # BUG-D 修复：透出锁相正交 X/Y 分量
+        out["wms_raw_xy"] = {k: r[k] for k in ("X1f_c", "Y1f_c", "X2f_c", "Y2f_c",
+                                               "X1f_bg_c", "Y1f_bg_c", "X2f_bg_c", "Y2f_bg_c")}
+        out["wms_raw_xy_note"] = ("锁相正交分量（信号支路 X/Y 与无吸收参考谱 X/Y_bg），"
+                                  "是背景扣除的输入：2f/1f 复减 = X2f_c/X1f_c − X2f_bg_c/X1f_bg_c。")
     return out
 
 
@@ -2166,7 +2206,8 @@ TOOLS = [
                                     "description": "多浓度扫描：摩尔分数列表 (0,1]，如 [1e-4,1e-3,1e-2]，与 x 二选一；"
                                                    "开启后返回 multi_conc 扫描曲线 + 线性/饱和防呆诊断"
                                                    "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
-                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"},
+                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"
+                                                   "save_png=true 时额外输出 png_overlay（多浓度同图，兼容性操作，用于混合气/标定对照）。"},
                          "L": {"type": "number", "description": "光程 cm；缺省=会话已确认或 30"},
                          "session_id": {"type": "string", "description": "会话标识，默认 default（复用 tdlas_session 已确认工况）"},
                          "a": {"type": "number", "description": "调制深度 cm^-1，默认 0.1"},
@@ -2195,7 +2236,8 @@ TOOLS = [
                                     "description": "多浓度扫描：摩尔分数列表 (0,1]，如 [1e-4,1e-3,1e-2]，与 x 二选一；"
                                                    "开启后返回 multi_conc 扫描曲线 + 线性/饱和防呆诊断"
                                                    "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
-                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"},
+                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"
+                                                   "save_png=true 时额外输出 png_overlay（多浓度同图，兼容性操作，用于混合气/标定对照）。"},
                          "L": {"type": "number", "description": "光程 cm，默认 50（0.5 m）"},
                          "span": {"type": "number", "description": "扫描半宽 cm^-1，默认 0.8"},
                          "fscan": {"type": "number", "description": "三角波频率 Hz，默认 100"},
@@ -2232,7 +2274,8 @@ TOOLS = [
                                     "description": "多浓度扫描：摩尔分数列表 (0,1]，如 [1e-4,1e-3,1e-2]，与 x 二选一；"
                                                    "开启后返回 multi_conc 扫描曲线 + 线性/饱和防呆诊断"
                                                    "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
-                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"},
+                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"
+                                                   "save_png=true 时额外输出 png_overlay（多浓度同图，兼容性操作，用于混合气/标定对照）。"},
                          "L_cm": {"type": "number", "description": "光程 cm，默认 50"},
                          "scan_span_cm": {"type": "number", "description": "三角波扫描半宽 cm⁻¹，默认 1.5（amp_V 由它自动反算，一般无需手填）"},
                          "amp_V": {"type": "number", "description": "三角波幅值 V（**通常无需手填**：由 wn_center+scan_span_cm 自动反算；需固定电压时覆盖）"},
@@ -2305,7 +2348,12 @@ TOOLS = [
                                     "description": "多浓度扫描：摩尔分数列表 (0,1]，如 [1e-4,1e-3,1e-2]，与 x 二选一；"
                                                    "开启后返回 multi_conc 扫描曲线 + 线性/饱和防呆诊断"
                                                    "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
-                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"},
+                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"
+                                                   "save_png=true 时额外输出 png_overlay（多浓度同图，兼容性操作，用于混合气/标定对照）。"},
+                         "return_xy": {"type": "boolean",
+                                       "description": "是否返回锁相正交分量 X/Y（信号支路 X1f_c/Y1f_c/X2f_c/Y2f_c "
+                                                      "与无吸收参考谱 X1f_bg_c/…）。默认 false：每次返回多 8 条等长数组，"
+                                                      "会显著增大返回体。需自行做 2f/1f 复减或诊断 RAM/AM 基线时再开。"},
                          "L_cm": {"type": "number", "description": "光程 cm，默认 50"},
                          "scan_span_cm": {"type": "number", "description": "三角波扫描半宽 cm⁻¹，默认 1.5（amp_V 由它自动反算，一般无需手填）"},
                          "mod_freq_Hz": {"type": "number", "description": "正弦调制频率 Hz，默认 30000"},

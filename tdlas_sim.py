@@ -1368,7 +1368,7 @@ def plot_das_instrument(r, out_png, n_show_periods=2):
 
 def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAULTS["wn_center"],
                             T=GAS_DEFAULTS["T"], P=GAS_DEFAULTS["P"], x=GAS_DEFAULTS["x"],
-                            L_cm=GAS_DEFAULTS["L_cm"], seed=None, **kw):
+                            L_cm=GAS_DEFAULTS["L_cm"], seed=None, return_xy=False, **kw):
     """WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相。
 
     与 DAS 的差别：驱动电压叠加**高频正弦调制** fm，探测器信号被编码到 fm 及其谐波，
@@ -1721,6 +1721,14 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
                         "R": cfg.get("fringe_R"), "phase_rad": cfg.get("fringe_phase_rad"),
                         "drift_frac": cfg.get("fringe_drift_frac")} if _fr else {"enabled": False}),
             "n_lines_in_window": info["n_lines_in_window"], "table": info["table"], "alpha_context": info.get("alpha_context")}
+    # ★ BUG-D 修复：锁相已算出正交 X/Y 复分量（背景扣除的输入），但此前未返回，
+    #   导致用户拿不到 1f/2f 的原始同相/正交分量。默认关（每次返回多 8 条等长数组，
+    #   会显著增大 MCP 返回体），按需开 return_xy=True 才透出。
+    _xy_out = {}
+    if return_xy:
+        _xy_out = {"X1f_c": X1f_c, "Y1f_c": Y1f_c, "X2f_c": X2f_c, "Y2f_c": Y2f_c,
+                   "X1f_bg_c": X1f_bg_c, "Y1f_bg_c": Y1f_bg_c,
+                   "X2f_bg_c": X2f_bg_c, "Y2f_bg_c": Y2f_bg_c}
     return {"t": t, "v_drive": v_drive, "v_scan": v_scan, "v_mod": v_mod_sig * mod_amp_V,
             "nu_laser": nu_laser, "p_laser": p_laser, "p_opt": p_opt, "v_pd": v_pd,
             "v_adc": v_adc, "S1f": S1f, "S2f": S2f, "S2f1f": S2f1f,
@@ -1729,7 +1737,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             "v_adc_cyc": v_cyc, "v_drive_cyc": v_drive[idx],
             "alphaL_cyc": alphaL_cyc, "offband_mask": off, "valid_mask": valid,
             "das_cyc": das_cyc, "v_das_cyc": v_das_cyc,
-            "t_cyc": t[idx], "n_per": n_sel, "edge": edge, "meta": meta}
+            "t_cyc": t[idx], "n_per": n_sel, "edge": edge, "meta": meta, **_xy_out}
 
 
 def measurement_uncertainty(species, wn_center, T, P, x, L_cm, seed=0, n_repeats=5,
@@ -2149,6 +2157,46 @@ def plot(r, out_png):
         a_.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(out_png, dpi=150)
+    return out_png
+
+
+def plot_multi_x(out_png, ppm, curves, x, xlabel, ylabel, title, valid=None):
+    """多浓度同图（兼容性操作）：同一物种不同浓度的一条响应曲线叠加到一张图。
+
+    用于「多浓度标定曲线 / 混合气对照」——把各浓度（或各组分）的谱曲线画在同一坐标轴，
+    共享横轴 x（波数 / 扫描波数）等长 curves。valid 为可选的有效区掩码列表，
+    用于把剔除区画成灰虚线（与 plot_wms_instrument 同源画法）。
+    ppm: 摩尔分数 ppm（图例标签）；curves: list[np.ndarray]。
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    use_cjk_font(matplotlib)
+    n = len(curves)
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    cols = plt.cm.viridis(np.linspace(0.08, 0.92, max(n, 2)))
+    for i, (c, p) in enumerate(zip(curves, ppm)):
+        c = np.asarray(c)
+        col = cols[i]
+        if p >= 1e-3:
+            lab = f"{p:.3g} ppm"
+        elif p >= 1e-6:
+            lab = f"{p:.2e} ppm"
+        else:
+            lab = f"{p:.1e} ppm"
+        ax.plot(x, c, color=col, lw=1.3, label=lab)
+        if valid is not None and valid[i] is not None:
+            vmask = np.asarray(valid[i], dtype=bool)
+            if (~vmask).any():
+                ax.plot(x[~vmask], c[~vmask], ":", color="0.6", lw=1.0)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(title="摩尔分数 x", fontsize=9, loc="best")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=140)
+    plt.close(fig)
     return out_png
 
 
