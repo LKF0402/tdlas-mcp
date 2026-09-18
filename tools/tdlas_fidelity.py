@@ -260,7 +260,8 @@ def audit_parameters():
             fringe_drift_frac=SENT, mod_freq_Hz=SENT, mod_amp_V=SENT, m_opt=SENT,
             lockin_avg=SENT, lockin_stages=SENT, drift_frac=SENT, flicker_frac=SENT,
             background_subtract=False, trim_frac=SENT, edge="rising", am_i0=SENT,
-            am_i2=SENT, am_psi1=SENT, am_psi2=SENT, physical_noise=False, allow_partial_dark=True)),
+            am_i2=SENT, am_psi1=SENT, am_psi2=SENT, norm_lock="2f/I0",
+            physical_noise=False, allow_partial_dark=True)),
         ("tdlas_das_instrument", "simulate_das_instrument", dict(
             species="CH4", wn_center=2968.5, edge="rising", fit_order=3, fit_frac=0.3,
             scan_span_cm=SENT, amp_V=SENT, freq_Hz=SENT, offset_V=SENT, phase_deg=SENT,

@@ -1577,7 +1577,7 @@ def plot_das_instrument(r, out_png, n_show_periods=2):
 
 def wms_normalize(X1f_c, Y1f_c, X2f_c, Y2f_c, X1f_bg_c, Y1f_bg_c, X2f_bg_c, Y2f_bg_c,
                   S1f_cyc, v_cyc, alphaL_cyc, valid, trim_frac, bg_subtracted,
-                  n_sel=None):
+                  n_sel=None, norm_lock=None):
     """第 8 级：**归一化**（纯函数，可单测）—— 2f/1f 与退化 2f/I0。
 
     为什么单独成函数：这里承载的是整个 WMS 定量链条里最要紧的物理判据，
@@ -1628,8 +1628,17 @@ def wms_normalize(X1f_c, Y1f_c, X2f_c, Y2f_c, X1f_bg_c, Y1f_bg_c, X2f_bg_c, Y2f_
     abs1 = np.abs(S1f_cyc[valid]) if valid.any() else np.array([0.0])
     onef_min, onef_med = float(np.min(abs1)), float(np.median(abs1))
     onef_valid = bool(pk_1f > 0 and off_1f <= 0.30 * pk_1f)
-    S2f_norm = S2f_1f if onef_valid else S2f_I0
-    norm_method = "2f/1f" if onef_valid else "2f/I0（PD 非吸收区光强均值）"
+    # ★ 多浓度对比必须**锁定同一种归一化**：判据本身带随机性（噪声下一次跑可能
+    #   onef_valid 翻转），各浓度各自判 → 一个用 2f/1f、另一个用 2f/I0，两条曲线
+    #   量级差两个数量级，叠加图直接失效。故允许调用方强制方法（norm_lock）。
+    _lock = str(norm_lock).strip().lower() if norm_lock else ""
+    if _lock.startswith("2f/1f"):
+        S2f_norm, norm_method = S2f_1f, "2f/1f"
+    elif _lock.startswith("2f/i0"):
+        S2f_norm, norm_method = S2f_I0, "2f/I0（PD 非吸收区光强均值）"
+    else:
+        S2f_norm = S2f_1f if onef_valid else S2f_I0
+        norm_method = "2f/1f" if onef_valid else "2f/I0（PD 非吸收区光强均值）"
     if not bg_subtracted:
         norm_method += "（未背景扣除）"
     # ⚠ 必须把**实际使用的 valid** 一并返回：
@@ -1865,7 +1874,8 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
      onef_min, onef_med, I0_pd, off, valid) = wms_normalize(
         X1f_c, Y1f_c, X2f_c, Y2f_c, X1f_bg_c, Y1f_bg_c, X2f_bg_c, Y2f_bg_c,
         S1f_cyc, v_cyc, alphaL_cyc, valid,
-        float(cfg["trim_frac"]), _bg_sub)
+        float(cfg["trim_frac"]), _bg_sub,
+        norm_lock=cfg.get("norm_lock"))
     bg_subtracted = _bg_sub
     S2f1f = S2f_1f                     # 保留原名以向后兼容（始终输出，供用户自行判断）
 

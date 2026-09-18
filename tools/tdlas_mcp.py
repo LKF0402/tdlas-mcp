@@ -2238,7 +2238,8 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
 # 契约测试 tools/contract_check.py 会做 schema↔透传键的双向核对，防止再次漂移。
 _WMS_ONLY_KEYS = ("mod_freq_Hz", "mod_amp_V", "mod_phase_deg", "m_opt", "lockin_avg",
                   "lockin_stages", "drift_frac", "flicker_frac", "background_subtract",
-                  "edge", "trim_frac", "am_i0", "am_i2", "am_psi1", "am_psi2")
+                  "edge", "trim_frac", "am_i0", "am_i2", "am_psi1", "am_psi2",
+                  "norm_lock")
 _INSTR_KEYS_WMS = _INSTR_KEYS + _WMS_ONLY_KEYS
 
 
@@ -2476,6 +2477,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
         #   故自适应只在基准浓度跑一次，其余浓度复用它的 m（与 measurement_uncertainty
         #   的"重复工况复用首次 m"同一手法）。用户显式给了 m_opt / mod_amp_V 时不介入。
         _mod_locked = None
+        _norm_locked = None
         _inst_lock = dict(inst)
         if inst.get("mod_amp_V") is None and str(inst.get("m_opt", "auto")).strip().lower() == "auto":
             try:
@@ -2483,6 +2485,13 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                 _inst_lock["m_opt"] = _mod_locked
             except Exception:                              # noqa: BLE001
                 _mod_locked = None
+        # 归一化方法同样要锁定：2f/1f 是否可用靠"非吸收区泄漏 ≤30% 峰值"判，噪声下
+        # 这条判据会随浓度翻转 → 一个浓度 2f/1f、另一个 2f/I0，量级差两个数量级，
+        # 叠加图作废。故统一用基准浓度判出来的方法（用户显式给 norm_lock 时不介入）。
+        if inst.get("norm_lock") is None:
+            _nm0 = str(r["meta"].get("norm_method") or "")
+            _norm_locked = "2f/1f" if _nm0.startswith("2f/1f") else "2f/I0"
+            _inst_lock["norm_lock"] = _norm_locked
         _samples = [r] + [
             ts.simulate_wms_instrument(species, wn_center=float(wn_center),
                                        T=float(scene["T"]), P=float(scene["P"]),
@@ -2508,6 +2517,14 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
             out["warnings"].append(
                 f"多浓度已锁定调制系数 m={_mod_locked:g}（自适应只在基准浓度跑一次），"
                 f"保证各浓度幅值可比")
+        if _norm_locked is not None:
+            out["multi_conc"]["normalization_locked"] = {
+                "method": _norm_locked,
+                "note": "多浓度共用同一归一化方法（由基准浓度判定后锁定）：2f/1f 是否可用靠"
+                        "「非吸收区泄漏 ≤30% 峰值」判，噪声下该判据可能随浓度翻转，"
+                        "不锁定会出现一个浓度 2f/1f、另一个 2f/I0（量级差两个数量级），叠加图作废"}
+            out["warnings"].append(
+                f"多浓度已锁定归一化方法 = {_norm_locked}（各浓度统一，保证纵轴可比）")
         if save_png:                                   # 多浓度同图：叠加归一化 2f/1f（含有效区着色）
             OUT_DIR.mkdir(parents=True, exist_ok=True)
             _ov = OUT_DIR / f"wms_instr_{_safe_name(str(species).upper())}_{float(wn_center):g}cm-1_xlist_overlay.png"
@@ -3020,6 +3037,9 @@ TOOLS = [
                                                                   "仅供诊断；用于浓度反演/检测限结论须传 true。开启后返回值会标注已扣除"},
                          "trim_frac": {"type": "number",
                                        "description": "剔除扫描两端比例，默认 0.12（三角波转折点高频谐波会泄漏进 2f）"},
+                         "norm_lock": {"type": "string", "enum": ["2f/1f", "2f/I0"],
+                                       "description": "强制归一化方法（跳过自动判定）：'2f/1f' 或 '2f/I0'。"
+                                                      "多浓度扫描时工具会自动锁成基准浓度的方法，用户显式给则尊重其选择"},
                          "edge": {"type": "string",
                                   "description": "扫描方向 rising/falling/both，默认 rising（避免往返重叠）"},
                          "amp_V": {"type": "number", "description": "三角波幅值 V（**通常无需手填**：由 wn_center+scan_span_cm 自动反算）"},

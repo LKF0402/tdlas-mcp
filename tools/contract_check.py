@@ -747,6 +747,37 @@ check("只在用户没给 m_opt / mod_amp_V 时才锁定（尊重显式约束）
       and 'str(inst.get("m_opt", "auto")).strip().lower() == "auto"' in _tw_src)
 check("返回值披露 modulation_locked（调制已锁定）",
       "modulation_locked" in _tw_src)
+# 归一化方法也必须锁定：噪声下"2f/1f 是否可用"的判据会随浓度翻转 → 量级差两个数量级
+check("多浓度锁定归一化方法（norm_lock）",
+      '_inst_lock["norm_lock"] = _norm_locked' in _tw_src)
+check("返回值披露 normalization_locked", "normalization_locked" in _tw_src)
+check("norm_lock 进了透传白名单（否则 schema 声明了却接不上）",
+      "norm_lock" in M._WMS_ONLY_KEYS)
+try:
+    import numpy as _np2
+
+    def _norm_case(lock):
+        _n = 120
+        _z = _np2.zeros(_n)
+        _s = _np2.zeros(_n); _s[50:70] = 1.0
+        _al = _np2.zeros(_n); _al[50:70] = 1.0
+        return ts.wms_normalize(_np2.ones(_n), _z, _s, _z, _np2.ones(_n), _z, _z, _z,
+                                _np2.ones(_n), _np2.full(_n, 2.0), _al,
+                                _np2.ones(_n, dtype=bool), 0.0, False, norm_lock=lock)
+
+    _a = _norm_case("2f/1f")
+    _b = _norm_case("2f/I0")
+    check("norm_lock='2f/1f' 强制走 2f/1f（跳过自动判定）",
+          _a[3].startswith("2f/1f") and abs(float(_np2.max(_a[2])) - 1.0) < 1e-9,
+          f"-> {_a[3]}, max={float(_np2.max(_a[2])):.6g}")
+    check("norm_lock='2f/I0' 强制走 2f/I0 且真的除以 I0",
+          _b[3].startswith("2f/I0") and abs(float(_np2.max(_b[2])) - 0.5) < 1e-9,
+          f"-> {_b[3]}, max={float(_np2.max(_b[2])):.6g}")
+    _c = _norm_case(None)
+    check("不给 norm_lock 时仍走自动判定（向后兼容）", _c[3].startswith("2f/1f"),
+          f"-> {_c[3]}")
+except Exception as e:                                  # noqa: BLE001
+    check("norm_lock 可离线实测", False, f"-> {type(e).__name__}: {e}")
 try:
     import numpy as _np
     import matplotlib
