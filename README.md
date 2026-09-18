@@ -9,7 +9,7 @@ DAQ → 激光 → 光路 → PD → ADC → 数字锁相 · 自然语言驱动<
 <img src="https://img.shields.io/badge/MCP-stdio%20HTTP-6B8FD4" alt="MCP">
 <img src="https://img.shields.io/badge/HITRAN-HAPI%201.x-4C8C4A" alt="HITRAN">
 <img src="https://github.com/LKF0402/tdlas-mcp/actions/workflows/ci.yml/badge.svg" alt="CI">
-<img src="https://img.shields.io/badge/release-v0.1.0-blue" alt="Release">
+<img src="https://img.shields.io/badge/release-v0.2.0-blue" alt="Release">
 <img src="https://img.shields.io/badge/license-GPLv3-green" alt="License">
 <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="Platform">
 <img src="https://img.shields.io/github/stars/LKF0402/tdlas-mcp?style=social" alt="Stars">

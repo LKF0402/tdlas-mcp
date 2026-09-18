@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-09-19
+
 ### push 前四项收尾（fail-closed / 凭据 / 来源 / 反演）
 - **fail-closed（高）**：αL 超出模型自述适用区 [1e-5, 0.1] 达 **≥10 倍**（即 >1.0）改为 **fail**；
   此前 αL=3.3e3（饱和 4 个量级）只给 warn 且 `conclusion_allowed=True`——与 VALIDATION.md
