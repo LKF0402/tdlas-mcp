@@ -728,5 +728,81 @@ if _decl:
     check("每个声明的契约块都有生产者", not _undeclared,
           f"-> 缺生产者 {_undeclared}" if _undeclared else "")
 
+# ────────────────── 11. 标准六子图的多浓度同图 ──────────────────
+# 为什么：此前 x_list 只额外出一张 png_overlay，主图仍是单浓度——用户要"多浓度对比"、
+#         拿到的却是一张看不出浓度差异的六子图。这里把"②~⑤ 面板真的叠了全部浓度"
+#         钉成硬断言：源码证据（入口 + 统一纵轴 + MCP 传参）+ 合成数据实测（离线，无需 HITRAN）。
+print("\n=== 11. 标准六子图多浓度同图 ===")
+_pw_src = inspect.getsource(ts.plot_wms_instrument)
+check("plot_wms_instrument 暴露 multi 入口（多浓度叠加）", "multi=None" in _pw_src)
+check("多浓度纵轴按全部浓度统一（_ylim_multi，防低浓度被压平）", "_ylim_multi(" in _pw_src)
+check("MCP 层在 x_list 时把全部样本传给主图",
+      "multi=_multi_draw" in inspect.getsource(M.t_wms_instrument))
+try:
+    import numpy as _np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.figure as _mfig
+
+    def _synth(scale):
+        _n = 600
+        _nu = _np.linspace(2966.0, 2970.0, _n)
+        _v = _np.ones(_n, dtype=bool)
+        _v[:60] = False
+        _v[-60:] = False
+        _e = _np.exp(-((_nu - 2968.5) ** 2) / 0.02) * scale
+        return dict(
+            meta=dict(species="CH4", wn_center=2968.0, x=1e-5 * scale, L_cm=100.0,
+                      mod_coeff_m=1.2, norm_method="2f/1f", mod_freq_Hz=30000.0,
+                      fscan_Hz=100.0, onef_valid=True, bg_subtracted=True,
+                      I0_pd_V=4.9, n_trim=60),
+            nu_axis=_nu, offband_mask=_np.zeros(_n, dtype=bool), valid_mask=_v, n_per=_n,
+            t_cyc=_np.linspace(0, 1e-2, _n), v_drive_cyc=_np.linspace(2.4, 3.8, _n),
+            v_das_cyc=4.5 - 0.2 * _e, das_cyc=_e, alphaL_cyc=_e * 0.99,
+            S1f_cyc=0.05 * _e, S2f_cyc=0.03 * _e, S2f_norm_cyc=0.12 * _e)
+
+    _figs = []
+    _orig_sf = _mfig.Figure.savefig
+
+    def _spy(self, *a, **k):
+        _figs.append(self)
+        return _orig_sf(self, *a, **k)
+
+    _mfig.Figure.savefig = _spy
+    try:
+        _multi3 = [(10.0, _synth(1.0)), (20.0, _synth(2.0)), (30.0, _synth(3.0))]
+        with tempfile.TemporaryDirectory() as _td:
+            ts.plot_wms_instrument(_multi3[0][1], os.path.join(_td, "m.png"), multi=_multi3)
+    finally:
+        _mfig.Figure.savefig = _orig_sf
+    _fig = _figs[-1]
+    _bad_panel = []
+    for _i, _ax in enumerate(_fig.axes):
+        if _i == 0:                                    # ① 驱动电压：各浓度共用，必须单条
+            if len(_ax.get_lines()) != 1:
+                _bad_panel.append(_i)
+            continue
+        _n_ppm = sum(1 for _l in _ax.get_lines() if "ppm" in (_l.get_label() or ""))
+        _want = 4 if "DAS 吸光度" in _ax.get_title() else 3   # αL 面板多一条理论参考
+        if _n_ppm != _want:
+            _bad_panel.append(_i)
+    check("六子图 ②~⑤ 面板各叠加全部 3 个浓度", not _bad_panel, f"-> 异常面板 {_bad_panel}")
+    check("① 驱动电压面板不叠加（各浓度共用）", len(_fig.axes[0].get_lines()) == 1)
+    check("suptitle 列出各浓度（ppm 可核对）",
+          "10 ppm" in (_fig._suptitle.get_text() if _fig._suptitle else "")
+          and "30 ppm" in (_fig._suptitle.get_text() if _fig._suptitle else ""))
+    # 单浓度必须保持原画法（向后兼容）
+    _figs.clear()
+    _mfig.Figure.savefig = _spy
+    try:
+        with tempfile.TemporaryDirectory() as _td:
+            ts.plot_wms_instrument(_synth(1.0), os.path.join(_td, "s.png"))
+    finally:
+        _mfig.Figure.savefig = _orig_sf
+    check("单浓度路径保持原画法（无 ppm 图例）",
+          not any("ppm" in (_l.get_label() or "") for _l in _figs[-1].axes[5].get_lines()))
+except Exception as e:                                  # noqa: BLE001
+    check("多浓度同图可离线实测", False, f"-> {type(e).__name__}: {e}")
+
 print(f"\n===== 契约自检：{_OK} 通过 / {_BAD} 失败" + (f" / {_SKIPPED} 跳过（环境不支持）" if _SKIPPED else "") + " =====")
 raise SystemExit(1 if _BAD else 0)

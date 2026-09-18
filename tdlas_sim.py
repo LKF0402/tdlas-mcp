@@ -2430,13 +2430,26 @@ def use_cjk_font(matplotlib):
     return None
 
 
-def plot_wms_instrument(r, out_png, panels="all"):
+def _ppm_label(p):
+    """把摩尔分数（ppm 数）格式化成图例标签（与 plot_multi_x 同源）。"""
+    if p >= 1e-3:
+        return f"{p:.3g} ppm"
+    if p >= 1e-6:
+        return f"{p:.2e} ppm"
+    return f"{p:.1e} ppm"
+
+
+def plot_wms_instrument(r, out_png, panels="all", multi=None):
     """TDLAS 仪器链路标准图（3×2 六子图，统一格式）：
     ① 波长调制 → ② PD 原始信号(DAS 无调制) → DAS αL+理论 → ③ 1f → ④ 2f → ⑤ 归一化 2f。
 
     panels: 默认 "all"（标准 6 图，布局/外观与既有完全一致）；也可传子集标识列表
     ["drive","das","al","f1","f2","norm"] 只画所需面板（非 6 个时改竖排堆叠）。
     混合气时在 αL 面板（al）叠加各组分 αL 曲线（不新增图，保持出图规格不变）。
+
+    multi: 多浓度同图——list[(ppm: float, rr: dict)]，**含要叠加的全部浓度**（含基准 r）。
+    给出后 ②~⑤ 面板按浓度配色叠加（viridis + ppm 图例），纵轴按全部浓度的有效区统一
+    定幅；① 驱动电压各浓度共用故仍画一条。不传 = 原有单浓度画法（向后兼容）。
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -2446,23 +2459,59 @@ def plot_wms_instrument(r, out_png, panels="all"):
     m = r["meta"]
     nu, off, ok = r["nu_axis"], r["offband_mask"], m["onef_valid"]
     vd = r["valid_mask"]
+    # 多浓度叠加：multi=[(ppm, result)]；不足 2 个浓度则退化为原单浓度画法
+    multi = [it for it in (multi or []) if it and len(it) == 2]
+    if len(multi) < 2:
+        multi = None
+    _mtag = "（多浓度叠加）" if multi else ""
 
-    def seg(a_, y, color, label, lw=1.2, ls="-"):
+    def seg(a_, y, color, label, lw=1.2, ls="-", _nu=None, _vd=None, _ylim=True):
         """有效区实线 + 剔除区灰点线；y 轴范围只看有效区，避免剔除区伪影压扁曲线。
 
         注意：曲线本身可能有上万点，而画布只有几百像素，逐点连线会互相穿插成
         "乱麻"（绘图混叠）。这里做等间隔抽取，保证每像素至多 ~1 个点。
+
+        _nu/_vd：多浓度叠加时传该浓度自己的波数轴与有效区掩码（缺省用基准 r 的）；
+        _ylim=False：叠加时不逐条定幅，统一交给 `_ylim_multi`。
         """
-        stride = max(1, int(round(nu.size / 1200)))
+        nu_ = nu if _nu is None else _nu
+        vd_ = vd if _vd is None else _vd
+        stride = max(1, int(round(nu_.size / 1200)))
         sl = slice(None, None, stride)
-        a_.plot(nu[vd][sl], y[vd][sl], ls, color=color, lw=lw, label=label)
-        if (~vd).any():
-            a_.plot(nu[~vd][sl], y[~vd][sl], ":", color="0.6", lw=1.0)
-        yv = y[vd]
-        if yv.size:
+        a_.plot(nu_[vd_][sl], y[vd_][sl], ls, color=color, lw=lw, label=label)
+        if (~vd_).any():
+            a_.plot(nu_[~vd_][sl], y[~vd_][sl], ":", color="0.6", lw=1.0)
+        yv = y[vd_]
+        if _ylim and yv.size:
             lo, hi = min(float(np.min(yv)), 0.0), max(float(np.max(yv)), 0.0)
             pad = 0.08 * (hi - lo) or 1e-12
             a_.set_ylim(lo - pad, hi + pad)
+
+    def _ylim_multi(a_, items):
+        """多浓度叠加后按**全部**浓度的有效区统一纵轴范围。
+
+        逐条 seg() 会把 ylim 不断覆盖成最后一条曲线的范围，导致低浓度被压成平线；
+        这里汇总后再定幅，保证各浓度的相对大小真实可比。
+        """
+        lo = hi = 0.0
+        for y, vd_ in items:
+            yv = y[vd_]
+            if yv.size:
+                lo = min(lo, float(np.min(yv)))
+                hi = max(hi, float(np.max(yv)))
+        pad = 0.08 * (hi - lo) or 1e-12
+        a_.set_ylim(lo - pad, hi + pad)
+
+    def _multi_seg(a_, multi, key):
+        """多浓度叠加：按 viridis 配色把各浓度的同名曲线画进同一坐标轴。"""
+        cols = plt.cm.viridis(np.linspace(0.08, 0.92, len(multi)))
+        items = []
+        for (_p, _rr), _col in zip(multi, cols):
+            y = _rr[key]
+            seg(a_, y, _col, _ppm_label(_p), lw=1.1, _ylim=False,
+                _nu=_rr["nu_axis"], _vd=_rr["valid_mask"])
+            items.append((y, _rr["valid_mask"]))
+        _ylim_multi(a_, items)
 
     def _draw(key, a_):
         if key == "drive":
@@ -2472,35 +2521,57 @@ def plot_wms_instrument(r, out_png, panels="all"):
             a_.set_title(f"① 波长调制 V(t)   fm={m['mod_freq_Hz'] / 1e3:g} kHz, "
                          f"fscan={m['fscan_Hz']:g} Hz")
         elif key == "das":
-            seg(a_, r["v_das_cyc"], "C0", "PD 原始信号")
+            if multi:
+                _multi_seg(a_, multi, "v_das_cyc")
+            else:
+                seg(a_, r["v_das_cyc"], "C0", "PD 原始信号")
             a_.set_ylabel("PD 信号 (V)")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
-            a_.set_title("② 直接吸收 DAS（无调制）")
+            a_.set_title("② 直接吸收 DAS（无调制）" + _mtag)
         elif key == "al":
-            seg(a_, r["das_cyc"], "C0", "DAS αL（实测，-ln 提取）")
-            seg(a_, r["alphaL_cyc"], "C2", "HITRAN 理论 αL（虚线=数据库参考）", lw=1.2, ls="--")
             mix = r.get("alphaL_per_species")
-            if mix:                                   # 混合气：叠加各组分 αL
-                cols = plt.cm.viridis(np.linspace(0.1, 0.85, max(len(mix), 2)))
-                for _c, _p in zip(cols, mix):
-                    seg(a_, _p["alphaL"], _c, _p["label"], lw=0.9, ls="-.")
+            if multi:
+                _multi_seg(a_, multi, "das_cyc")
+                # 理论 αL 只画基准浓度一条作参考（各浓度理论值同形只差缩放，全画会糊）
+                _p0, _r0 = multi[0]
+                seg(a_, _r0["alphaL_cyc"], "0.35",
+                    f"HITRAN 理论 αL（{_ppm_label(_p0)}）", lw=1.0, ls="--", _ylim=False,
+                    _nu=_r0["nu_axis"], _vd=_r0["valid_mask"])
+                _ylim_multi(a_, [(y, _rr["valid_mask"]) for _p, _rr in multi
+                                 for y in (_rr["das_cyc"], _rr["alphaL_cyc"])])
+            else:
+                seg(a_, r["das_cyc"], "C0", "DAS αL（实测，-ln 提取）")
+                seg(a_, r["alphaL_cyc"], "C2", "HITRAN 理论 αL（虚线=数据库参考）", lw=1.2, ls="--")
+                if mix:                               # 混合气：叠加各组分 αL
+                    cols = plt.cm.viridis(np.linspace(0.1, 0.85, max(len(mix), 2)))
+                    for _c, _p in zip(cols, mix):
+                        seg(a_, _p["alphaL"], _c, _p["label"], lw=0.9, ls="-.")
             a_.axhline(0.0, color="k", lw=0.5, alpha=0.4)
             a_.set_ylabel(r"$\alpha L$")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
-            a_.set_title("DAS 吸光度 vs 数据库理论值" + ("（含混合气各组分）" if mix else ""))
+            a_.set_title("DAS 吸光度 vs 数据库理论值" + (_mtag if multi else
+                                                      ("（含混合气各组分）" if mix else "")))
         elif key == "f1":
-            seg(a_, r["S1f_cyc"], "C1", "1f")
+            if multi:
+                _multi_seg(a_, multi, "S1f_cyc")
+            else:
+                seg(a_, r["S1f_cyc"], "C1", "1f")
             a_.set_ylabel("1f (V)")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
-            a_.set_title("③ 一阶谐波 1f")
+            a_.set_title("③ 一阶谐波 1f" + _mtag)
         elif key == "f2":
-            seg(a_, r["S2f_cyc"], "C3", "2f")
+            if multi:
+                _multi_seg(a_, multi, "S2f_cyc")
+            else:
+                seg(a_, r["S2f_cyc"], "C3", "2f")
             a_.axhline(0.0, color="k", lw=0.5, alpha=0.4)
             a_.set_ylabel("2f (V)")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
-            a_.set_title("④ 二阶谐波 2f")
+            a_.set_title("④ 二阶谐波 2f" + _mtag)
         elif key == "norm":
-            if ok:
+            if multi:
+                _multi_seg(a_, multi, "S2f_norm_cyc")
+            elif ok:
                 label = "2f/1f" if m["bg_subtracted"] else "2f/1f（未扣背景）"
                 seg(a_, r["S2f_norm_cyc"], "C2", label, 1.6)
             else:
@@ -2508,7 +2579,7 @@ def plot_wms_instrument(r, out_png, panels="all"):
             a_.axhline(0.0, color="k", lw=0.5, alpha=0.4)
             a_.set_ylabel("归一化 2f (a.u.)")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
-            a_.set_title(f"⑤ 归一化：{m['norm_method']}")
+            a_.set_title(f"⑤ 归一化：{m['norm_method']}" + _mtag)
 
     _ALL = ["drive", "das", "al", "f1", "f2", "norm"]
     _SPECTRAL = {"das", "al", "f1", "f2", "norm"}
@@ -2544,9 +2615,11 @@ def plot_wms_instrument(r, out_png, panels="all"):
 
     for a_ in ax:
         a_.grid(alpha=0.3)
-        a_.legend(loc="upper right", fontsize=7)
+        a_.legend(loc="upper right", fontsize=6 if multi else 7)
+    _x_tag = ("/".join(_ppm_label(_p) for _p, _rr in multi) if multi
+              else f"{m['x']:g}")
     fig.suptitle(f"TDLAS 仪器链路 — {m['species']} @ {m['wn_center']:.3f} cm$^{{-1}}$   "
-                 f"x={m['x']}, L={m['L_cm']:g} cm, m={m['mod_coeff_m']:.2f}   "
+                 f"x={_x_tag}, L={m['L_cm']:g} cm, m={m['mod_coeff_m']:.2f}   "
                  f"归一化 = {m['norm_method']}", fontsize=11)
     fig.tight_layout()
     fig.savefig(out_png, dpi=150)

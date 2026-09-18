@@ -95,7 +95,9 @@ python tools/alpha_crossval.py            # α(ν) 独立交叉校验（与 HAPI
 | tdlas_guide | AI 交互协议、术语表与保真度台账 |
 | tdlas_selftest | 全链路自检 |
 
-> 四个仿真工具（及透传的 `tdlas_review`）共用一对可选项：`mixture`（混合气）与 `x_list`（单物种多浓度扫描，`save_png=true` 时另出 `png_overlay`）。两者**互斥**，且与单 `x` **二选一**。
+> 四个仿真工具（及透传的 `tdlas_review`）共用一对可选项：`mixture`（混合气）与 `x_list`（单物种多浓度扫描）。两者**互斥**，且与单 `x` **二选一**。
+>
+> `x_list` 时**标准 6 子图本身就按浓度叠加**：②~⑤ 面板（PD / αL / 1f / 2f / 归一化 2f）以 viridis 配色叠放各浓度并标 ppm，纵轴按全部浓度统一（低浓度不会被压平）；另有单用途的 `png_overlay` 对照图。
 
 ## 🌐 远程部署
 

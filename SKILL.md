@@ -69,7 +69,7 @@ description: TDLAS/WMS 光谱仿真 MCP 服务器。触发词：TDLAS、WMS、�
 | 用户意图 | 出什么图 / 传什么 |
 |---|---|
 | 默认、"画 WMS 图"、"给我 CH4 的图" | 标准 6 子图，单浓度 |
-| "多浓度对比 / 标定曲线" | `x_list=[...]` + `save_png=true` → 主图 **+ 附加 `png_overlay`**（横轴浓度，看线性/饱和） |
+| "多浓度对比 / 标定曲线" | `x_list=[...]` + `save_png=true` → **主图 ②~⑤ 面板即按 ppm 叠加**（纵轴按全部浓度统一）+ 附加 `png_overlay` 单用途对照 |
 | "混合气 / 含 X% A 和 Y% B" | `mixture="CH4:0.01,CO2:0.04"` → αL 面板自动叠加各组分，**不新增图** |
 | "只要相位匹配的 X 分量 / 非正交 / 单通道锁相" | `return_xy=true` → 从 `wms_raw_xy` 取 `X1f_c`/`X2f_c` 作图；**必须说明差异**：正交解调取 √(X²+Y²)（默认），单通道只取 X，对相位失配更敏感 |
 | "系统选型 / 光程要多少 / 检测限" | `tdlas_detection_limit_scan`（1×2：LOD vs 光程、LOD vs 参考浓度） |
@@ -85,7 +85,7 @@ description: TDLAS/WMS 光谱仿真 MCP 服务器。触发词：TDLAS、WMS、�
 | `tdlas_das_instrument` | 5×1 竖排，≈9.5×12 | 轴标签为**英文**，按图实际内容描述，别臆造中文标题 |
 | `tdlas_das_chain` | 4×1 竖排，≈9×10 | 横轴以时间(ms)为主 |
 | `tdlas_detection_limit_scan` | 1×2，≈14×6 | 左：LOD vs 光程；右：LOD vs 参考浓度 |
-| 多浓度 `x_list` + `save_png` | 附加图 `png_overlay` | **额外**输出，不替代主图 |
+| 多浓度 `x_list` + `save_png` | 主图 ②~⑤ 面板按 ppm 叠加 + 附加图 `png_overlay` | 主图即叠加；`png_overlay` 为单用途对照，额外输出 |
 
 **每条图都必须**：标注技术名、归一化方法、基线处理方式、线型含义；**1f 与 2f 不得同格**；剔除区（trim_frac 默认 12%）标红带，纵轴范围按有效区确定。
 

@@ -1029,7 +1029,7 @@ AI_INTERACTION_GUIDE = {
             "判断依据": "从用户话里取意图 → 选图型 → 选参数。**用户要什么就给什么，别把标准六图当唯一答案。**",
             "意图 → 图型/参数": {
                 "默认 / '给我 CH4 的图' / '画 WMS 图'": "标准 6 子图（panels 缺省 all），单浓度",
-                "'画多浓度 / 不同浓度对比 / 标定曲线'": "传 x_list=[...] + save_png=true → 主图 + **附加** png_overlay（横轴浓度，看线性/饱和）",
+                "'画多浓度 / 不同浓度对比 / 标定曲线'": "传 x_list=[...] + save_png=true → 主图 ②~⑤ 面板**按 ppm 叠加各浓度**（纵轴按全部浓度统一）+ 附加 png_overlay 单用途对照",
                 "'混合气 / 含 X% 甲烷和 Y% CO2'": "传 mixture='CH4:0.01,CO2:0.04' → αL 面板自动叠加各组分曲线，**不新增图**",
                 "'只要相位匹配的 X 分量 / 不正交 / 单通道锁相'": "传 return_xy=true，从 wms_raw_xy 取 X1f_c/X2f_c（相位匹配分量）作图；"
                                                         "**说明差异**：正交解调取 √(X²+Y²)（默认），单通道只取 X，后者对相位失配更敏感",
@@ -1075,10 +1075,12 @@ AI_INTERACTION_GUIDE = {
                              "LOD vs 参考浓度 x（横轴 参考浓度，弱吸收下应近似平线）"],
                 "用途": "系统选型：看加光程能把 LOD 降到多少",
             },
-            "⑤ 多浓度同图 png_overlay（附加图，不替代主图）": {
-                "何时": "传 x_list（多浓度）+ save_png=true 时**额外**输出",
-                "内容": "各浓度的代表曲线叠加，横轴浓度(ppm)，用于看响应线性/饱和",
-                "命名": "返回键为 png_overlay，与主图 png 并存",
+            "⑤ 多浓度同图（主图叠加 + 附加 png_overlay）": {
+                "何时": "传 x_list（多浓度）+ save_png=true",
+                "主图": "标准 6 子图的 ②~⑤ 面板按 viridis 配色叠加**全部浓度**，图例标 ppm；"
+                        "纵轴按全部浓度的有效区统一（低浓度不会被压成平线）；① 驱动电压共用仍单条",
+                "附加图": "png_overlay：单用途对照（归一化 2f/1f 一条曲线看线性/饱和），与主图 png 并存",
+                "命名": "主图 png + 附加 png_overlay",
             },
         },
         "线型约定（每张图都必须遵守）": "实线=有效数据；虚线=理论参考（如 HITRAN 理论 αL）；"
@@ -2498,8 +2500,10 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     if save_png:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         png = OUT_DIR / f"wms_instr_{_safe_name(str(species).upper())}_{float(wn_center):g}cm-1.png"
+        # 多浓度时标准 6 子图本身按浓度叠加（viridis + ppm 图例）；单浓度保持原样
+        _multi_draw = list(zip([xi * 1e6 for xi in _xs], _samples)) if _multi else None
         with _quiet():
-            ts.plot_wms_instrument(r, png)
+            ts.plot_wms_instrument(r, png, multi=_multi_draw)
         out["png"] = str(png)
     if return_xy and "X1f_c" in r:                  # BUG-D 修复：透出锁相正交 X/Y 分量
         # ⚠ 必须转 list：这些是 numpy ndarray，直接入返回体会在 JSON-RPC
