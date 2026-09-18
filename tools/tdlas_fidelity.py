@@ -169,11 +169,13 @@ EFFECTS = [
          params=["lockin_avg", "lockin_stages", "mod_freq_Hz"],
          limit="矩形窗 sinc 旁瓣抑制有限；级联级数越高抑制越好但会模糊线形"),
     dict(id="norm_2f1f", cat="signal", status="on",
-         title="归一化 2f/1f 与退化 2f/I0（含背景扣除）",
+         title="归一化 2f/1f 与退化 2f/I0（背景扣除默认关，需显式开启）",
          evidence=["def wms_calibration_free"],
          params=["background_subtract"],
          limit="1f 实际含吸收分量（默认工况约 50% AM），故 2f/1f 的"
-               "「1f∝光强」前提是近似的；k 对 RIN/AM 平衡敏感"),
+               "「1f∝光强」前提是近似的；k 对 RIN/AM 平衡敏感。"
+               "**background_subtract 默认 False**：默认出未扣 RAM 基线的原始谱（诊断口径），"
+               "做定量结论须显式开启"),
     dict(id="ram_am", cat="signal", status="opt",
          title="残余幅度调制 RAM（AM/FM 相位差）",
          evidence=["am_psi1", "am_psi2"],

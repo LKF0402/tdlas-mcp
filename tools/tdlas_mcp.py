@@ -1948,7 +1948,8 @@ _FRINGE_KEYS = ("fringe", "fringe_n", "fringe_d_cm", "fringe_R", "fringe_fsr",
 
 # 以下参数有明确默认值或自动反算，无需用户确认：
 #   amp_V / offset_V 由 wn_center + scan_span_cm 经 V-ν 关系反算；
-#   background_subtract 是诊断开关（默认 True，仅诊断原始基线时关闭）。
+#   background_subtract 是修正开关：默认 False（出原始谱，不替用户静默修正基线），
+#   需要定量结论时由用户显式开启。
 _NO_CONFIRM = {"amp_V", "offset_V", "background_subtract"}
 _SCENE_DEFAULTS = {"T": 296.0, "P": 1.01325, "x": 1e-3, "L_cm": 50.0,
                    "edge": "rising", "fit_order": 3, "fit_frac": 0.3}
@@ -2349,6 +2350,12 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            "adc": {"fs_Hz": m["fs"], "n_per_scan": r["n_per"], "bits": cfg["adc_bits"],
                    "v_range_V": cfg["v_range"], "lsb_V": m["lsb_V"]},
            "normalization": {"method": m["norm_method"], "background_subtracted": m["bg_subtracted"],
+                             "background_subtract_note": (
+                                 "已用无吸收参考谱（τ≡1）复减 RAM/AM 基线：2f/1f 可直接用于定量。"
+                                 if m["bg_subtracted"] else
+                                 "⚠ **未做背景扣除（默认）**：给出的是**未经修正的原始谱**——"
+                                 "2f/1f 仍含 L-I 非线性与 RAM 的基线。仅供诊断；要做浓度反演或检测限结论，"
+                                 "请传 background_subtract=true 复减无吸收参考谱，或自行扣除基线。"),
                              "onef_valid": m["onef_valid"],
                              "I0_pd_V": m["I0_pd_V"],
                              "offband_leak_1f": m["offband_leak_1f"],
@@ -2444,7 +2451,10 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                              "wn_ref/dν/dI，或用 tdlas_device 保存真实激光器后以 laser= 引用",
                                              "⑧ 给出任何定量结论时：按 tdlas_guide 的 fidelity_reporting 与其中的 "
                                              "fidelity 台账，说明**哪些效应已建模、哪些未实现**；"
-                                             "未实现项可能主导真实误差，点值≠带误差结果"],
+                                             "未实现项可能主导真实误差，点值≠带误差结果",
+                                             "⑨ 未做背景扣除（`normalization.background_subtracted=false`，**默认**）"
+                                             "时：必须说明给出的是**未经修正的原始谱**——2f/1f 仍含 L-I 非线性与 RAM 基线，"
+                                             "仅供诊断；要出浓度/检测限结论须先开 background_subtract 或自行扣除基线"],
                            "interaction_rule": "MCP 必须**多与用户交互**：主动告知以上 must_disclose 各项，"
                                                "并在解读结果前先向用户确认工况（物种/波段/T/P/浓度/光程）。"},
            "seed_used": m.get("seed_used"), "physical_noise": m.get("physical_noise", True),
@@ -2982,7 +2992,9 @@ TOOLS = [
                          "lockin_stages": {"type": "integer",
                                            "description": "低通级联级数，默认 2（sinc² 抑制旁瓣，非吸收区 2f 残留 4.1%→1.6%）"},
                          "background_subtract": {"type": "boolean",
-                                                   "description": "是否以无吸收参考谱扣除 RAM 2f 基线，默认 True；False 仅用于诊断原始基线"},
+                                                   "description": "是否以无吸收参考谱（τ≡1）复减 RAM/AM 基线。"
+                                                                  "**默认 False**：出未经修正的原始谱（2f/1f 含 L-I 非线性与 RAM 基线），"
+                                                                  "仅供诊断；用于浓度反演/检测限结论须传 true。开启后返回值会标注已扣除"},
                          "trim_frac": {"type": "number",
                                        "description": "剔除扫描两端比例，默认 0.12（三角波转折点高频谐波会泄漏进 2f）"},
                          "edge": {"type": "string",

@@ -321,7 +321,11 @@ def selftest():
           f"offset_V={c8['offset_V']:.4g} V（期望 {off_exp:.4g}）")
     assert abs(float(c8["amp_V"]) - amp_exp) < 1e-6, "amp_V 未按 scan_span_cm 反算"
     assert abs(float(c8["offset_V"]) - off_exp) < 1e-6, "offset_V 未按 wn_center 反算"
-    assert w["meta"].get("bg_subtracted") is True, "2f 未做背景扣除"
+    # 背景扣除默认关闭（出原始谱、不替用户静默修正基线）；开启后必须真的生效
+    assert w["meta"].get("bg_subtracted") is False, "默认应为未做背景扣除（原始基线口径）"
+    assert simulate_wms_instrument(mod_amp_V=0.1,
+                                   background_subtract=True)["meta"]["bg_subtracted"] is True, \
+        "显式开启 background_subtract 后应真的做了背景扣除"
 
     # 9) 越界 wn_center：选了不在此 DFB 调谐范围内的线 → 清晰报错（不静默给垃圾）
     try:
@@ -855,7 +859,10 @@ MOD_DEFAULTS = {
                              # （CH4 221 线最优≈1.25、C2H6 158 线≈1.8），可用 m_opt 调低以提升灵敏度。
     "lockin_avg": 1,         # 锁相滑动平均的调制周期数（>1 会模糊线形且不降残留）
     "lockin_stages": 2,      # 低通级联级数：2 级把残留从 4.1% 降到 1.6%（再高收益小）
-    "background_subtract": True,  # 以无吸收参考谱复减 RAM 2f 基线；关闭仅用于诊断原始基线
+    # ⚠ 默认 **关闭**：背景扣除是一次"替用户修正基线"的静默处理，默认关 = 出的是原始谱，
+    #   由用户自己决定要不要扣。开启时用无吸收参考谱（τ≡1）复减 RAM/AM 基线。
+    #   关闭时 2f/1f 保留 L-I 非线性与 RAM 的物理基线，仅供诊断，不用于浓度反演/LOD。
+    "background_subtract": False,
     "trim_frac": 0.12,       # 剔除扫描两端比例：三角波转折点导数不连续，
                             # 其高频谐波会泄漏进 2f，必须丢弃（WMS 标准做法）
 }
@@ -1851,7 +1858,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     #      且扫描转折处 1f→0，相除会把伪影放大成假峰 → 必须检测并弃用。
     #    · 退化方案：I0 = 非吸收区 PD 信号平均，2f/I0 与光强无关且形状稳定（标准 DC 归一化）。
     # ⑧ 归一化（抽为纯函数 wms_normalize，可单测）
-    _bg_sub = bool(cfg.get("background_subtract", True))
+    _bg_sub = bool(cfg.get("background_subtract", False))
     valid = np.ones(n_sel, dtype=bool)      # 有效区掩膜由 wms_normalize 内按 trim_frac 置位
     n_keep = int(round(float(cfg["trim_frac"]) * n_sel))   # 供 meta 上报剔除点数
     (S2f_1f, S2f_I0, S2f_norm, norm_method, onef_valid, pk_1f, off_1f,
@@ -1954,8 +1961,9 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         warnings.append("已做 **背景扣除**：用无吸收参考谱（τ≡1，含相同 RAM/AM 与慢漂移，无白/粉红噪声）"
                         "复减 2f/1f 与 2f/I0 的 RAM 基线（L-I 二阶非线性残留）")
     else:
-        warnings.append("未做背景扣除：归一化 2f 保留 L-I 非线性与 RAM 的物理基线；"
-                        "仅供诊断，不应用于浓度反演或检测限结论")
+        warnings.append("⚠ **未做背景扣除（默认）**：归一化 2f 保留 L-I 非线性与 RAM 的物理基线——"
+                        "这是**未经修正的原始谱**，仅供诊断；用于浓度反演或检测限结论前，"
+                        "请设 background_subtract=true 复减无吸收参考谱（或自行扣除基线）")
 
     # 免标定灵敏度：k = 归一化 2f 峰值 ÷ 浓度（弱吸收下与浓度无关）。
     # 这是**完整链路**的 k，供 tdlas_invert 复用；勿与解析版 simulate() 混用（两路 S2f/1f 差 ~6×）。

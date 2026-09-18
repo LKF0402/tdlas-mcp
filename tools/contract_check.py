@@ -804,5 +804,25 @@ try:
 except Exception as e:                                  # noqa: BLE001
     check("多浓度同图可离线实测", False, f"-> {type(e).__name__}: {e}")
 
+# ────────────────── 12. 背景扣除默认关闭 + 必须显式披露 ──────────────────
+# 为什么：背景扣除是"替用户修正基线"的静默处理。默认关 = 出原始谱，由用户决定要不要扣；
+#         但关了就必须让用户看到（否则等于另一种静默）。这里把"默认 False"与
+#         "四路披露都还在"钉成断言，防将来有人改回 True 或把披露删掉。
+print("\n=== 12. 背景扣除默认关闭与披露 ===")
+check("引擎默认 background_subtract=False（出原始谱）",
+      ts.MOD_DEFAULTS.get("background_subtract") is False)
+check("归一化处兜底默认与 GAS_DEFAULTS 一致（False）",
+      'cfg.get("background_subtract", False)' in inspect.getsource(ts.simulate_wms_instrument))
+_wms_mcp_src = inspect.getsource(M.t_wms_instrument)
+check("返回值带机器可读披露 background_subtract_note",
+      "background_subtract_note" in _wms_mcp_src
+      and "未经修正的原始谱" in _wms_mcp_src)
+check("未做背景扣除时 validate 记 warn（用户看得见）",
+      "未背景扣除" in inspect.getsource(ts.validate_wms_result))
+check("未做背景扣除时 warnings 有醒目条目",
+      "未做背景扣除（默认）" in inspect.getsource(ts.simulate_wms_instrument))
+check("must_disclose 含第 ⑨ 项（背景扣除口径）",
+      "⑨" in _wms_mcp_src and "background_subtracted" in _wms_mcp_src)
+
 print(f"\n===== 契约自检：{_OK} 通过 / {_BAD} 失败" + (f" / {_SKIPPED} 跳过（环境不支持）" if _SKIPPED else "") + " =====")
 raise SystemExit(1 if _BAD else 0)
