@@ -204,6 +204,7 @@ NON_ENGINE_CHANNELS = {
     "session_id",                              # 会话态（跨会话记忆）
     "save_png",                                # 出图开关
     "auto_laser",                              # 目标波数越界时的自动重锚开关
+    "x_list",                                  # 多浓度扫描：MCP 层循环驱动，不进引擎（见 _resolve_x_list）
 }
 
 

@@ -995,10 +995,111 @@ def _common(species, wn0, T, P, x, L, a, i0, i2, psi1_pi, psi2_pi, span):
 
 # ───────────────────────── 工具 ─────────────────────────
 
+# ───────────────────────── 多浓度扫描 x_list（输入解析 + 防呆） ─────────────────────────
+_X_LIST_MAX = 64
+
+
+def _parse_number_list(v, name):
+    """接受 list[number] 或 '1e-4,1e-3' / '1e-4 1e-3' 字符串 → float 列表。
+
+    命令行与 MCP 文本参数常只能传字符串，故同时支持两种写法（与 detection_limit_scan 一致）。
+    """
+    if isinstance(v, (list, tuple)):
+        items = list(v)
+    elif isinstance(v, str):
+        items = [u.strip() for u in re.split(r"[,\s]+", v) if u.strip()]
+    else:
+        items = [v]
+    try:
+        return [float(u) for u in items]
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} 必须是数字列表或可解析的数字串，收到 {v!r}")
+
+
+def _resolve_x_list(x, x_list, default_x):
+    """把浓度输入归一化成「实际要计算的浓度列表」，并做防呆校验。
+
+    - 只给 x（或都不给用默认）：单浓度，返回 (False, [x_single], x_single)。
+    - 给 x_list：多浓度扫描，返回 (True, xs_升序去重, None)。
+    - 同时给 x 与 x_list：冲突，直接报错（二选一）。
+
+    防呆（防呆 = 不让错误输入静默跑出误导结果）：
+      · 空列表 / 非有限数 → 报错
+      · 超出摩尔分数定义域 (0, 1] → 报错（**不静默截断**，截断会掩盖前提已破）
+      · 长度超过 _X_LIST_MAX → 报错（防一次扫上千点把会话卡死）
+      · 自动去重（1e-12 相对容差）并升序，让返回的扫描曲线单调、好画
+    """
+    if x_list is None:
+        xv = default_x if x is None else float(x)
+        if not (0.0 < xv <= 1.0):
+            raise ValueError(f"摩尔分数 x 必须在 (0, 1]，收到 {xv!r}")
+        return False, [xv], xv
+    if x is not None:
+        raise ValueError("x 与 x_list 二选一，不要同时传（多浓度请用 x_list）")
+    xs = _parse_number_list(x_list, "x_list")
+    if not xs:
+        raise ValueError("x_list 不能为空")
+    if len(xs) > _X_LIST_MAX:
+        raise ValueError(f"x_list 长度 {len(xs)} 超过上限 {_X_LIST_MAX}，请缩减扫描点数")
+    bad = [v for v in xs if not (math.isfinite(v) and 0.0 < v <= 1.0)]
+    if bad:
+        raise ValueError(f"x_list 中每个浓度必须 ∈ (0, 1]（摩尔分数），非法值：{bad[:5]}")
+    # 去重（相对容差 1e-12）+ 升序
+    seen, uniq = [], []
+    for v in xs:
+        if not any(abs(v - u) <= 1e-12 * max(1.0, abs(u)) for u in seen):
+            seen.append(v)
+            uniq.append(v)
+    uniq.sort()
+    return True, uniq, None
+
+
+def _linearity_guard(xs, peak):
+    """防呆诊断：弱吸收下响应峰高应正比于 x；偏离线性即提示已进入饱和/非线性区，
+
+    用该区间做标定会得到错误斜率（标定曲线被压低）。以最小浓度为线性基准。
+    """
+    if len(xs) < 2:
+        return {"checked": False, "note": "单点无法判线性"}
+    if peak[0] <= 0:
+        return {"checked": False, "note": "基准峰高为 0，无法判线性"}
+    xref, pref = xs[0], peak[0]
+    ratios = [p / x / (pref / xref) for p, x in zip(peak, xs)]
+    tol = 0.10
+    dev = [i for i, r in enumerate(ratios) if abs(r - 1.0) > tol]
+    idx = dev[0] if dev else None
+    if idx is None:
+        return {"checked": True, "reference_x": xref,
+                "ratio_to_reference": ratios, "tolerance": tol,
+                "nonlinear_from_index": None, "nonlinear_from_ppm": None,
+                "note": "全扫描范围内响应对浓度近似线性（偏差 < 10%），可作线性标定"}
+    return {"checked": True, "reference_x": xref,
+            "ratio_to_reference": ratios, "tolerance": tol,
+            "nonlinear_from_index": idx, "nonlinear_from_ppm": xs[idx] * 1e6,
+            "note": (f"以最小浓度 {xref * 1e6:.3g} ppm 为线性基准；响应/浓度 比值在 "
+                     f"{xs[idx] * 1e6:.3g} ppm 处偏离 >{tol * 100:.0f}%，已进非线性区——"
+                     f"该点之后不宜做线性标定")}
+
+
+def _build_multi_conc(xs, samples, metric_names, metric_func):
+    """把多浓度扫描的引擎结果 samples（与 xs 对齐）汇总成 multi_conc 块。
+
+    metric_func(sample) → dict（键为 metric_names）；首项是「主响应」，用于线性判定/饱和防呆。
+    """
+    metrics = {k: [] for k in metric_names}
+    for s in samples:
+        m = metric_func(s)
+        for k in metric_names:
+            metrics[k].append(m[k])
+    prim = metric_names[0]
+    return {"enabled": True, "x_list": xs, "mole_ppm": [x * 1e6 for x in xs],
+            "response": metrics, "linearity": _linearity_guard(xs, metrics[prim])}
+
+
 def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
                a=0.10, i0=0.1671, i2=2.48e-3, psi1_pi=1.9356, psi2_pi=4.4138,
                span=0.8, n_scan=401, n_mod=96, sigma_tau=0.0, seed=None,
-               save_png=False, session_id="default"):
+               save_png=False, session_id="default", x_list=None):
     """DAS + 免标定 WMS 正向仿真：返回 1f、2f 峰高、DAS 最小透过率、线表信息。
 
     wn0 为目标线中心（cm^-1）；x 为摩尔分数（默认 1e-3 = 1000 ppm，弱吸收）；L 为光程 cm；
@@ -1006,7 +1107,12 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
     T/P/x/L 未给出时按「会话已确认 > 默认」取值（复用 tdlas_session 已确认的工况）。
     """
     _xd, _Ld = _species_defaults(species)
+    _x_raw = x                                  # 保留原始参数（未解析），供 _resolve_x_list 判"x 与 x_list 二选一"
     T, P, x, L, assumed = _resolve_conditions(T, P, x, L, session_id, x_default=_xd, L_default=_Ld)
+    _multi, _xs, _x_single = _resolve_x_list(_x_raw, x_list, x)
+    if _multi:
+        assumed = [k for k in assumed if k != "x"]
+    x = _x_single if not _multi else _xs[0]
     i0, i2, p1, p2 = _common(species, wn0, T, P, x, L, a, i0, i2, psi1_pi, psi2_pi, span)
     with _quiet() as g:
         r = ts.simulate(species, wn0, float(T), float(P), float(x), float(L), float(a),
@@ -1032,6 +1138,19 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
         with _quiet():
             ts.plot(r, png)
         out["png"] = str(png)
+    if _multi:
+        _samples = [r] + [
+            ts.simulate(species, wn0, float(T), float(P), float(xi), float(L), float(a),
+                        i0, i2, p1, p2, float(span), int(n_scan), int(n_mod),
+                        sigma_tau=float(sigma_tau), seed=seed)
+            for xi in _xs[1:]]
+        out["multi_conc"] = _build_multi_conc(
+            _xs, _samples,
+            ["wms_2f1f_peak", "wms_2f_peak", "alpha_peak_cm-1", "das_tau_min"],
+            lambda rr: {"wms_2f1f_peak": float(rr["S2f1f"].max()),
+                        "wms_2f_peak": float(rr["S2f"].max()),
+                        "alpha_peak_cm-1": float(rr["alpha"].max()),
+                        "das_tau_min": float(rr["tau"].min())})
     return out
 
 
@@ -1231,7 +1350,7 @@ def t_detection_limit_scan(species="CH4", wn0=2968.5, T=296.0, P=1.01325, a=0.10
 def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
                 span=None, fscan=None, fs=None, baseline_slope=None,
                 sigma=0.0, seed=None, fit_order=None, fit_frac=None,
-                edge=None, save_png=False):
+                edge=None, save_png=False, x_list=None):
     """三角波扫描 DAS 全链路：PD 原始信号 → 多项式基线拟合扣除 → DAS 吸光度信号。
 
     默认工况（未显式给出时使用，并列入 assumptions 供复核）：
@@ -1256,6 +1375,10 @@ def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
     fit_order = _DEF["fit_order"] if fit_order is None else int(fit_order)
     fit_frac = _DEF["fit_frac"] if fit_frac is None else float(fit_frac)
     edge = _DEF["edge"] if edge is None else str(edge)
+    _multi, _xs, _x_single = _resolve_x_list(given["x"], x_list, x)
+    if _multi:
+        assumed = [k for k in assumed if k != "x"]
+    x = _x_single if not _multi else _xs[0]
 
     if not (species and str(species).strip()):
         raise ValueError("species 不能为空")
@@ -1295,6 +1418,17 @@ def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
         with _quiet():
             ts.plot_das_td(r, png)
         out["png"] = str(png)
+    if _multi:
+        _samples = [r] + [
+            ts.simulate_das_td(species, float(wn0), T, P, xi, L,
+                               span=span, fscan=fscan, fs=fs,
+                               baseline_slope=baseline_slope, sigma=float(sigma),
+                               seed=seed, fit_order=fit_order, fit_frac=fit_frac, edge=edge)
+            for xi in _xs[1:]]
+        out["multi_conc"] = _build_multi_conc(
+            _xs, _samples, ["das_absorbance_peak", "alpha_L_true_peak"],
+            lambda rr: {"das_absorbance_peak": float(rr["das"].max()),
+                        "alpha_L_true_peak": float(rr["alpha_L_true"].max())})
     return out
 
 
@@ -1438,7 +1572,7 @@ def _maybe_align_laser(wn_center, inst, explicit_keys, device_used=False):
 def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
                      edge=None, fit_order=None, fit_frac=None, seed=0, session_id="default",
                      auto_laser=True, save_png=False, setup=None, laser=None, pd=None, daq=None,
-                     optics=None, **kw):
+                     optics=None, x_list=None, **kw):
     """仪器系统级 DAS 仿真：DAQ 电压 → 激光 → 光路 → PD → ADC 量化 → 基线扣除。
 
     缺省参数按优先级索取：① 用户实测标定值 → ② 器件型号（AI 检索规格书）
@@ -1458,6 +1592,12 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
         else:
             scene[k] = _SCENE_DEFAULTS[k]
             assumed.append(k)
+
+    # 多浓度扫描：x_list 覆盖单 x（显式或会话确认的 x 都让位），并从缺省清单移除 x
+    _multi, _xs, _ = _resolve_x_list(x, x_list, scene["x"])
+    if _multi:
+        scene["x"] = _xs[0]
+        assumed = [k for k in assumed if k != "x"]
 
     given_inst = {k: kw.get(k) for k in _INSTR_KEYS}
     inst = {k: v for k, v in given_inst.items() if v is not None}
@@ -1545,6 +1685,18 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                f"允许的键见 tools/list 的 inputSchema")
     out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species, session_id)
     out["fringe_report"] = _fringe_report_block(m.get("fringe"), session_id)
+    if _multi:
+        _samples = [r] + [
+            ts.simulate_das_instrument(species, wn_center=float(wn_center),
+                                       T=float(scene["T"]), P=float(scene["P"]),
+                                       x=float(xi), L_cm=float(scene["L_cm"]),
+                                       edge=scene["edge"], fit_order=int(scene["fit_order"]),
+                                       fit_frac=float(scene["fit_frac"]), seed=seed, **inst)
+            for xi in _xs[1:]]
+        out["multi_conc"] = _build_multi_conc(
+            _xs, _samples, ["alpha_L_peak", "v_pd_mean_V"],
+            lambda rr: {"alpha_L_peak": rr["meta"]["alpha_L_peak"],
+                        "v_pd_mean_V": rr["meta"]["v_pd_mean"]})
     out["fidelity"] = _fidelity_digest()
     out["interaction"], out["next_required_actions"] = _interaction_block(out, "das", session_id)
     if save_png:
@@ -1568,7 +1720,7 @@ _INSTR_KEYS_WMS = _INSTR_KEYS + _WMS_ONLY_KEYS
 
 def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
                      seed=0, session_id="default", auto_laser=True, save_png=False,
-                     setup=None, laser=None, pd=None, daq=None, optics=None, **kw):
+                     setup=None, laser=None, pd=None, daq=None, optics=None, x_list=None, **kw):
     """WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相（2f/1f）。
 
     调制幅值默认按**最优调制系数 m≈2.2** 自动优化（2f 峰值最大处）。
@@ -1593,6 +1745,12 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
         else:
             scene[k] = scene_rec[k]
     assumed = [k for k, v in given_scene.items() if v is None and k not in confirmed]
+
+    # 多浓度扫描：x_list 覆盖单 x（显式或会话确认的 x 都让位），并从缺省清单移除 x
+    _multi, _xs, _ = _resolve_x_list(x, x_list, scene["x"])
+    if _multi:
+        scene["x"] = _xs[0]
+        assumed = [k for k in assumed if k != "x"]
 
     given_inst = {k: kw.get(k) for k in _INSTR_KEYS_WMS}
     inst = {k: v for k, v in given_inst.items() if v is not None}
@@ -1755,6 +1913,22 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                f"允许的键见 tools/list 的 inputSchema")
     out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species, session_id)
     out["fringe_report"] = _fringe_report_block(m.get("fringe"), session_id)
+    if _multi:
+        _samples = [r] + [
+            ts.simulate_wms_instrument(species, wn_center=float(wn_center),
+                                       T=float(scene["T"]), P=float(scene["P"]),
+                                       x=float(xi), L_cm=float(scene["L_cm"]),
+                                       seed=seed, **inst)
+            for xi in _xs[1:]]
+
+        def _wms_metrics(rr):
+            _vi = rr["valid_mask"]
+            _s = np.abs(rr["S2f_norm_cyc"])
+            return {"S2f_norm_peak": (float(_s[_vi].max()) if _vi.any() else None),
+                    "alpha_L_peak": rr["meta"]["alpha_L_peak"],
+                    "sensitivity_k": rr["meta"]["sensitivity_k"]}
+        out["multi_conc"] = _build_multi_conc(
+            _xs, _samples, ["S2f_norm_peak", "alpha_L_peak", "sensitivity_k"], _wms_metrics)
     out["fidelity"] = _fidelity_digest()
     out["interaction"], out["next_required_actions"] = _interaction_block(out, "wms", session_id)
     if save_png:
@@ -1767,7 +1941,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
 
 
 def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
-             seed=0, session_id="default", **kw):
+             seed=0, session_id="default", x_list=None, **kw):
     """二次审核 / 多轮核对：跑一遍 WMS 并只返回自动校验报告（不画图）。
 
     用于在给出最终结论前，对结果做独立复核；非专业用户可据此判断"是否可信"。
@@ -1775,7 +1949,7 @@ def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
     参数与 tdlas_wms_instrument **完全同源**（实现上就是透传）。
     """
     out = t_wms_instrument(species=species, wn_center=wn_center, T=T, P=P, x=x, L_cm=L_cm,
-                           seed=seed, session_id=session_id, save_png=False, **kw)
+                           seed=seed, session_id=session_id, save_png=False, x_list=x_list, **kw)
     _rev = {"species": out["species"], "wn_center_cm-1": out["wn_center_cm-1"],
             "validation": out["validation"], "warnings": out["warnings"],
             "key_metrics": {"alpha_L_peak": out["results"]["alpha_L_peak"],
@@ -1988,6 +2162,11 @@ TOOLS = [
                          "T": {"type": "number", "description": "温度 K；缺省=会话已确认或 296"},
                          "P": {"type": "number", "description": "气压 atm；缺省=会话已确认或 1.0"},
                          "x": {"type": "number", "description": "摩尔分数 (0,1]；缺省=会话已确认或按物种推荐（强吸收如 CH4≈1e-4）"},
+                         "x_list": {"type": "array", "items": {"type": "number"},
+                                    "description": "多浓度扫描：摩尔分数列表 (0,1]，如 [1e-4,1e-3,1e-2]，与 x 二选一；"
+                                                   "开启后返回 multi_conc 扫描曲线 + 线性/饱和防呆诊断"
+                                                   "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
+                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"},
                          "L": {"type": "number", "description": "光程 cm；缺省=会话已确认或 30"},
                          "session_id": {"type": "string", "description": "会话标识，默认 default（复用 tdlas_session 已确认工况）"},
                          "a": {"type": "number", "description": "调制深度 cm^-1，默认 0.1"},
@@ -2012,6 +2191,11 @@ TOOLS = [
                          "T": {"type": "number", "description": "温度 K，默认 296"},
                          "P": {"type": "number", "description": "气压 atm，默认 1.01325"},
                          "x": {"type": "number", "description": "摩尔分数，默认 1e-3（1000 ppm）"},
+                         "x_list": {"type": "array", "items": {"type": "number"},
+                                    "description": "多浓度扫描：摩尔分数列表 (0,1]，如 [1e-4,1e-3,1e-2]，与 x 二选一；"
+                                                   "开启后返回 multi_conc 扫描曲线 + 线性/饱和防呆诊断"
+                                                   "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
+                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"},
                          "L": {"type": "number", "description": "光程 cm，默认 50（0.5 m）"},
                          "span": {"type": "number", "description": "扫描半宽 cm^-1，默认 0.8"},
                          "fscan": {"type": "number", "description": "三角波频率 Hz，默认 100"},
@@ -2044,6 +2228,11 @@ TOOLS = [
                          "T": {"type": "number", "description": "温度 K，默认 296"},
                          "P": {"type": "number", "description": "气压 atm，默认 1.01325"},
                          "x": {"type": "number", "description": "摩尔分数，默认 1e-3（1000 ppm）"},
+                         "x_list": {"type": "array", "items": {"type": "number"},
+                                    "description": "多浓度扫描：摩尔分数列表 (0,1]，如 [1e-4,1e-3,1e-2]，与 x 二选一；"
+                                                   "开启后返回 multi_conc 扫描曲线 + 线性/饱和防呆诊断"
+                                                   "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
+                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"},
                          "L_cm": {"type": "number", "description": "光程 cm，默认 50"},
                          "scan_span_cm": {"type": "number", "description": "三角波扫描半宽 cm⁻¹，默认 1.5（amp_V 由它自动反算，一般无需手填）"},
                          "amp_V": {"type": "number", "description": "三角波幅值 V（**通常无需手填**：由 wn_center+scan_span_cm 自动反算；需固定电压时覆盖）"},
@@ -2112,6 +2301,11 @@ TOOLS = [
                          "wn_center": {"type": "number", "description": "扫描中心波数 cm^-1，默认 2968.5"},
                          "T": {"type": "number"}, "P": {"type": "number"},
                          "x": {"type": "number", "description": "摩尔分数，默认 1e-3"},
+                         "x_list": {"type": "array", "items": {"type": "number"},
+                                    "description": "多浓度扫描：摩尔分数列表 (0,1]，如 [1e-4,1e-3,1e-2]，与 x 二选一；"
+                                                   "开启后返回 multi_conc 扫描曲线 + 线性/饱和防呆诊断"
+                                                   "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
+                                                   "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"},
                          "L_cm": {"type": "number", "description": "光程 cm，默认 50"},
                          "scan_span_cm": {"type": "number", "description": "三角波扫描半宽 cm⁻¹，默认 1.5（amp_V 由它自动反算，一般无需手填）"},
                          "mod_freq_Hz": {"type": "number", "description": "正弦调制频率 Hz，默认 30000"},

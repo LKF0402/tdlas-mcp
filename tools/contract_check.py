@@ -463,5 +463,64 @@ try:
 finally:
     M._load_sessions, M._save_sessions = _ols, _oss
 
+# ───────────────────── 8. x_list 多浓度扫描（解析+防呆+结构） ─────────────────────
+print("=== 8. x_list 多浓度扫描 ===")
+_by = {t["name"]: t for t in M.TOOLS}
+for _nm in ("tdlas_simulate", "tdlas_das_chain", "tdlas_das_instrument", "tdlas_wms_instrument"):
+    check(f"{_nm} schema 声明 x_list",
+          "x_list" in (_by[_nm]["inputSchema"]["properties"] or {}),
+          f"-> {_nm}")
+
+# 透传：x_list 的首个浓度（升序去重后）应作为 x 喂给引擎
+store = {}
+_orig = ts.simulate_wms_instrument
+ts.simulate_wms_instrument = _fake_engine(store)
+try:
+    try:
+        M.t_wms_instrument("CH4", wn_center=2968.5, x_list=["2e-3", "1e-3", "1e-4"])
+    except _Stop:
+        pass
+finally:
+    ts.simulate_wms_instrument = _orig
+check("x_list 透传：升序后首个浓度作为 x 喂给引擎", store.get("x") == 1e-4,
+      f"-> x={store.get('x')!r}")
+
+# 防呆：x_list 含越界浓度（>1 或 ≤0）必须被拒绝，而非静默截断
+_err = None
+try:
+    M.t_simulate("CH4", wn0=2968.5, x_list=[1e-3, 2.0])
+except ValueError as e:
+    _err = e
+check("防呆：x_list 含越界浓度被拒绝", _err is not None, f"-> {_err}")
+
+# 防呆：x 与 x_list 同时传必须冲突报错（二选一）
+_err2 = None
+try:
+    M.t_simulate("CH4", wn0=2968.5, x=1e-3, x_list=[1e-4, 1e-3])
+except ValueError as e:
+    _err2 = e
+check("防呆：x 与 x_list 同时传被拒绝", _err2 is not None, f"-> {_err2}")
+
+# 防呆：空列表被拒绝
+_err3 = None
+try:
+    M.t_simulate("CH4", wn0=2968.5, x_list=[])
+except ValueError as e:
+    _err3 = e
+check("防呆：空 x_list 被拒绝", _err3 is not None, f"-> {_err3}")
+
+# 结构：真实跑一次，multi_conc 必须含扫描曲线 + 线性/饱和防呆诊断
+_mc = M.t_simulate("CH4", wn0=2968.5, x_list=["1e-4", "1e-3"])
+_here = _mc.get("multi_conc")
+check("x_list 返回 multi_conc 扫描结构",
+      _here and _here.get("enabled")
+      and len(_here.get("x_list", [])) == 2
+      and len(_here.get("mole_ppm", [])) == 2
+      and "response" in _here and "linearity" in _here,
+      f"-> {sorted(_here.keys()) if _here else None}")
+check("multi_conc 线性诊断生效（≥2 点则判线性）",
+      _here and _here.get("linearity", {}).get("checked") is True,
+      f"-> {_here.get('linearity') if _here else None}")
+
 print(f"\n===== 契约自检：{_OK} 通过 / {_BAD} 失败 =====")
 raise SystemExit(1 if _BAD else 0)
