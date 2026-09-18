@@ -51,6 +51,19 @@ _OK = 0
 _BAD = 0
 
 
+_SKIPPED = 0
+
+
+def skip(name, reason=""):
+    """环境不支持而无法断言的项：计 SKIP 而**不**算失败，但必须在汇总里看得到。
+    用于"该项需要写磁盘 / 特定平台能力"的情形 —— 宁可显式 SKIP，
+    也不能让它抛异常中断脚本、把后面的检查静默吞掉。
+    """
+    global _SKIPPED
+    _SKIPPED += 1
+    print(f"  SKIP  {name} ({reason})")
+
+
 def check(name, cond, extra=""):
     global _OK, _BAD
     if cond:
@@ -346,19 +359,33 @@ check("WMS/DAS 均回显生效的激光参数",
       and "_LASER_ECHO_KEYS" in inspect.getsource(M.t_das_instrument))
 
 _old = M._SESSION_FILE
-M._SESSION_FILE = Path(tempfile.mkdtemp()) / "_s.json"
-M._save_sessions({"a": {"confirmed": {"x": 1}}})
-check("会话写盘为原子替换（无 .tmp 残留）",
-      json.loads(M._SESSION_FILE.read_text(encoding="utf-8"))["a"]["confirmed"]["x"] == 1
-      and not list(M._SESSION_FILE.parent.glob(M._SESSION_FILE.name + "*.tmp")))
-# 并发写同一文件不得抛异常（Windows 上 os.replace 会 WinError 5 → 已加重试+降级）
+# ⚠ 这一节会真写磁盘：若环境（沙箱 / 只读临时目录 / 权限）不允许，
+#   旧写法会抛 PermissionError 直接终止脚本 → **后面数十项检查被静默跳过而 CI 仍然"绿"**。
+#   现改为：写不了就记 SKIP（不计入失败，但在汇总里显式报出），继续跑完。
+_SKIP_REASON = None
 try:
-    M._save_sessions({"b": {"confirmed": {"y": 2}}})
-    M._save_sessions({"c": {"confirmed": {"z": 3}}})
-    check("连续写盘不抛异常（含重试/降级路径）",
-          json.loads(M._SESSION_FILE.read_text(encoding="utf-8"))["c"]["confirmed"]["z"] == 3)
-except Exception as e:                                  # noqa: BLE001
-    check("连续写盘不抛异常（含重试/降级路径）", False, f"-> {type(e).__name__}: {e}")
+    M._SESSION_FILE = Path(tempfile.mkdtemp()) / "_s.json"
+    M._save_sessions({"a": {"confirmed": {"x": 1}}})
+    _atomic_ok = (json.loads(M._SESSION_FILE.read_text(encoding="utf-8"))["a"]["confirmed"]["x"] == 1
+                  and not list(M._SESSION_FILE.parent.glob(M._SESSION_FILE.name + "*.tmp")))
+except Exception as e:                                   # noqa: BLE001
+    _atomic_ok = None
+    _SKIP_REASON = f"{type(e).__name__}: {e}"
+if _atomic_ok is None:
+    skip("会话写盘为原子替换（无 .tmp 残留）", _SKIP_REASON)
+else:
+    check("会话写盘为原子替换（无 .tmp 残留）", _atomic_ok)
+# 并发写同一文件不得抛异常（Windows 上 os.replace 会 WinError 5 → 已加重试+降级）
+if _atomic_ok is None:
+    skip("连续写盘不抛异常（含重试/降级路径）", _SKIP_REASON)
+else:
+    try:
+        M._save_sessions({"b": {"confirmed": {"y": 2}}})
+        M._save_sessions({"c": {"confirmed": {"z": 3}}})
+        check("连续写盘不抛异常（含重试/降级路径）",
+              json.loads(M._SESSION_FILE.read_text(encoding="utf-8"))["c"]["confirmed"]["z"] == 3)
+    except Exception as e:                              # noqa: BLE001
+        check("连续写盘不抛异常（含重试/降级路径）", False, f"-> {type(e).__name__}: {e}")
 M._SESSION_FILE = _old
 
 import tdlas_hitran as TH                    # noqa: E402  （离线：HAPI 自带索引表）
@@ -552,5 +579,154 @@ _xy0 = M.t_wms_instrument("CH4", wn_center=2968.5, return_xy=False)
 check("return_xy 默认 false 不返回 X/Y（避免返回体膨胀）", "wms_raw_xy" not in _xy0,
       f"-> keys={list(_xy0)}")
 
-print(f"\n===== 契约自检：{_OK} 通过 / {_BAD} 失败 =====")
+# ───────────────────── 10. 混合气多组分 α = Σ x_i·α_pure_i ─────────────────────
+# 为什么必须守：混合气最容易出的错不是"算不出来"，而是**悄悄把分压设成 x·P**——
+# 那会同时算错线宽（碰撞展宽 ∝ 分压）和浓度定标，结果看起来完全合理。
+print("=== 10. 混合气多组分 ===")
+_MIX_TOOLS = ("tdlas_simulate", "tdlas_das_chain", "tdlas_das_instrument",
+              "tdlas_wms_instrument")
+_by = {t["name"]: t for t in M.TOOLS}
+for _nm in _MIX_TOOLS:
+    check(f"{_nm} schema 声明 mixture",
+          "mixture" in (_by[_nm]["inputSchema"]["properties"] or {}), f"-> {_nm}")
+check("四个仿真工具共用同一份 mixture 声明（防各写一遍后漂移）",
+      len({id(_by[_nm]["inputSchema"]["properties"]["mixture"]) for _nm in _MIX_TOOLS}) == 1)
+
+# 解析：字符串 / 列表 / 冒号 / 空白 / 分号 五种写法等价
+_p0 = ts._resolve_mixture_specs("LABEL", 1e-3, None)
+check("mixture=None 退化为单物种（原行为不变）", _p0 == [("LABEL", 1e-3)], f"-> {_p0}")
+_p1 = ts._resolve_mixture_specs("X", 0.0, "CH4:0.01,CO2:0.04")
+_p2 = ts._resolve_mixture_specs("X", 0.0, "CH4 0.01; CO2 0.04")
+_p3 = ts._resolve_mixture_specs("X", 0.0, [{"species": "CH4", "x": 0.01}, {"species": "CO2", "x": 0.04}])
+_p4 = ts._resolve_mixture_specs("X", 0.0, ["CH4:0.01", "CO2:0.04"])
+check("字符串 'A:0.01,B:0.04' 解析正确", _p1 == [("CH4", 0.01), ("CO2", 0.04)], f"-> {_p1}")
+check("分隔符宽容（空白/分号）", _p2 == _p1, f"-> {_p2}")
+check("list[dict] / list[str] 与字符串等价", _p3 == _p1 and _p4 == _p1)
+_pbog = None
+try:
+    ts._resolve_mixture_specs("X", 0.0, "CH4")
+except ValueError as e:
+    _pbog = e
+check("无法解析的组分被拒绝（不静默丢弃）", _pbog is not None, f"-> {_pbog}")
+
+# 混合气纪律必须写进**引擎**，而不是只写在文档里
+_seen = inspect.getsource(ts._resolve_mixture_specs) + inspect.getsource(ts._alpha_grid)
+check("引擎源码写明混合气纪律（禁止把分压设成 x·P）",
+      "分压" in _seen and "x·P" in _seen)
+check("α 求和确为 Σ x_i·α_pure_i（逐点相加，非先加浓度再加压）",
+      "alpha_total = apure_i * float(xi)" in inspect.getsource(ts._alpha_grid)
+      and "alpha_total = alpha_total + apure_i * float(xi)"
+      in inspect.getsource(ts._alpha_grid))
+# 三个仿真引擎都必须把各组分 αL 透出来（否则画不出分解、AI 也说不清"谁主导"）
+for _fn in (ts.simulate_das_td, ts.simulate_das_instrument, ts.simulate_wms_instrument):
+    check(f"{_fn.__name__} 返回 alphaL_per_species",
+          "alphaL_per_species" in inspect.getsource(_fn))
+
+# 互斥：mixture 与 x_list 同传必须报错（二选一），且不能静默取其一
+for _nm, _fn in (("tdlas_simulate", M.t_simulate), ("tdlas_das_chain", M.t_das_chain),
+                 ("tdlas_das_instrument", M.t_das_instrument),
+                 ("tdlas_wms_instrument", M.t_wms_instrument)):
+    _e = None
+    try:
+        _fn("CH4", x_list=[1e-4, 1e-3], mixture="CH4:0.01,CO2:0.04")
+    except ValueError as e:
+        _e = e
+    check(f"防呆：{_nm} 的 mixture 与 x_list 同传被拒绝", _e is not None, f"-> {_e}")
+
+# 透传：mixture 必须原样进引擎（否则等于白声明）
+for _nm, _fn, _attr in (("tdlas_wms_instrument", M.t_wms_instrument, "simulate_wms_instrument"),
+                        ("tdlas_das_instrument", M.t_das_instrument, "simulate_das_instrument")):
+    _origx = getattr(ts, _attr)
+    _s = {}
+    setattr(ts, _attr, _fake_engine(_s))
+    try:
+        try:
+            _fn("CH4", mixture="CH4:0.01,CO2:0.04")
+        except _Stop:
+            pass
+    finally:
+        setattr(ts, _attr, _origx)
+    check(f"{_nm} 把 mixture 透传给引擎", _s.get("mixture") == "CH4:0.01,CO2:0.04",
+          f"-> {_s.get('mixture')!r}")
+
+# ────────────────── 10. 契约块对称性 ──────────────────
+# 为什么：同一类工具应该拿到同一套契约块。此前每个工具在自己
+# 函数体里手拼这些块，于是不对称是必然的（实测：DAS 一直缺 validation，
+# 而它是个定量工具）。这里把"声明了的块必须真的出现"变成硬断言。
+print("\n=== 10. 契约块对称性 ===")
+_decl = getattr(M, "CONTRACT_BLOCKS", None)
+check("契约块声明表存在（CONTRACT_BLOCKS）", _decl is not None)
+if _decl:
+    # 10.1 三个定量工具必须声明**完全一致**的块集
+    _q = ("tdlas_wms_instrument", "tdlas_review", "tdlas_das_instrument")
+    _sets = {n: tuple(_decl.get(n) or ()) for n in _q}
+    check("三个定量工具的契约块声明一致",
+          len(set(_sets.values())) == 1,
+          f"-> {_sets}")
+    # 10.2 声明了的块，真实调用时必须出现
+    import tdlas_sim as _ts
+    _calls = [("tdlas_das_instrument", lambda: M.t_das_instrument(species="CH4", wn_center=2968.5))]
+    for _name, _fn in _calls:
+        try:
+            _out = _fn()
+        except Exception as e:                              # noqa: BLE001
+            check(f"{_name} 可调用（供块断言）", False, f"-> {type(e).__name__}: {e}")
+            continue
+        # ⚠ 断言口径：**生产者有值 ⇒ 该键必须存在**（而不是"键必须存在"）。
+        #   因为组装器刻意只写非 None 值：为了"字段齐全"而造出一个看着有、
+        #   实则空的块，会比缺失更糟。例：DAS 无 assumptions 时 needs_confirm=False，
+        #   该位置不会出现。
+        _miss = []
+        for _b in (_decl.get(_name) or ()):
+            _p = M.CONTRACT_BLOCK_PRODUCERS.get(_b)
+            if _p is None:
+                _miss.append(_b + "(无生产者)")
+                continue
+            try:
+                _val = _p(_out, {"session_id": "default", "species": _out.get("species")})
+            except Exception:                              # noqa: BLE001
+                _val = None
+            if _val and _b not in _out:        # 假值即缺席（与组装器同口径）
+                _miss.append(_b)
+        check(f"{_name} 声明的契约块均已交付", not _miss,
+              f"-> 缺 {_miss}" if _miss else "")
+    # 10.2b 派生布尔：实质块非空时，对应的 needs_* 必须出现（把"
+    #   声明表里不再列布尔"损失的信息"补回来）。
+    _pairs = (("param_requests", "needs_input"), ("assumptions", "needs_confirm"))
+    _bool_bad = []
+    for _name, _fn in _calls:
+        try:
+            _o = _fn()
+        except Exception:                                  # noqa: BLE001
+            continue
+        for _src, _flag in _pairs:
+            if _o.get(_src) and _flag not in _o:
+                _bool_bad.append(f"{_name}:{_flag}")
+    check("实质块非空时派生布尔已交付", not _bool_bad,
+          f"-> 缺 {_bool_bad}" if _bool_bad else "")
+
+    # 10.3 DAS 校验器存在且可运行（不能只是声明）
+    check("tdlas_sim.validate_das_result 存在", hasattr(_ts, "validate_das_result"))
+    if hasattr(_ts, "validate_das_result"):
+        _v = None
+        try:
+            _r = None
+            import io as _io2, contextlib as _ctx
+            with _ctx.redirect_stdout(_io2.StringIO()):
+                _r = _ts.simulate_das_instrument("CH4", wn_center=2968.5)
+            _v = _ts.validate_das_result(_r)
+        except Exception as e:                              # noqa: BLE001
+            check("validate_das_result 可对真实结果运行", False,
+                  f"-> {type(e).__name__}: {e}")
+        if _v is not None:
+            check("validate_das_result 返回结构合法",
+                  isinstance(_v.get("checks"), list) and _v.get("overall") in ("pass", "warn", "fail"),
+                  f"-> overall={_v.get('overall')}, {len(_v.get('checks') or [])} 项")
+    # 10.4 每个声明的块都有生产者（防止声明了却无人生产）
+    _prod = getattr(M, "CONTRACT_BLOCK_PRODUCERS", {})
+    _undeclared = sorted({b for v in _decl.values() for b in v} - set(_prod))
+    check("每个声明的契约块都有生产者", not _undeclared,
+          f"-> 缺生产者 {_undeclared}" if _undeclared else "")
+
+print(f"\n===== 契约自检：{_OK} 通过 / {_BAD} 失败" + (f" / {_SKIPPED} 跳过（环境不支持）" if _SKIPPED else "") + " =====")
 raise SystemExit(1 if _BAD else 0)

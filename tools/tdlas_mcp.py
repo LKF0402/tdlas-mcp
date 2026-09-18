@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as _dt
 import hashlib
 import io
 import json
@@ -246,6 +247,58 @@ def _condition_values(out):
             "L_cm": c.get("L_cm", out.get("path_cm"))}
 
 
+def _packing_state(out=None):
+    """判断"仪器打包"这件事现在该不该提醒用户。
+
+    为什么单独出一个函数：它是 **AI 主动提醒** 的判据源，
+    而提醒本身必须可退避（否则每次返回都在叽叨，AI 会忽略它）。
+
+    判据：
+      · 设备库里已有设备，但**还没打包成任何 setup** → 该提醒（用户已花力气录过设备，却没用上）；
+      · 四类设备缺某一类 → 告知缺什么（AI 好向用户索取）；
+      · 已有 setup 且已设默认 → 不提醒（事情已做完）；
+      · 已有 setup 但未设默认 → 轻提醒一次（设默认后每次都能自动套用）。
+
+    返回 dict；`should_prompt=False` 时调用方不应下发任何提醒。
+    """
+    try:
+        dev = _load_devices()
+    except Exception:                                      # noqa: BLE001
+        return {"should_prompt": False}
+    counts = {k: len(dev.get(k) or {}) for k in ("laser", "pd", "daq", "optics")}
+    setups = dev.get("setup") or {}
+    dflt = dev.get("default") or {}
+    if sum(counts.values()) == 0:
+        return {"should_prompt": False, "reason": "device_library_empty",
+                "note": "设备库为空：用户还没给过任何硬件信息，此时不主动追问。"}
+    missing = [k for k, v in counts.items() if v == 0]
+    # 对 AI 与用户都只认中文名：直接输出 'pd' 不利于转述，也不利于用户理解缺什么。
+    missing_cn = [{"device_type": k, "cn": _DEVICE_TYPE_CN[k],
+                   "fields": [{"key": kk,
+                               "cn": (PARAM_ACQ_GUIDE.get(kk) or (kk, "-", ""))[0],
+                               "unit": (PARAM_ACQ_GUIDE.get(kk) or (kk, "-", ""))[1]}
+                              for kk in _DEVICE_SALIENT_KEYS.get(k, [])]}
+                  for k in missing]
+    if not setups:
+        return {"should_prompt": True, "reason": "has_devices_no_setup",
+                "device_counts": counts, "missing_device_types": missing,
+                "missing_devices": missing_cn,
+                "ask_user": ("你已经建了设备库，但还没打包成整机配置。"
+                             "打包后只需一个 `setup=名字` 就能一键套用全部硬件参数，"
+                             "不必每次重填。" +
+                             (f"目前还缺："
+                              + "、".join(m["cn"] for m in missing_cn) + "。" if missing else "")),
+                "how": "tdlas_device action=save_setup name=... laser=... pd=... daq=... optics=..."}
+    if not dflt:
+        return {"should_prompt": True, "reason": "has_setup_no_default",
+                "setups": sorted(setups.keys()),
+                "ask_user": ("已有整机配置，但未设默认。设默认后，"
+                             "未指定设备时会自动套用你的真实硬件（而非内置默认）。"),
+                "how": "tdlas_device action=set_default ..."}
+    return {"should_prompt": False, "reason": "packed_and_defaulted",
+            "note": f"已打包 {len(setups)} 套且已设默认，无需提醒。"}
+
+
 def build_next_actions(out):
     """从工具返回**推导**出"AI 接下来必须做什么" —— 纯函数，只读 out，不碰会话/不写盘。
 
@@ -264,6 +317,20 @@ def build_next_actions(out):
             return
         acts.append({"id": _id, "severity": sev, "action": action,
                      "evidence_fields": list(ev), "values": values, "template": template})
+
+    # ★ 仪器打包的**主动提醒**：服务器无法主动发起对话（MCP 没有这个方向），
+    #   故把它做成一条随结果下发的动作；_interaction_block 会按"工具+动作"记账，
+    #   **同一会话只发一次**，不会每轮叽叨（否则 AI 会忽略它）。
+    #   它不阻断结论：仪器未打包不影响数值可用性，只影响空闲度。
+    _pk = _packing_state()
+    if _pk.get("should_prompt"):
+        add("offer_device_packing", _SEV_ADVISORY,
+            _pk.get("ask_user") or "提醒用户可打包整机配置",
+            [], values={"reason": _pk.get("reason"),
+                        "missing_devices": _pk.get("missing_devices"),
+                        "setups": _pk.get("setups"),
+                        "how": _pk.get("how")},
+            template=_pk.get("ask_user"))
 
     # ① 扫描含暗区：不是措辞问题，而是"这个数不可用"，最高优先级
     _dark = [str(w) for w in (out.get("warnings") or []) if "无激光输出" in str(w)]
@@ -529,7 +596,11 @@ def _resolve_devices(setup=None, laser=None, pd=None, daq=None, optics=None):
     if setup:
         st = dev.get("setup", {}).get(str(setup))
         if st is None:
-            raise ValueError(f"整机配置 {setup!r} 不存在，请先用 tdlas_device 保存")
+            _exist = sorted((dev.get("setup") or {}).keys())
+            raise ValueError(
+                f"整机配置 {setup!r} 不存在。已有配置：{_exist or '（无）'}。"
+                f"如需新建，请告诉用户你需要哪几台设备的**型号或规格书**，"
+                f"用 tdlas_device save 建库后再 save_setup 打包（source 必须如实填）。")
         for k in pick:
             if pick[k] is None and st.get(k):
                 pick[k] = st[k]
@@ -544,14 +615,145 @@ def _resolve_devices(setup=None, laser=None, pd=None, daq=None, optics=None):
             continue
         params = dev.get(k, {}).get(str(name))
         if params is None:
-            raise ValueError(f"{_DEVICE_TYPE_CN[k]}设备 {name!r} 不存在，请先用 tdlas_device 保存")
-        entry = {kk: vv for kk, vv in params.items() if vv is not None}
+            _keys = _DEVICE_SALIENT_KEYS.get(k, [])
+            _need = "、".join(
+                f"{(PARAM_ACQ_GUIDE.get(kk) or (kk, '-', ''))[0]}({(PARAM_ACQ_GUIDE.get(kk) or (kk, '-', ''))[1]})"
+                for kk in _keys)
+            _exist = sorted((dev.get(k) or {}).keys())
+            raise ValueError(
+                f"{_DEVICE_TYPE_CN[k]}设备 {name!r} 不存在。已有：{_exist or '（无）'}。"
+                f"若要新建该设备，请向用户索取**型号或规格书**（需：{_need}），"
+                f"然后用 tdlas_device save device_type={k} name=... source=datasheet|user|ai。")
+        # ★ 先把 provenance 元数据与**参数字段**分开：前者是字符串（source），
+        #   若混进参数域会被 _validate_device_entry 当成"非数值参数"而报错。
+        _PROV_FIELDS = ("source", "source_note", "fields", "updated")
+        entry = {kk: vv for kk, vv in params.items()
+                 if vv is not None and kk not in _PROV_FIELDS}
         bad = _validate_device_entry(entry)          # 兜住历史/手改过的非法条目
         if bad:
             raise ValueError(f"已保存的{_DEVICE_TYPE_CN[k]}设备 {name!r} 参数非法：{bad}；"
                              f"请用 tdlas_device save 重新保存修正")
-        resolved.update(entry)
+        resolved.update({k: v for k, v in entry.items()
+                         if k not in ("source", "source_note", "fields", "updated")})
+        # 回显来源：让 AI 能如实说出"这些参数来自哪里"
+        _meta_src = {k: params.get(k) for k in ("source", "source_note", "updated")
+                     if params.get(k) is not None}
+        # 即使该条目没有 source（旧条目），也必须如实报出"来源未记录"——
+        # 否则 AI 会默认这些硬件参数是“规格书里的”。空白不等于可信。
+        resolved.setdefault("__provenance__", {})[k] = {
+            "device": str(name),
+            "source": _meta_src.get("source", "unspecified"),
+            **({"source_note": _meta_src["source_note"]} if _meta_src.get("source_note") else {}),
+            **({"updated": _meta_src["updated"]} if _meta_src.get("updated") else {}),
+            **({} if _meta_src.get("source") else
+               {"warning": "本条目建立于来源追踪之前，未记录 source；"
+                           "建议重存以补上（如规格书则 source=datasheet）"}),
+        }
     return resolved
+
+
+#: 各类设备的**显著标识键**：设备名至少要命中一个，否则不可能被区分。
+#: 为什么要校验：设备名是用户以后**只能看到的东西**（引用时只传名字）。
+#: 叫 "A套"/"测试"/"dev1" 的条目一旦积累，用户无法判断哪个能用、
+#: 哪个是上周调过的。这是对用户不友好，也让 AI 无法选对设备。
+_DEVICE_SALIENT_KEYS = {
+    "laser":  ["dnu_dI", "eta_VI", "wn_ref", "i_ref", "i_th", "eta_IP"],
+    "pd":     ["resp", "gain", "bw"],
+    "daq":    ["fs", "adc_bits", "v_range"],
+    "optics": ["throughput"],
+}
+#: 无意义的名字（单字符、纯编号、通用词）——直接拒绝
+_MEANINGLESS_NAME_RE = None
+
+
+def _name_is_distinctive(name, device_type=None):
+    """判断设备/整机名是否**足够显著**。
+
+    规则（任一即可）：① 含型号类信息（字母+数字混合，如 NI_USB-6211、DFB-1653）；
+    ② 含长度/波长类信息（如 3373nm、3.3um、1653）；③ 含中文型号词（如 实验室甲、多通池）。
+    **拒绝**：纯编号（a1/dev1/test）、单字符、以及"测试/临时/新建/copy"这类通用词。
+    返回 (ok, reason)。
+    """
+    nm = str(name or "").strip()
+    if len(nm) < 3:
+        return False, f"名字过短（{nm!r}），无法区分"
+    low = nm.lower()
+    for bad in ("test", "tmp", "temp", "测试", "临时", "新建", "copy", "副本", "demo", "abc"):
+        if low == bad or low.startswith(bad + "_") or low.startswith(bad + "-"):
+            return False, f"名字含通用词 {bad!r}，无法区分"
+    if __import__("re").fullmatch(r"[a-z]?\d{1,3}", low):
+        return False, f"名字 {nm!r} 是纯编号，无法区分"
+    has_digit = any(c.isdigit() for c in nm)
+    has_alpha = any(c.isalpha() for c in nm)
+    has_cjk = any("一" <= c <= "鿿" for c in nm)
+    if (has_digit and has_alpha) or has_cjk:
+        return True, ""
+    return False, (f"名字 {nm!r} 不含型号/波长等可区分信息；"
+                   f"建议如 'nanoplus_3373nm_SN5712'、'NI_USB-6211'、'多通池_10m'")
+
+
+def _suggest_setup_name(dev, laser=None, pd=None, daq=None, optics=None):
+    """当用户没给合适名字时，**由已有设备名自动拼一个显著名**。
+
+    这是"AI 负责命名、用户只给素材"的具体落地：用户给了四台设备，
+    但不一定想得出合适的整机名——那就用设备名的**显著片段**拼出来。
+    """
+    parts = []
+    for k, v in (("laser", laser), ("pd", pd), ("daq", daq), ("optics", optics)):
+        if not v:
+            continue
+        nm = str(v)
+        # 取最能区分的一段：优先含数字的词（型号/波长），否则取前 12 字符
+        toks = [t for t in __import__("re").split(r"[_\-\s]+", nm) if t]
+        pick = next((t for t in toks if any(c.isdigit() for c in t)), None)
+        parts.append(pick or nm[:12])
+    return "_".join(parts) if parts else ""
+
+
+def _device_setup_guide(dev, laser=None, pd=None, daq=None, optics=None):
+    """告诉 AI：还缺哪些设备、每台需要哪些参数、该向用户问什么。
+
+    这是本项目"用户只上传 AI 要的东西、AI 负责构建与提问"的接口：
+    不要只报"设备不存在，请先 save"（用户不知道要给什么），
+    而要给出**缺什么 + 每项的中文名/单位 + 去哪里查 + 实在没有怎么办**。
+    """
+    missing = []
+    for k, v in (("laser", laser), ("pd", pd), ("daq", daq), ("optics", optics)):
+        if v and v not in (dev.get(k) or {}):
+            keys = _DEVICE_SALIENT_KEYS.get(k, [])
+            fields = []
+            for kk in keys:
+                g = PARAM_ACQ_GUIDE.get(kk)
+                fields.append({"key": kk, "cn": g[0] if g else kk,
+                               "unit": g[1] if g else "-", "why": g[2] if g else ""})
+            missing.append({
+                "device_type": k, "cn": _DEVICE_TYPE_CN[k], "name_given": str(v),
+                "fields_needed": fields,
+                "ask_user": (f"请提供{_DEVICE_TYPE_CN[k]} **{v}** 的型号或规格书"
+                             f"（需：" + "、".join(f["cn"] + f"({f['unit']})" for f in fields) + "）"),
+                "if_no_datasheet": "无规格书时：① 用型号联网检索；"
+                                   "② 引导现场标定；③ 保留默认并在结论中标注。",
+            })
+    avail = {k: sorted((dev.get(k) or {}).keys()) for k in ("laser", "pd", "daq", "optics")}
+    return {"missing": missing, "available": avail,
+            "ai_instruction": "请按 missing[].ask_user 向用户索取；"
+                              "拿到型号/规格书后用 tdlas_device save 建库"
+                              "（**source 必须如实填**：规格书=datasheet、AI 推断=ai），"
+                              "然后用 save_setup 打包成整机。用户不需要知道参数名。"}
+
+
+def _device_provenance(setup=None, laser=None, pd=None, daq=None, optics=None):
+    """只取设备引用的**来源元数据**（不取参数），供结果回显。
+
+    为什么单独出一个函数：`_resolve_devices` 的返回值会被 setdefault 合并进引擎参数，
+    若在里面塞一个 `__provenance__` 键，它会被当成真实参数传给引擎（已踩过这个坑）。
+    """
+    try:
+        raw = _resolve_devices(setup, laser, pd, daq, optics)
+        prov = raw.pop("__provenance__", None)
+        return prov
+    except Exception:                                      # noqa: BLE001
+        return None
 
 
 def _get_session(session_id="default"):
@@ -818,24 +1020,84 @@ AI_INTERACTION_GUIDE = {
          "pass": "结论完整、可复现、附校验结论"},
     ],
     "image_layout": {
-        "布局": "3 行 × 2 列，共 6 子图，固定顺序（左→右、上→下），"
-                "figsize≈14×10，每子图约 2:1（横长竖短，利于读谱线形、贴合黄金矩形）：",
-        "subplots": [
-            "① 波长调制 V(t)（三角波+正弦调制，横轴时间）",
-            "② PD 原始信号（无调制 DAS 链路，横轴波数，左轴 V）",
-            "DAS αL（-ln 提取）+ HITRAN 理论 αL（虚线对照，横轴波数）",
-            "③ 一阶谐波 1f（单独，横轴波数）",
-            "④ 二阶谐波 2f（单独，横轴波数）",
-            "⑤ 归一化 2f（标注方法 2f/1f 或 2f/I0）",
+        "总则": "图是用户唯一直接看到的产物，**规范性优先于美观**。出图前先确认：技术名、"
+                "归一化/基线方法、线型含义、剔除区——缺一项这张图就不能用于汇报。",
+        "何时出图": "只有显式 save_png=true 才出图；用户说'画图/给张图/画 WMS/画 DAS'时，"
+                    "**必须传 save_png=true**，否则数据库里只有数值、用户拿不到图。"
+                    "出图后把返回的 png / png_overlay 路径告诉用户。",
+        "★ 自适应选图（按用户需求决定出什么图，不要一律给六子图）": {
+            "判断依据": "从用户话里取意图 → 选图型 → 选参数。**用户要什么就给什么，别把标准六图当唯一答案。**",
+            "意图 → 图型/参数": {
+                "默认 / '给我 CH4 的图' / '画 WMS 图'": "标准 6 子图（panels 缺省 all），单浓度",
+                "'画多浓度 / 不同浓度对比 / 标定曲线'": "传 x_list=[...] + save_png=true → 主图 + **附加** png_overlay（横轴浓度，看线性/饱和）",
+                "'混合气 / 含 X% 甲烷和 Y% CO2'": "传 mixture='CH4:0.01,CO2:0.04' → αL 面板自动叠加各组分曲线，**不新增图**",
+                "'只要相位匹配的 X 分量 / 不正交 / 单通道锁相'": "传 return_xy=true，从 wms_raw_xy 取 X1f_c/X2f_c（相位匹配分量）作图；"
+                                                        "**说明差异**：正交解调取 √(X²+Y²)（默认），单通道只取 X，后者对相位失配更敏感",
+                "'系统选型 / 光程要多少 / 检测限'": "tdlas_detection_limit_scan（1×2：LOD vs 光程、LOD vs 参考浓度）",
+                "'只看 2f 曲线' / '只要吸光度'": "panels 子集（f2 / al）；**注意**非 6 面板时引擎改竖排堆叠",
+            },
+            "无法判断时": "先按标准 6 子图出，并在回答里说明'如需多浓度叠加/混合气分组/只看某分量请告知'——"
+                          "**不要沉默地只给一种**。",
+            "禁止": "用户明确要混合气却只画单组分；要标定曲线却不出 png_overlay；要 X 分量却给正交幅值而不说明。",
+        },
+        "四类图（按工具区分，勿混用）": {
+            "① WMS 仪器链路图": {
+                "工具": "tdlas_wms_instrument",
+                "布局": "3 行 × 2 列共 6 面板，figsize≈14×10，每格约 2:1（横长竖短，利于读线形）",
+                "面板顺序（左→右、上→下）": [
+                    "① 波长调制 V(t)（三角波+正弦调制；横轴 时间(ms)，纵轴 驱动电压(V)）",
+                    "② 直接吸收 DAS（无调制链路）",
+                    "DAS 吸光度 vs 数据库理论值（同图，理论值为虚线对照）**← 与 ② 同一行右侧**",
+                    "③ 一阶谐波 1f（纵轴 1f(V)）",
+                    "④ 二阶谐波 2f（纵轴 2f(V)，单列避免与 1f 混读）",
+                    "⑤ 归一化 2f（标题含归一化方法；纵轴 a.u.）",
+                ],
+                "要点": "**注意 ② 与 'DAS 吸光度' 是同一行的两个面板**——② 是 PD 原始信号，"
+                        "右格才是 αL 与理论对照；不要把两者当成一个面板描述。",
+            },
+            "② DAS 仪器链路图": {
+                "工具": "tdlas_das_instrument",
+                "布局": "5 行 × 1 列竖排，figsize≈9.5×12",
+                "面板顺序": ["drive V (V)", "power (mW)", "PD out (mV)",
+                             "absorbance（吸光度）", "（第 5 格为链路补充信息）"],
+                "备注": "该图轴标签为**英文**（与 WMS 的中文标签不同），描述时按图实际内容陈述，不要臆造中文标题。",
+            },
+            "③ DAS 时域链路图": {
+                "工具": "tdlas_das_chain",
+                "布局": "4 行 × 1 列竖排，figsize≈9×10",
+                "面板顺序": ["三角波时序", "PD 原始时序", "拟合基线与对照", "absorbance 提取结果"],
+                "横轴": "时间 (ms) 为主",
+            },
+            "④ 检测限扫描图": {
+                "工具": "tdlas_detection_limit_scan",
+                "布局": "1 行 × 2 列，figsize≈14×6",
+                "面板顺序": ["LOD vs 光程 L（横轴 光程 L(cm)）",
+                             "LOD vs 参考浓度 x（横轴 参考浓度，弱吸收下应近似平线）"],
+                "用途": "系统选型：看加光程能把 LOD 降到多少",
+            },
+            "⑤ 多浓度同图 png_overlay（附加图，不替代主图）": {
+                "何时": "传 x_list（多浓度）+ save_png=true 时**额外**输出",
+                "内容": "各浓度的代表曲线叠加，横轴浓度(ppm)，用于看响应线性/饱和",
+                "命名": "返回键为 png_overlay，与主图 png 并存",
+            },
+        },
+        "线型约定（每张图都必须遵守）": "实线=有效数据；虚线=理论参考（如 HITRAN 理论 αL）；"
+                          "点线/灰点=剔除区（三角波转折点，不可信）；"
+                          "**每种线型必须在图例里注明含义**。",
+        "横轴约定": "驱动电压用**时间**；其余一律用**扫描波数**（不含 ±a 调制摆动的瞬时波数）"
+                    "——用瞬时波数会把曲线折成'水平条纹'乱麻。",
+        "剔除区": "扫描两端按 trim_frac（默认 12%）剔除，图上以红色带标出；"
+                  "纵轴范围按有效区确定，避免剔除区伪影压扁曲线。",
+        "图外必须同步给出的解读": [
+            "本次用的技术（WMS / DAS）与为什么选它（线密度）",
+            "归一化方法（2f/1f 或 2f/I0）及是否背景扣除",
+            "基线处理方式（理想 I0 / 多项式拟合 / 是否触发回退）",
+            "validation.overall 与其 fail/warn 项（图好看不代表数可用）",
         ],
-        "rule": "1f 与 2f **必须分开**（幅值量级不同，不可同图）；"
-                "PD 原始信号与 DAS αL 分两个子图；理论 αL 与 DAS αL 同图用虚线区分；"
-                "每层标题标注技术名 + 归一化/基线处理方法；剔除区红带标出；"
-                "横轴：驱动电压用时间，其余用波数（扫描波数，非瞬时）。",
-        "标注要求": "用户只说'给我 XX 气体图'时，一律出这套 6 子图；"
-                    "技术名、归一化方法、基线处理（拟合 or 背景扣除）必须在图上显式标注。",
-        "线型约定": "实线=实测/有效数据；虚线=理论参考（如 HITRAN 理论 αL）；"
-                    "点线=剔除区（三角波转折点，不可信）；每种线型必须在图例里注明含义。",
+        "禁止": "① 不传 save_png 就说'已出图'；② 凭印象描述图上没有的内容；"
+                "③ 把 1f 与 2f 画进同一个面板；④ 用理想仿真图暗示实测结果。",
+        "完整描述契约": "用户要'图里有什么'时，按面板顺序逐个说明：面板标题 → 横轴量 → 纵轴量 → "
+                        "该格的结论（如'2f 呈标准双峰，峰位间隔 Δν≈±0.7a'）。",
     },
     "defaults_when_unknown": "所有物理参数未给时按以下顺序索取：① 实测标定值 → "
                              "② 器件型号（AI 自己检索规格书）→ ③ 引导用户现场标定 → ④ 保留内置默认并**显式标注**「默认值 X」。",
@@ -1099,13 +1361,15 @@ def _build_multi_conc(xs, samples, metric_names, metric_func):
 def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
                a=0.10, i0=0.1671, i2=2.48e-3, psi1_pi=1.9356, psi2_pi=4.4138,
                span=0.8, n_scan=401, n_mod=96, sigma_tau=0.0, seed=None,
-               save_png=False, session_id="default", x_list=None):
+               save_png=False, session_id="default", x_list=None, mixture=None):
     """DAS + 免标定 WMS 正向仿真：返回 1f、2f 峰高、DAS 最小透过率、线表信息。
 
     wn0 为目标线中心（cm^-1）；x 为摩尔分数（默认 1e-3 = 1000 ppm，弱吸收）；L 为光程 cm；
     a 为调制深度 cm^-1。sigma_tau 为等效透过率噪声（默认 0=理想无噪）。save_png=True 时出图。
     T/P/x/L 未给出时按「会话已确认 > 默认」取值（复用 tdlas_session 已确认的工况）。
     """
+    if mixture is not None and x_list is not None:
+        raise ValueError("mixture（混合气多组分）与 x_list（单物种多浓度）不能同时使用，请二选一")
     _xd, _Ld = _species_defaults(species)
     _x_raw = x                                  # 保留原始参数（未解析），供 _resolve_x_list 判"x 与 x_list 二选一"
     T, P, x, L, assumed = _resolve_conditions(T, P, x, L, session_id, x_default=_xd, L_default=_Ld)
@@ -1117,10 +1381,12 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
     with _quiet() as g:
         r = ts.simulate(species, wn0, float(T), float(P), float(x), float(L), float(a),
                         i0, i2, p1, p2, float(span), int(n_scan), int(n_mod),
-                        sigma_tau=float(sigma_tau), seed=seed)
+                        sigma_tau=float(sigma_tau), seed=seed, mixture=mixture)
     k2 = int(r["S2f"].argmax())
-    out = {"species": str(species).upper(), "wn0_cm-1": float(wn0), "T_K": float(T),
-           "P_atm": float(P), "mole_frac": float(x), "path_cm": float(L),
+    out = {"species": (str(species).upper() if mixture is None else r["meta"]["species"]),
+           "wn0_cm-1": float(wn0), "T_K": float(T),
+           "P_atm": float(P), "mole_frac": (float(x) if mixture is None else None),
+           "mixture": r["meta"].get("mixture"), "path_cm": float(L),
            "mod_depth_cm-1": float(a),
            "alpha_peak_cm-1": float(r["alpha"].max()),
            "das_tau_min": float(r["tau"].min()),
@@ -1129,7 +1395,7 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
            "wms_2f_peak_nu_cm-1": float(r["wn_scan"][k2]),
            "wms_2f1f_peak": float(r["S2f1f"].max()),
            "n_lines_in_window": r["meta"]["n_lines_in_window"],
-           "table": r["meta"]["table"],
+           "table": r["meta"].get("table"),
            "assumptions": assumed, "needs_confirm": bool(assumed),
            "log": _sanitize_paths(g.getvalue()).splitlines()}
     if save_png:
@@ -1153,7 +1419,7 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
                         "das_tau_min": float(rr["tau"].min())})
         if save_png:                                   # 多浓度同图（兼容性操作）：叠加 α(ν)
             OUT_DIR.mkdir(parents=True, exist_ok=True)
-            _ov = OUT_DIR / f"tdlas_{str(species).upper()}_{float(wn0):g}cm-1_xlist_overlay.png"
+            _ov = OUT_DIR / f"tdlas_{_safe_name(str(species).upper())}_{float(wn0):g}cm-1_xlist_overlay.png"
             ts.plot_multi_x(str(_ov), [xi * 1e6 for xi in _xs],
                             [s["alpha"] for s in _samples], _samples[0]["nu"],
                             r"波数 (cm$^{-1}$)", r"吸收系数 $\alpha$ (cm$^{-1}$)",
@@ -1165,7 +1431,7 @@ def t_simulate(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
 def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
              a=0.10, x_ref=None, k=None, i0=0.1671, i2=2.48e-3,
              psi1_pi=1.9356, psi2_pi=4.4138, span=0.8, session_id="default",
-             n_repeats=0):
+             n_repeats=0, spectrum=None, ref_spectrum=None):
     """免标定浓度反演：由测得的归一化 2f 峰高求摩尔分数 x = peak / k。
 
     k 是**完整链路**灵敏度：优先用调用方传入的 k（来自 tdlas_wms_instrument 返回的
@@ -1239,6 +1505,38 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
                   f"③ 2f 峰值含未扣除的 RAM 基线/背景。")
     else:
         x_status, x_warn = "ok", None
+    # ── 谱线级最小二乘（可选）：用整条归一化 2f 谱拟合，而非只用单个峰值 ──
+    # 为什么：单点除法丢掉整条谱的信息，抗噪差且无法诊断模型失配。
+    # 约定：传 ref_spectrum（同工况 x_ref 下的 S2f_norm_peak 归一谱）最佳；
+    #       只传 spectrum 时内部跑一次参考谱（同工况，仅用于归一化形状）。
+    ls_fit = None
+    if spectrum is not None:
+        try:
+            import tdlas_fit as _TF
+            import numpy as _np          # tdlas_mcp.py 本身不导入 numpy（在引擎侧），故局部导入
+            _meas = _np.asarray(spectrum, dtype=float).ravel()
+            if ref_spectrum is not None:
+                _ref = _np.asarray(ref_spectrum, dtype=float).ravel()
+                if _meas.shape != _ref.shape:
+                    raise ValueError(f"谱长不匹配：spectrum={_meas.size} vs ref_spectrum={_ref.size}")
+                ls_fit = _TF.fit_concentration_ls(_meas, _ref / float(x_ref))
+                ls_fit["k_source"] = "调用方提供的 ref_spectrum（同工况）"
+            else:
+                with _quiet() as _g9:
+                    _rr = ts.simulate_wms_instrument(str(species), wn_center=float(wn0),
+                                                     T=float(T), P=float(P), x=float(x_ref),
+                                                     L_cm=float(L), seed=0)
+                _ref = _np.abs(_rr["S2f_norm_cyc"])[_rr["valid_mask"]]
+                _k1 = _ref / float(x_ref)
+                if _meas.size == _ref.size:
+                    ls_fit = _TF.fit_concentration_ls(_meas, _k1)
+                    ls_fit["k_source"] = "内部参考谱（@x_ref，同工况）"
+                else:
+                    ls_fit = {"error": f"谱长不匹配：spectrum={_meas.size} vs 内部参考={_ref.size}；"
+                                       f"请改传 ref_spectrum（同工况、同采样）"}
+        except Exception as _e:                             # noqa: BLE001
+            ls_fit = {"error": f"{type(_e).__name__}: {_e}"}
+
     out = {"species": str(species).upper(), "mole_frac": x_est,
            "mole_frac_valid": x_status == "ok", "mole_frac_status": x_status,
            "peak_2f1f_in": peak_2f1f, "sensitivity_k": k,
@@ -1253,6 +1551,13 @@ def t_invert(peak_2f1f, species="H2O", wn0=7185.596, T=None, P=None, L=None,
         out["laser_auto_aligned"] = _laser_info
     if _laser_note:
         out["warnings"] = [_laser_note]
+    if ls_fit is not None:
+        out["ls_fit"] = ls_fit
+        if isinstance(ls_fit, dict) and ls_fit.get("x") is not None:
+            out["mole_frac_ls"] = ls_fit["x"]
+            out["mole_frac_ls_sigma"] = ls_fit.get("x_sigma")
+            out["ls_fit_note"] = ("最小二乘用整条谱线；χ²_red ≫ 1 说明存在系统失配"
+                                  "（线形/基线/工况不同源），此时先查前提而非采信 σ。")
     if x_warn:
         out["warning"] = x_warn
 
@@ -1358,13 +1663,15 @@ def t_detection_limit_scan(species="CH4", wn0=2968.5, T=296.0, P=1.01325, a=0.10
 def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
                 span=None, fscan=None, fs=None, baseline_slope=None,
                 sigma=0.0, seed=None, fit_order=None, fit_frac=None,
-                edge=None, save_png=False, x_list=None):
+                edge=None, save_png=False, x_list=None, mixture=None):
     """三角波扫描 DAS 全链路：PD 原始信号 → 多项式基线拟合扣除 → DAS 吸光度信号。
 
     默认工况（未显式给出时使用，并列入 assumptions 供复核）：
         **1000 ppm（x=1e-3）、0.5 m 光程（L=50 cm）、296 K、1 atm、上升沿（edge="rising"）**。
     技术知识见返回中的 edge_note（上升/下降沿为何不重合、如何取舍）。
     """
+    if mixture is not None and x_list is not None:
+        raise ValueError("mixture（混合气多组分）与 x_list（单物种多浓度）不能同时使用，请二选一")
     _DEF = {"T": 296.0, "P": 1.01325, "x": 1e-3, "L": 50.0, "span": 0.8,
             "fscan": 100.0, "fs": 5e5, "baseline_slope": 0.05,
             "fit_order": 3, "fit_frac": 0.3, "edge": "rising"}
@@ -1401,11 +1708,16 @@ def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
         r = ts.simulate_das_td(species, float(wn0), T, P, x, L,
                                span=span, fscan=fscan, fs=fs,
                                baseline_slope=baseline_slope, sigma=float(sigma),
-                               seed=seed, fit_order=fit_order, fit_frac=fit_frac, edge=edge)
+                               seed=seed, fit_order=fit_order, fit_frac=fit_frac, edge=edge,
+                               mixture=mixture)
     tp = float(r["alpha_L_true"].max())
     dp = float(r["das"].max())
-    out = {"species": str(species).upper(), "wn0_cm-1": float(wn0), "T_K": T, "P_atm": P,
-           "mole_frac": x, "mole_ppm": x * 1e6, "path_cm": L, "path_m": L / 100.0,
+    out = {"species": (str(species).upper() if mixture is None else r["meta"]["species"]),
+           "wn0_cm-1": float(wn0), "T_K": T, "P_atm": P,
+           "mole_frac": (x if mixture is None else None),
+           "mole_ppm": (x * 1e6 if mixture is None else None),
+           "mixture": r["meta"].get("mixture"),
+           "path_cm": L, "path_m": L / 100.0,
            "span_cm-1": span, "fscan_Hz": fscan, "fs_Hz": fs, "edge": edge,
            "baseline_slope": baseline_slope, "sigma_tau": float(sigma),
            "fit_order": fit_order, "fit_frac": fit_frac,
@@ -1439,13 +1751,178 @@ def t_das_chain(species="H2O", wn0=7185.596, T=None, P=None, x=None, L=None,
                         "alpha_L_true_peak": float(rr["alpha_L_true"].max())})
         if save_png:                                   # 多浓度同图：叠加 DAS 吸光度
             OUT_DIR.mkdir(parents=True, exist_ok=True)
-            _ov = OUT_DIR / f"das_chain_{str(species).upper()}_{float(wn0):g}cm-1_xlist_overlay.png"
+            _ov = OUT_DIR / f"das_chain_{_safe_name(str(species).upper())}_{float(wn0):g}cm-1_xlist_overlay.png"
             ts.plot_multi_x(str(_ov), [xi * 1e6 for xi in _xs],
                             [s["das"] for s in _samples], _samples[0]["wn_das"],
                             r"波数 (cm$^{-1}$)", "吸光度 (DAS)",
                             f"{str(species).upper()} 多浓度 DAS 吸光度")
             out["png_overlay"] = str(_ov)
     return out
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 契约块的**单一真源**（任务 2）
+# ──────────────────────────────────────────
+# 为什么需要：此前每个工具在自己函数体里**手拼**这些块，于是
+# "同一类工具却拿到不同契约"这种不对称是必然会发生的（实测：
+#   DAS 工具曾缺 `validation`，而它是个定量工具）。
+# 现在把"该工具应交付哪些块"变成**声明**，并由一个函数
+# 统一组装；契约自检里有一条断言：**声明了的块必须真的出现**。
+# 这样"忘了给某个工具加某个块"会变成 CI 失败，而不是静默缺失。
+
+#: 每个块的**唯一生产者**（声明式：想加一个新契约块，只改这里 + 消费端声明）
+# ══════════════════════════════════════════════════════════════════════
+# 输出凭据（provenance）：让一个数可被第三方重建
+# ───────────────────────────────────────────────────────────────
+# 为什么需要："能承担系统选型与方法验证的责任"的前提是**可被引用**，
+# 而可被引用的最低门槛是：别人拿到你的数，能重建出同一个数。
+# 此前输出里有条件（T/P/x/L）、seed、线表名，**但没有版本与数据指纹**——
+# 而 HITRAN 会定期更新线表，同名表的内容会变。
+def _engine_version():
+    """引擎版本：优先取仓库内的版本常量，取不到则标未知。"""
+    for name in ("__version__", "ENGINE_VERSION", "VERSION"):
+        v = globals().get(name)
+        if isinstance(v, str) and v:
+            return v
+    return (SERVER_INFO.get("serverInfo") or {}).get("version") or "unknown"
+
+
+def _input_hash(out):
+    """输入参数指纹（sha256 前 16 位）：由气体、波数、工况与硬件参数共同决定。
+
+    只取**影响数值**的字段，不取描述性块（warnings / validation…），
+    否则同一工况在不同描述下会算出不同指纹。
+    """
+    import hashlib as _h, json as _j
+    keys = ("species", "mixture", "wn_center_cm-1", "conditions", "tri_wave", "laser", "pd",
+            "adc", "wms", "physical_noise", "seed_used", "fringe_report", "results")
+    keep = {}
+    for k in keys:
+        if k in out:
+            v = out[k]
+            if k == "results" and isinstance(v, dict):
+                v = {kk: vv for kk, vv in v.items() if not kk.startswith("noise_")}
+            keep[k] = v
+    blob = _j.dumps(keep, sort_keys=True, ensure_ascii=False, default=str)
+    return _h.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def provenance_block(out, table=None):
+    """给定结果产出"这是什么算出来的"的凭据块。
+
+    语义：把 engine_version + 线表指纹 + 输入指纹 一并给出，
+    使一个数在论文里被引用时可被独立重建与核对。
+    """
+    prov = {"engine_version": _engine_version(),
+            "input_hash": _input_hash(out)}
+    if table:
+        try:
+            prov["line_table"] = ts.th.table_fingerprint(table) \
+                if hasattr(ts, "th") and hasattr(ts.th, "table_fingerprint") else {"table": table}
+        except Exception:                                  # noqa: BLE001
+            prov["line_table"] = {"table": table}
+    _dv = (out or {}).get("device_provenance")
+    if _dv:
+        prov["device_source"] = _dv
+        prov["device_source_note"] = (
+            "本次使用的硬件参数来自设备库：**请如实告知来源**"
+            "（datasheet=U用户提供的规格书；ai=AI 推断；"
+            "unspecified=未声明——此时不得称其为“型号规格”）。")
+    prov["note"] = ("引用本结果时请一并给出 engine_version 与 line_table.sha256_16："
+                    "同名线表会随 HITRAN 更新而变化，无指纹则无法重建。")
+    return prov
+
+
+CONTRACT_BLOCK_PRODUCERS = {
+    "assumptions":            lambda r, m: r.get("assumptions"),
+    "param_requests":         lambda r, m: r.get("param_requests"),
+    "needs_input":            lambda r, m: bool(r.get("param_requests")),
+    "needs_confirm":          lambda r, m: bool(r.get("assumptions")),
+    "warnings":               lambda r, m: (r.get("warnings") if r.get("warnings") is not None
+                                             else (r.get("meta") or {}).get("warnings")),
+    "validation":             lambda r, m: (_validate_any(r) if r.get("validation") is None
+                                             else r.get("validation")),
+    "alpha_report":           lambda r, m: _alpha_report_block(
+                                  (r.get("meta") or {}).get("alpha_context"),
+                                  r.get("species") or m.get("species"),
+                                  m.get("session_id", "default")),
+    "fringe_report":          lambda r, m: _fringe_report_block(
+                                  (r.get("meta") or {}).get("fringe"),
+                                  m.get("session_id", "default")),
+    "fidelity":               lambda r, m: _fidelity_digest(),
+    # 凭据块：从结果里取线表名（tools/results 两种布局都兼容）
+    "provenance":             lambda r, m: provenance_block(
+                                  r, (r.get("results") or {}).get("table")
+                                     or (r.get("meta") or {}).get("table")),
+}
+
+#: 各工具**声明**自己要哪些块。定量工具的模板必须一致（由契约断言强制）。
+#: 声明的语义：**该块一定会被交付**。故只列"总是非空"的块；
+#: 可为空的布尔（needs_input / needs_confirm）不得列入——否则"假值即缺席"
+#: 与"声明了就必须出现"直接矛盾。它们的信息由契约断言单独保障。
+QUANTITATIVE_BLOCKS = ("assumptions", "param_requests",
+                       "warnings", "validation", "alpha_report", "fringe_report", "fidelity",
+                       "provenance")
+CONTRACT_BLOCKS = {
+    "tdlas_wms_instrument":  QUANTITATIVE_BLOCKS,
+    "tdlas_review":          QUANTITATIVE_BLOCKS,
+    "tdlas_das_instrument":  QUANTITATIVE_BLOCKS,
+    # 下列工具不走定量链路，只声明它们真正会产生的块
+    "tdlas_simulate":        ("assumptions", "warnings", "alpha_report", "fidelity"),
+    "tdlas_das_chain":       ("assumptions", "warnings", "alpha_report", "fidelity"),
+    "tdlas_invert":          ("assumptions", "needs_confirm", "warnings", "fidelity"),
+    "tdlas_detection_limit": ("assumptions", "needs_confirm", "fidelity"),
+}
+
+
+def _validate_any(r):
+    """尝试用 WMS 校验器处理任意结果；不适用则返回 None。
+
+    用于不得已的兼容：不同链路的结果字典形状不同，
+    强行调用会 KeyError（不能把"校验不适用"当成"校验失败"）。
+    """
+    try:
+        return ts.validate_wms_result(r)
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+def apply_contract_blocks(out, tool, session_id="default", extra=None):
+    """按声明把契约块统一装进返回体（显式声明，不做隐式推断）。
+
+    只写入 **非 None** 的值：不能为了"字段齐全"而造出一个看着有、实则空的块，
+    那会比缺失更糟（模型会以为已拥有该信息）。
+    返回：实际写入的块名列表（供契约断言比对）。
+    """
+    meta = {"session_id": session_id, "species": (extra or {}).get("species")}
+    written = []
+    for name in CONTRACT_BLOCKS.get(tool, ()):
+        prod = CONTRACT_BLOCK_PRODUCERS.get(name)
+        if prod is None:
+            continue
+        try:
+            val = prod(out, meta)
+        except Exception:                                  # noqa: BLE001
+            val = None
+        # 假值即缺席（None / False / 空列表 / 空字典）：
+        # 不为"字段齐全"而写一个看着有、实则空的块——那会让模型以为已拥有该信息。
+        if not val:
+            continue
+        out[name] = val
+        written.append(name)
+    # 交互契约需要前面的块已就位才能生成动作清单
+    if "interaction" in (extra or {}):
+        try:
+            inter, acts = _interaction_block(out, tool, session_id)
+            out["interaction"] = inter
+            out["next_required_actions"] = acts
+            written += ["interaction", "next_required_actions"]
+        except Exception:                                  # noqa: BLE001
+            pass
+    if extra and extra.get("clarify") is not None:
+        out["clarify"] = extra["clarify"]
+        written.append("clarify")
+    return written
 
 
 _INSTR_KEYS = ("scan_span_cm", "amp_V", "freq_Hz", "offset_V", "phase_deg", "eta_VI", "dnu_dI",
@@ -1588,13 +2065,17 @@ def _maybe_align_laser(wn_center, inst, explicit_keys, device_used=False):
 def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
                      edge=None, fit_order=None, fit_frac=None, seed=0, session_id="default",
                      auto_laser=True, save_png=False, setup=None, laser=None, pd=None, daq=None,
-                     optics=None, x_list=None, **kw):
+                     optics=None, x_list=None, mixture=None, **kw):
     """仪器系统级 DAS 仿真：DAQ 电压 → 激光 → 光路 → PD → ADC 量化 → 基线扣除。
 
     缺省参数按优先级索取：① 用户实测标定值 → ② 器件型号（AI 检索规格书）
     → ③ 引导用户现场测量 → ④ 内置默认（常见 16-bit USB DAQ + 典型中红外 DFB 激光器）。
     返回 assumptions / param_requests / warnings，供 AI 主动向用户澄清后再解读结论。
+    mixture（可选）：混合气多组分，α=Σ x_i·α_pure_i（"CH4:0.01,CO2:0.04" 或 [{"species","x"}]）；
+    与单物种 x 二选一，且不能与 x_list 同用。
     """
+    if mixture is not None and x_list is not None:
+        raise ValueError("mixture（混合气多组分）与 x_list（单物种多浓度）不能同时使用，请二选一")
     given_scene = {"T": T, "P": P, "x": x, "L_cm": L_cm, "edge": edge,
                    "fit_order": fit_order, "fit_frac": fit_frac}
     # 工况优先级：本次显式给 > 会话已确认(跨会话记忆) > 全局默认（与 t_wms_instrument 一致）
@@ -1640,7 +2121,8 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                        T=float(scene["T"]), P=float(scene["P"]),
                                        x=float(scene["x"]), L_cm=float(scene["L_cm"]),
                                        edge=scene["edge"], fit_order=int(scene["fit_order"]),
-                                       fit_frac=float(scene["fit_frac"]), seed=seed, **inst)
+                                       fit_frac=float(scene["fit_frac"]), seed=seed,
+                                       mixture=mixture, **inst)
     m = r["meta"]
     cfg = m["cfg"]
     _dark_note = _partial_dark_note(cfg)     # 暗区披露（allow_partial_dark 时才可能非空）
@@ -1659,7 +2141,9 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     _used = {k: (scene[k] if k in scene else cfg.get(k)) for k in assumed}
     _clarify_qs = build_clarify_questions(species, wn_center, assumed, _used)
 
-    out = {"species": str(species).upper(), "wn_center_cm-1": float(wn_center),
+    out = {"species": m["species"], "wn_center_cm-1": float(wn_center),
+           "mixture": m.get("mixture"),
+           "mole_frac": (None if mixture is not None else float(cfg["x"])),
            "scan_window_cm-1": [round(m["scan_lo"], 4), round(m["scan_hi"], 4)],
            "scan_half_span_cm-1": round(m["span_cm-1"], 4),
            "tri_wave": {k: cfg[k] for k in ("amp_V", "freq_Hz", "offset_V", "phase_deg")},
@@ -1676,10 +2160,12 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                               "rin": m["sigma_rin"] * 1e3},
                        "n_lines_in_window": m["n_lines_in_window"], "table": m["table"]},
            "conditions": {"T_K": float(cfg["T"]), "P_atm": float(cfg["P"]),
-                          "x": float(cfg["x"]), "L_cm": float(cfg["L_cm"])},
+                          "x": (None if mixture is not None else float(cfg["x"])),
+                          "L_cm": float(cfg["L_cm"])},
            "assumptions": assumed,
            "param_requests": requests,
            "needs_input": bool(requests),
+           "needs_confirm": bool(assumed),   # 与 WMS 同口径：有默认值就需用户确认
            "clarify": {"needed": bool(requests),
                        "instruction": "needed=True 时：**先向用户提出 questions 里的澄清问题，"
                                       "收到回答前不要直接出图/下结论**。用户明确说'用默认值'才可跳过。"
@@ -1701,6 +2187,9 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                f"允许的键见 tools/list 的 inputSchema")
     out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species, session_id)
     out["fringe_report"] = _fringe_report_block(m.get("fringe"), session_id)
+    # DAS 结果校验（与 WMS 的 validate_wms_result 同位）：DAS 是定量技术，此前**没有**
+    # 任何自动校验，只有场景级 warnings。判据见 tdlas_sim.validate_das_result 的文档。
+    out["validation"] = ts.validate_das_result(r)
     if _multi:
         _samples = [r] + [
             ts.simulate_das_instrument(species, wn_center=float(wn_center),
@@ -1729,6 +2218,14 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
         with _quiet():
             ts.plot_das_instrument(r, png)
         out["png"] = str(png)
+    # 设备来源：回显本次用的硬件参数来自哪里（datasheet/user/ai/...）
+    _dprov = _device_provenance(setup, laser, pd, daq, optics)
+    if _dprov:
+        out["device_provenance"] = _dprov
+    # 凭据块：让本结果可被第三方重建（引擎版本 + 线表指纹 + 输入指纹）
+    # ⚠ 必须在 device_provenance **之后** 生成，否则 provenance 里看不到设备来源。
+    if "provenance" not in out:
+        out["provenance"] = provenance_block(out, m.get("table"))
     return out
 
 
@@ -1745,12 +2242,16 @@ _INSTR_KEYS_WMS = _INSTR_KEYS + _WMS_ONLY_KEYS
 def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
                      seed=0, session_id="default", auto_laser=True, save_png=False,
                      return_xy=False, x_list=None,
-                     setup=None, laser=None, pd=None, daq=None, optics=None, **kw):
+                     setup=None, laser=None, pd=None, daq=None, optics=None, mixture=None, **kw):
     """WMS 仪器链路仿真：三角波扫描 + 正弦调制 → 激光 → 光路 → PD → ADC → 数字锁相（2f/1f）。
 
     调制幅值默认按**最优调制系数 m≈2.2** 自动优化（2f 峰值最大处）。
     未给出的参数列入 assumptions / param_requests；AI 须按 AI_INTERACTION_GUIDE 处理并显式标注。
+    mixture（可选）：混合气多组分，α=Σ x_i·α_pure_i（"CH4:0.01,CO2:0.04" 或 [{"species","x"}]）；
+    与单物种 x 二选一，不能与 x_list 同用；给定时 species 仅作标签。各组分 αL 叠加在标准图的 αL 面板。
     """
+    if mixture is not None and x_list is not None:
+        raise ValueError("mixture（混合气多组分）与 x_list（单物种多浓度）不能同时使用，请二选一")
     import numpy as np
     sp = str(species).strip().upper()
     prof = SPECIES_PROFILES.get(sp, {})
@@ -1801,7 +2302,8 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
         r = ts.simulate_wms_instrument(species, wn_center=float(wn_center),
                                        T=float(scene["T"]), P=float(scene["P"]),
                                        x=float(scene["x"]), L_cm=float(scene["L_cm"]),
-                                       seed=seed, return_xy=bool(return_xy), **inst)
+                                       seed=seed, return_xy=bool(return_xy),
+                                       mixture=mixture, **inst)
     m = r["meta"]
     cfg = m["cfg"]
     _dark_note = _partial_dark_note(cfg)     # 暗区披露（allow_partial_dark 时才可能非空）
@@ -1829,7 +2331,9 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     _used = {k: (scene[k] if k in scene else cfg.get(k)) for k in assumed}
     _clarify_qs = build_clarify_questions(species, wn_center, assumed, _used)
 
-    out = {"species": str(species).upper(), "wn_center_cm-1": float(wn_center),
+    out = {"species": m["species"], "wn_center_cm-1": float(wn_center),
+           "mixture": (m.get("mixture") if mixture is not None else None),
+           "mole_frac": (None if mixture is not None else float(cfg["x"])),
            "condition_advice": adaptive_condition(species, wn_center),
            "scan_window_cm-1": [round(float(r["nu_axis"].min()), 4),
                                 round(float(r["nu_axis"].max()), 4)],
@@ -1865,11 +2369,25 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                            "note": "与 sensitivity_k 同区间取峰。⚠ 但配反演用的量是 S2f_norm_peak，"
                                    "**不是**本值：只有归一化方法为 2f/1f 时二者才相等，"
                                    "1f 失效自动退化为 2f/I0 时二者不同"},
-                       "sensitivity_k": m["sensitivity_k"],
-                       "sensitivity_note": "sensitivity_k = S2f_norm_peak / x（完整链路）；"
-                                           "tdlas_invert 的 k 传本值、peak_2f1f 传 S2f_norm_peak，"
-                                           "二者成对（勿用解析版灵敏度）",
+                       "sensitivity_k": (m["sensitivity_k"] if mixture is None else None),
+                       "sensitivity_note": ("sensitivity_k = S2f_norm_peak / x（完整链路）；"
+                                            "tdlas_invert 的 k 传本值、peak_2f1f 传 S2f_norm_peak，"
+                                            "二者成对（勿用解析版灵敏度）"
+                                            if mixture is None else
+                                            "混合气下「单物种浓度 x」无定义 → sensitivity_k 不给出"
+                                            "（=null，不做无据外推）；反演请按组分逐一建模或改用 DAS 全谱拟合"),
                        "S2f1f_peak_nu_cm-1": float(r["nu_axis"][kpk]),
+                       # ★ 与 S2f_norm_peak **同工况配套**的两条数组，供
+                       #   tdlas_invert(spectrum=, ref_spectrum=) 做谱线级最小二乘。
+                       #   约定：ref = S2f_norm_cyc / x（单位浓度谱形 k₁），两者同长同掩膜。
+                       "S2f_norm_spectrum": [float(v) for v in np.abs(r["S2f_norm_cyc"])[valid_i]],
+                       "k1_spectrum_per_unit_x": [
+                           float(v) / float(scene["x"] if scene.get("x") else 1.0)
+                           for v in np.abs(r["S2f_norm_cyc"])[valid_i]],
+                       "spectrum_note": ("S2f_norm_spectrum 是前景谱（含测试浓度）；"
+                                         "k1_spectrum_per_unit_x = 同谱 / x，即单位浓度谱形。"
+                                         "把它们作为 tdlas_invert 的 spectrum / ref_spectrum 传入即可"
+                                         "做最小二乘（因为满足 x = peak / k 的同源要求）。"),
                        "v_pd_mean_V": m["v_pd_mean"], "saturated_points": m["n_sat"],
                        "noise_breakdown_mV": {"shot": m["sigma_shot"] * 1e3,
                                               "thermal": m["sigma_thermal"] * 1e3,
@@ -1883,7 +2401,8 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
            # 实际生效的工况：assumptions 只说"哪些用了默认"，数值必须一起回显，
            # 否则 AI 只能写"用了默认值"却报不出数值（= 拿不到数据）
            "conditions": {"T_K": float(cfg["T"]), "P_atm": float(cfg["P"]),
-                          "x": float(cfg["x"]), "L_cm": float(cfg["L_cm"])},
+                          "x": (None if mixture is not None else float(cfg["x"])),
+                          "L_cm": float(cfg["L_cm"])},
            "assumptions": assumed, "param_requests": requests,
            "needs_input": bool(requests),
            "clarify": {"needed": bool(requests),
@@ -1960,10 +2479,20 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
             ts.plot_multi_x(str(_ov), [xi * 1e6 for xi in _xs],
                             [np.abs(s["S2f_norm_cyc"]) for s in _samples],
                             _samples[0]["nu_axis"],
-                            [s["valid_mask"] for s in _samples],
                             r"波数 (cm$^{-1}$)", "归一化 2f/1f (a.u.)",
-                            f"{str(species).upper()} 多浓度 WMS 2f/1f")
+                            f"{str(species).upper()} 多浓度 WMS 2f/1f",
+                            valid=[s["valid_mask"] for s in _samples])
             out["png_overlay"] = str(_ov)
+    if mixture is not None and r.get("alphaL_per_species"):
+        # 各组分对总吸收的贡献（供 AI 说明"谁主导"）；混合气纪律见返回 note
+        out["mixture_breakdown"] = {
+            "note": "α = Σ x_i·α_pure_i(T, P, 空气浴)：每个组分单独在 T/P 下按空气展宽算 α_pure，"
+                    "再乘自己的摩尔分数后相加；**绝不可把分压设成 x·P**（那会算错窄线宽）。"
+                    "N2/O2/Ar 在 3.3 μm 无吸收线，只贡献碰撞展宽（已含在 HITRAN γ_air 内），"
+                    "不作为吸收组分叠加。",
+            "per_species": [{"label": p["label"], "alphaL_peak": float(np.max(p["alphaL"]))}
+                            for p in r["alphaL_per_species"]],
+            "alphaL_total_peak": m["alpha_L_peak"]}
     out["fidelity"] = _fidelity_digest()
     out["interaction"], out["next_required_actions"] = _interaction_block(out, "wms", session_id)
     if save_png:
@@ -1973,15 +2502,25 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
             ts.plot_wms_instrument(r, png)
         out["png"] = str(png)
     if return_xy and "X1f_c" in r:                  # BUG-D 修复：透出锁相正交 X/Y 分量
-        out["wms_raw_xy"] = {k: r[k] for k in ("X1f_c", "Y1f_c", "X2f_c", "Y2f_c",
-                                               "X1f_bg_c", "Y1f_bg_c", "X2f_bg_c", "Y2f_bg_c")}
+        # ⚠ 必须转 list：这些是 numpy ndarray，直接入返回体会在 JSON-RPC
+        #   序列化时抛 TypeError（整次调用失败）—— Python 直接调用不会暴露，
+        #   故必须在这里转成可序列化的纯量。
+        out["wms_raw_xy"] = {k: [float(v) for v in r[k]]
+                             for k in ("X1f_c", "Y1f_c", "X2f_c", "Y2f_c",
+                                       "X1f_bg_c", "Y1f_bg_c", "X2f_bg_c", "Y2f_bg_c")}
         out["wms_raw_xy_note"] = ("锁相正交分量（信号支路 X/Y 与无吸收参考谱 X/Y_bg），"
                                   "是背景扣除的输入：2f/1f 复减 = X2f_c/X1f_c − X2f_bg_c/X1f_bg_c。")
+    # 凭据块：让本结果可被第三方重建（引擎版本 + 线表指纹 + 输入指纹）
+    # 设备来源：回显本次用的硬件参数来自哪里（datasheet/user/ai/...）
+    _dprov = _device_provenance(setup, laser, pd, daq, optics)
+    if _dprov:
+        out["device_provenance"] = _dprov
+    out.setdefault("provenance", provenance_block(out, m.get("table")))
     return out
 
 
 def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
-             seed=0, session_id="default", x_list=None, **kw):
+             seed=0, session_id="default", x_list=None, return_xy=False, **kw):
     """二次审核 / 多轮核对：跑一遍 WMS 并只返回自动校验报告（不画图）。
 
     用于在给出最终结论前，对结果做独立复核；非专业用户可据此判断"是否可信"。
@@ -1989,7 +2528,8 @@ def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
     参数与 tdlas_wms_instrument **完全同源**（实现上就是透传）。
     """
     out = t_wms_instrument(species=species, wn_center=wn_center, T=T, P=P, x=x, L_cm=L_cm,
-                           seed=seed, session_id=session_id, save_png=False, x_list=x_list, **kw)
+                           seed=seed, session_id=session_id, save_png=False,
+                           x_list=x_list, return_xy=bool(return_xy), **kw)
     _rev = {"species": out["species"], "wn_center_cm-1": out["wn_center_cm-1"],
             "validation": out["validation"], "warnings": out["warnings"],
             "key_metrics": {"alpha_L_peak": out["results"]["alpha_L_peak"],
@@ -2008,6 +2548,8 @@ def t_review(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_cm=None,
                           "warn 项须向用户说明。"}
     _rev["interaction"], _rev["next_required_actions"] = _interaction_block(_rev, "review",
                                                                            session_id)
+    # 凭据块：让本结果可被第三方重建（引擎版本 + 线表指纹 + 输入指纹）
+    _rev["provenance"] = provenance_block(out, (out.get("results") or {}).get("table"))
     return _rev
 
 
@@ -2095,6 +2637,14 @@ def t_device(action="list", device_type=None, name=None,
             return {"error": "save 需要非空的设备名 name"}
         if len(nm) > 64:
             return {"error": f"设备名过长（{len(nm)} 字符，限 64）"}
+        _ok_nm, _why = _name_is_distinctive(nm, dt)
+        if not _ok_nm:
+            _sug = _suggest_setup_name(dev, **{dt: nm})
+            return {"error": f"设备名不够显著：{_why}",
+                    "why_it_matters": "设备名是以后引用时**唯一看得到的东西**；"
+                                      "名字分不出来，用户与 AI 都选不对设备。",
+                    "suggested_names": [n for n in (
+                        _sug, f"{dt}_{nm}", f"{nm}_SN0001") if n and len(n) >= 3]}
         entry = {k: params[k] for k in _DEVICE_TYPES[dt] if k in params and params[k] is not None}
         if not entry:
             return {"error": f"未提供任何可用参数；{_DEVICE_TYPE_CN[dt]}允许的键："
@@ -2103,6 +2653,23 @@ def t_device(action="list", device_type=None, name=None,
         if bad:
             return {"error": f"设备 {dt}:{nm} 参数非法：{bad}；"
                              f"{_DEVICE_TYPE_CN[dt]}允许的键：{_DEVICE_TYPES[dt]}"}
+        _prev = dev.get(dt, {}).get(nm) or {}
+        # ★ 来源追踪：用户会把规格书/说明书/混杂信息交给 AI，AI 负责
+        #   构建仪器库。若不记来源，三个月后无人能判断某个 dnu_dI
+        #   是**查到的**还是**AI 推的** —— 而这正是 AI 幻觉最容易藏身的地方。
+        #   不给 source 时记为 "unspecified"（而非默认成 datasheet），
+        #   避免把"不知道哪来的"包装成"有出处"。
+        _src = str(params.get("source") or _prev.get("source") or "unspecified").strip()
+        if _src not in ("datasheet", "user", "ai", "calibration", "unspecified"):
+            _src = "unspecified"
+        _note = params.get("source_note") or _prev.get("source_note")
+        entry = dict(entry)
+        entry["source"] = _src
+        if _note:
+            entry["source_note"] = str(_note)[:200]
+        entry["fields"] = sorted(k for k in _DEVICE_TYPES[dt] if k in params and params[k] is not None) \
+            or sorted(k for k in _prev.get("fields", []) if k in _DEVICE_TYPES[dt])
+        entry["updated"] = _dt.datetime.now().strftime("%Y-%m-%d")
         dev.setdefault(dt, {})[nm] = entry
         _save_devices(dev)
         out = {"saved": f"{dt}:{nm}", "params": entry,
@@ -2125,19 +2692,43 @@ def t_device(action="list", device_type=None, name=None,
         return {"default": dict(dev["default"])}
 
     if action == "save_setup":
-        nm = str(name)
-        if not nm:
-            return {"error": "save_setup 需要 name（整机配置名）"}
         st = {k: v for k, v in {"laser": laser, "pd": pd, "daq": daq, "optics": optics}.items() if v}
-        for k, dname in st.items():
-            if dname not in dev.get(k, {}):
-                return {"error": f"{_DEVICE_TYPE_CN[k]}设备 {dname!r} 不存在，请先 save"}
+        # ① 缺设备：不只报错，而是告诉 AI **该向用户问什么**
+        guide = _device_setup_guide(dev, laser, pd, daq, optics)
+        if guide["missing"]:
+            return {"error": "打包整机失败：有设备尚未建库",
+                    "need_devices": guide["missing"],
+                    "available": guide["available"],
+                    "ai_instruction": guide["ai_instruction"]}
+        if not st:
+            return {"error": "save_setup 需要至少一台设备（laser/pd/daq/optics）"}
+        # ② 名字：未给或不够显著时，**AI 自动拼一个显著名**（用户不需要想名字）
+        nm = str(name or "").strip()
+        auto_named = False
+        if not nm:
+            nm = _suggest_setup_name(dev, laser, pd, daq, optics)
+            auto_named = True
+        _ok_nm, _why = _name_is_distinctive(nm)
+        if not _ok_nm:
+            _sug = _suggest_setup_name(dev, laser, pd, daq, optics)
+            return {"error": f"整机名不够显著：{_why}",
+                    "why_it_matters": "整机名是用户以后选设备时**唯一看得到的东西**；"
+                                      "名字分不出来，会选错设备。",
+                    "suggested_names": [n for n in (_sug, f"{nm}_2026") if n and len(n) >= 3]}
+        if nm in (dev.get("setup") or {}):
+            return {"error": f"整机名 {nm!r} 已存在（避免覆盖已有配置）",
+                    "hint": "请换一个显著且不同的名字，或先用 action=view 查看已有配置"}
         full = {"laser": st.get("laser"), "pd": st.get("pd"),
                 "daq": st.get("daq"), "optics": st.get("optics")}
         dev.setdefault("setup", {})[nm] = full
         _save_devices(dev)
-        return {"saved_setup": nm, "setup": full,
-                "hint": f"引用：setup={nm!r}"}
+        out = {"saved_setup": nm, "setup": full, "hint": f"引用：setup={nm!r}"}
+        if auto_named:
+            out["name_auto_generated"] = True
+            out["name_note"] = ("未给合适整机名，已按设备名自动拼接。"
+                                "若你有更好的名字（如“实验室A_多通池10m”），"
+                                "可用同名重存或换名重建。")
+        return out
 
     return {"error": f"unknown action {action!r}"}
 
@@ -2189,6 +2780,23 @@ DISPATCH = {"tdlas_simulate": t_simulate,
             "tdlas_detection_limit_scan": t_detection_limit_scan,
             "tdlas_selftest": t_selftest}
 
+# 混合气多组分声明。四个仿真工具共用同一份定义，避免各写一遍后漂移
+# （历史上 review/wms 的属性表就是这样脱节的）。
+_MIXTURE_PROP = {
+    "description": "混合气多组分：α = Σ x_i·α_pure_i(T, P，空气浴展宽)。"
+                   "写法 \"CH4:0.01,CO2:0.04\"，或 [{\"species\":\"CH4\",\"x\":0.01}, …]。"
+                   "与单物种 x 二选一，且不能与 x_list 同用；给定时 species 仅作标签。"
+                   "N2/O2/Ar 无吸收线、只贡献碰撞展宽（已含在 HITRAN γ_air 内），不要写成组分。",
+    "anyOf": [
+        {"type": "string"},
+        {"type": "array", "items": {"type": "object",
+                                    "properties": {"species": {"type": "string"},
+                                                   "x": {"type": "number"}},
+                                    "required": ["species", "x"]}},
+        {"type": "array", "items": {"type": "string"}},
+    ],
+}
+
 TOOLS = [
     {"name": "tdlas_simulate",
      "description": "【数值计算，不是画图工具】TDLAS/WMS 简化解析模型：返回 DAS 透过率、1f、2f 峰高等数值。"
@@ -2208,6 +2816,7 @@ TOOLS = [
                                                    "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
                                                    "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"
                                                    "save_png=true 时额外输出 png_overlay（多浓度同图，兼容性操作，用于混合气/标定对照）。"},
+                         "mixture": _MIXTURE_PROP,
                          "L": {"type": "number", "description": "光程 cm；缺省=会话已确认或 30"},
                          "session_id": {"type": "string", "description": "会话标识，默认 default（复用 tdlas_session 已确认工况）"},
                          "a": {"type": "number", "description": "调制深度 cm^-1，默认 0.1"},
@@ -2238,6 +2847,7 @@ TOOLS = [
                                                    "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
                                                    "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"
                                                    "save_png=true 时额外输出 png_overlay（多浓度同图，兼容性操作，用于混合气/标定对照）。"},
+                         "mixture": _MIXTURE_PROP,
                          "L": {"type": "number", "description": "光程 cm，默认 50（0.5 m）"},
                          "span": {"type": "number", "description": "扫描半宽 cm^-1，默认 0.8"},
                          "fscan": {"type": "number", "description": "三角波频率 Hz，默认 100"},
@@ -2276,6 +2886,7 @@ TOOLS = [
                                                    "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
                                                    "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"
                                                    "save_png=true 时额外输出 png_overlay（多浓度同图，兼容性操作，用于混合气/标定对照）。"},
+                         "mixture": _MIXTURE_PROP,
                          "L_cm": {"type": "number", "description": "光程 cm，默认 50"},
                          "scan_span_cm": {"type": "number", "description": "三角波扫描半宽 cm⁻¹，默认 1.5（amp_V 由它自动反算，一般无需手填）"},
                          "amp_V": {"type": "number", "description": "三角波幅值 V（**通常无需手填**：由 wn_center+scan_span_cm 自动反算；需固定电压时覆盖）"},
@@ -2350,6 +2961,7 @@ TOOLS = [
                                                    "（响应/浓度 偏离线性 >10% 即提示进非线性区）。"
                                                    "防呆：空/越界/超 64 点会被拒绝，自动去重并升序；也接受 '1e-4,1e-3' 字符串。"
                                                    "save_png=true 时额外输出 png_overlay（多浓度同图，兼容性操作，用于混合气/标定对照）。"},
+                         "mixture": _MIXTURE_PROP,
                          "return_xy": {"type": "boolean",
                                        "description": "是否返回锁相正交分量 X/Y（信号支路 X1f_c/Y1f_c/X2f_c/Y2f_c "
                                                       "与无吸收参考谱 X1f_bg_c/…）。默认 false：每次返回多 8 条等长数组，"
@@ -2392,7 +3004,7 @@ TOOLS = [
                          "fringe_phase_rad": {"type": "number"}, "fringe_drift_frac": {"type": "number"},
                          "d2nu_dI2": {"type": "number",
                                       "description": "调谐二阶非线性 cm⁻¹/mA²，默认 0"},
-                         "am_i0": {"type": "number", "description": "RAM 1f 强度调制幅度，默认 0（纯 FM）"},
+                         "am_i0": {"type": "number", "description": "RAM 1f 强度调制幅度（相对光强），默认 0.02（真实 DFB 典型 0.01–0.05；此前 0=纯 FM 是理想化）"},
                          "am_i2": {"type": "number", "description": "RAM 2f 强度调制幅度，默认 0"},
                          "am_psi1": {"type": "number", "description": "AM 相对 FM 相位差 rad，默认 0"},
                          "am_psi2": {"type": "number", "description": "二阶 AM 相位差 rad，默认 0"},
@@ -2492,6 +3104,15 @@ TOOLS = [
                          "pd": {"type": "string", "description": "save_setup 时：探测器设备名"},
                          "daq": {"type": "string", "description": "save_setup 时：采集卡设备名"},
                          "optics": {"type": "string", "description": "save_setup 时：光学元件设备名"},
+                         "source": {"type": "string",
+                                    "enum": ["datasheet", "user", "ai", "calibration", "unspecified"],
+                                    "description": "★参数来源（save 时记录，引用时回显）："
+                                                   "datasheet=用户提供的规格书/说明书；"
+                                                   "user=用户口述或实测；ai=AI 推断；"
+                                                   "calibration=现场标定；不填=unspecified。"
+                                                   "**请务必如实填写**：AI 推断的值不得标为 datasheet"},
+                         "source_note": {"type": "string",
+                                         "description": "来源细节（如“规格书页码/表号”、“实测方法”），限 200 字"},
                          "eta_VI": {"type": "number"}, "dnu_dI": {"type": "number"},
                          "d2nu_dI2": {"type": "number"}, "wn_ref": {"type": "number"},
                          "i_ref": {"type": "number"}, "i_th": {"type": "number"},
@@ -2545,6 +3166,13 @@ TOOLS = [
                          "i2": {"type": "number", "description": "【遗留参数】解析版 2f 基线，完整链路下不生效"},
                          "psi1_pi": {"type": "number", "description": "【遗留参数】完整链路下不生效"},
                          "psi2_pi": {"type": "number", "description": "【遗留参数】完整链路下不生效"},
+                         "spectrum": {"type": "array", "items": {"type": "number"},
+                                      "description": "可选：待反演的**整条归一化 2f 谱**"
+                                                     "（通常取 tdlas_wms_instrument 的 results.S2f_norm_peak 连续谱）。"
+                                                     "给它即走最小二乘（比单点除法更准、且给 χ² 诊断）"},
+                         "ref_spectrum": {"type": "array", "items": {"type": "number"},
+                                          "description": "可选：**同工况** x_ref 下的参考谱（与 spectrum 同长）。"
+                                                         "缺省时内部跑一次（同工况，但采样必须一致）"},
                          "n_repeats": {"type": "integer",
                                        "description": "测量不确定度：同工况重复仿真次数（默认 0=不算）。建议 ≥10 才可引用；耗时 ≈ n_repeats × 单次链路。只含统计（随机）分量，系统项未计入"}},
                      "required": ["peak_2f1f", "species", "wn0"]}},
