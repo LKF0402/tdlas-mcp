@@ -37,6 +37,7 @@ DAQ 电压(三角波+正弦调制) → 激光器调谐 → HITRAN 气体吸收 �
 ## ✨ 核心特性
 
 - **仪器级全链路建模**：DAQ 三角波 + 正弦调制 → 激光调谐（含二次非线性）→ HITRAN 吸收 → PD 一阶带宽 → ADC 中平量化 → 数字锁相（整数调制周期滑动平均）→ 2f/1f 与 2f/I0 归一化，另可选 etalon 条纹、RIN、1/f 漂移等效应
+- **混合气多组分吸收**：四个仿真工具均支持 `mixture`（`"CH4:0.01,CO2:0.04"` 或 `[{"species","x"}]`），严格按 `α = Σ x_i·α_pure_i(T, P, 空气浴)` 逐点相加——**不用 x·P 当分压**（那会算错窄线宽与浓度定标）。各组分曲线在既有标准图内叠加，随返回给 `alphaL_per_species` 与 `mixture_breakdown`（谁主导），与单 `x` 二选一、与 `x_list` 互斥
 - **AI 交互契约（结构化动作）**：每次返回都带 `interaction`（`stage` / `physics_ok` / `result_usable` / `conclusion_allowed` / `blocking_reason`）与 `next_required_actions`（`id` / `severity` / `action` / `evidence_fields` / `values`）。"必须澄清 / 必须披露"不是写在文档里的建议，而是**随返回值下发、并被契约测试钉住**的机器可读动作
 - **保真度台账（单一真源）**：`tools/tdlas_fidelity.py` 把"效应 ↔ 实现位置 ↔ 是否真生效 ↔ 已知缺口"写成可执行表，并对源码证据与参数可达性做离线审计。当前 **11 项默认生效 / 6 项需显式开启 / 7 项未建模**；未建模项随结果披露，避免把点值当成带误差的结果
 - **测量不确定度（统计分量）**：`tdlas_invert(n_repeats>0)` 给出 run-to-run 散布、σ 的 95% 区间与小样本警告；口径明确为**只含随机分量**，不含 k 标定误差、数据库不确定度、线型近似与 etalon 条纹
@@ -90,6 +91,9 @@ python tools/contract_check.py
 # 离线保真度审计：能力台账 ↔ 源码证据 ↔ 参数可达性（CI 硬门禁）
 python tools/tdlas_fidelity.py
 
+# 离线 α(ν) 独立交叉验证：SciPy Voigt 自实现标度 vs HAPI（CI 硬门禁）
+python tools/alpha_crossval.py
+
 # 接入 MCP 客户端（stdio）
 # 将 mcp.config.example.json 中 args 路径改为实际安装路径即可
 ```
@@ -100,9 +104,26 @@ python tools/tdlas_fidelity.py
 > 请帮我配置 tdlas-mcp MCP 服务器，本地路径 <你的 tdlas-mcp 安装路径>，
 > Python 解释器路径 <你的 python.exe 路径>，
 > 入口文件 tools/tdlas_mcp.py。
+> 并把本项目的 SKILL.md 安装为 Skill。
 > ```
->
-> 同时建议将 [SKILL.md](./SKILL.md) 作为独立 Skill 安装，使 AI 读取完整交互协议与出图规范。
+
+## ⚠️ 必须同时安装 Skill（不是可选）
+
+`SKILL.md` **不是文档，是 AI 的行为规范**——它规定 AI 在拿到工具返回后**必须怎么做**：
+
+| 只有 MCP | MCP + Skill |
+|---|---|
+| AI 能看到 `next_required_actions`，但不一定照做 | Skill 规定"按 `next_required_actions` 逐条照做" |
+| AI 可能把默认值当实测值报出 | Skill 规定"保留默认值必须显式标注" |
+| AI 可能编造器件参数 | Skill 规定 **`source` 必须如实填**（推断=ai，不得冒充 datasheet） |
+| AI 可能给设备起 `a1`/`test` 这种名字 | Skill 规定命名必须含型号/波长 |
+
+**服务器只能保证 AI「看到」，Skill 才能规定 AI「照做」。** 用户只需上传素材（器件型号/规格书），建库、命名、打包、披露都由 AI 按 Skill 执行。
+
+安装方式（任选其一）：
+
+- 把 `SKILL.md` 放到你的 AI 客户端的 Skill 目录（如 `.claude/skills/`、`.codebuddy/skills/` 等）；
+- 或直接让 AI 读取本文件：`请阅读 <路径>/SKILL.md 并作为本次任务的行为规范`。
 
 ## 🔧 工具列表
 
@@ -120,6 +141,8 @@ python tools/tdlas_fidelity.py
 | tdlas_device | 硬件参数库管理（激光器/探测器/DAQ/光学） |
 | tdlas_guide | AI 交互协议、术语表与保真度台账（`fidelity`） |
 | tdlas_selftest | 全链路自检 |
+
+> 四个仿真工具（`tdlas_wms_instrument` / `tdlas_das_instrument` / `tdlas_simulate` / `tdlas_das_chain`，及透传的 `tdlas_review`）共用一对可选项：`mixture`（混合气多组分，见上）与 `x_list`（单物种多浓度扫描，`save_png=true` 时另出多浓度同图 `png_overlay`）。两者**互斥**，与单 `x` **二选一**。
 
 ## 🌐 远程部署
 

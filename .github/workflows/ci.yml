@@ -35,12 +35,37 @@ jobs:
         python -m py_compile tools/remote_link.py
         python -m py_compile tools/contract_check.py
         python -m py_compile tools/tdlas_fidelity.py
+        python -m py_compile tools/alpha_crossval.py
 
     # 硬门禁（离线、确定性）：schema↔签名一致性、参数透传、越界重锚、
     # 未知键拒绝、批量请求、文件名净化等。这些是不依赖 HITRAN 的契约，必须每次全绿。
     # -X utf8：Windows runner 控制台默认 CP1252，脚本虽已自行 reconfigure，这里再加一道。
+    #
+    # ★ 为什么额外断言"最低通过数"：契约自检曾经**在写盘那一节抛权限异常直接终止**，
+    #   后面的检查全部没跑，而 CI 依然显示"绿"（实测只跑到 80 项就断了）。
+    #   脚本自身已改为遇环境限制记 SKIP 而非中断；这里再加一道：通过数低于下限即说明
+    #   有检查被静默吞掉（新节没跑到 / 提前 return / 异常被吞），必须变红。
+    #   维护：新增检查后把下限同步抬高（当前实测 138 通过 / 2 跳过）。
     - name: Contract check (offline)
-      run: python -X utf8 tools/contract_check.py
+      shell: pwsh
+      run: |
+        $MIN_PASS = 130
+        $out = python -X utf8 tools/contract_check.py
+        $code = $LASTEXITCODE
+        $out | ForEach-Object { Write-Host $_ }
+        $pass = ([regex]::Matches(($out -join "`n"), '(?m)^\s*PASS\s')).Count
+        Write-Host "contract: pass=$pass min=$MIN_PASS exit=$code"
+        if ($code -ne 0) { Write-Error "contract_check 退出码非 0"; exit 1 }
+        if ($pass -lt $MIN_PASS) {
+          Write-Error "契约检查通过数 $pass 低于下限 $MIN_PASS —— 有检查被静默跳过，请排查"
+          exit 1
+        }
+
+    # α(ν) 独立交叉验证：用 SciPy 的 Voigt（不同作者/算法/代码库）+ **自实现的强度与线宽标度**
+    # 重算 HAPI 的 α(ν)。守的是"谱线计算到底对不对"——此前自检 10 项里只有 1 项是真正独立互校。
+    # 判据：α 峰值 < 15%、积分强度 < 10%（点对点差异是两种 Voigt 近似的固有差，仅作报告）。
+    - name: Alpha cross-validation (offline)
+      run: python -X utf8 tools/alpha_crossval.py
 
     # 保真度审计（同样离线、确定性）：能力登记表 ↔ 源码证据 ↔ 参数可达性。
     # 它守住的是"声明了却没实现 / 声明了却没接上"这一类静默错误——本项目已因此栽过两次。

@@ -255,6 +255,42 @@ _ALPHA_CACHE_MAX = 64
 _ALPHA_CACHE_LOCK = threading.Lock()
 
 
+#: 线表指纹缓存（表名 → sha256 前缀 + 行数）：每张表只读一次。
+_TABLE_FP = {}
+
+
+def table_fingerprint(table):
+    """线表指纹：{表名, sha256(前16), 行数, data 文件名}。
+
+    为什么需要：HITRAN 会定期更新线表，**同名表的内容会变**。
+    没有指纹时，论文里的一个数无法被第三方重建（不知道用的是哪一版数据）。
+    指纹让"这个数是什么算出来的"可被独立核对。
+    """
+    key = str(table)
+    hit = _TABLE_FP.get(key)
+    if hit is not None:
+        return dict(hit)
+    import hashlib
+    from pathlib import Path as _P
+    fp = {"table": key, "sha256_16": None, "n_lines": None}
+    # HAPI 把表存为 <dir>/<table>.data；对内容取前 16 位指纹
+    try:
+        cand = list(_DATA_DIR.glob(f"{key}*.data"))
+        if cand:
+            f = cand[0]
+            h = hashlib.sha256()
+            with open(f, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            fp["sha256_16"] = h.hexdigest()[:16]
+            fp["data_file"] = _P(f).name
+            fp["n_lines"] = sum(1 for _ in open(f, "rb")) - 1 if f.stat().st_size else 0
+    except Exception:                                     # noqa: BLE001
+        pass
+    _TABLE_FP[key] = dict(fp)
+    return fp
+
+
 def alpha_cache_clear():
     """清空吸收谱缓存（改过线表/换物种批次后建议调用）。"""
     with _ALPHA_CACHE_LOCK:

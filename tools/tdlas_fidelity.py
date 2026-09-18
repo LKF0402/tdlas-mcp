@@ -270,6 +270,12 @@ def audit_parameters():
             physical_noise=False, allow_partial_dark=True, drift_frac=SENT, flicker_frac=SENT)),
     ]
 
+    # 注：尚未掩盖 tdlas_simulate / tdlas_das_chain / tdlas_review。
+    #   这三个工具的 schema 与函数签名差异较大（如 wn0 vs wn_center、
+    #   工具内部硬编码 save_png），统一构造参数会在到达引擎前抛 TypeError，
+    #   从而把"探测失败"误报成"参数死亡"。宁可不覆盖，也不放一个有假阳性的门禁。
+    #   待补：为这三个工具各自写一份明确参数表（同上面两个用例的写法）。
+
     results = []
     for tool, func_name, args in cases:
         fn = M.DISPATCH[tool]
