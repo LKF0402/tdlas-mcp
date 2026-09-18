@@ -28,16 +28,14 @@ DAQ 三角波+正弦调制 → 激光调谐(含二次非线性) → HITRAN 气�
 
 ## ✨ 核心特性
 
-| 特性 | 要点 |
-|---|---|
-| **全链路建模** | 链路每一环都可引入真实效应：可选 etalon 条纹、RIN、1/f 漂移、PD 一阶带宽、ADC 中平量化、RAM/AM |
-| **混合气多组分** | `mixture="CH4:0.01,CO2:0.04"`，严格按 `α = Σ xᵢ·α_pureᵢ(T,P,空气浴)` 逐点相加——**不用 x·P 当分压**（那会算错窄线宽与浓度定标）；返回 `alphaL_per_species` 与 `mixture_breakdown` 说明"谁主导" |
-| **AI 交互契约** | 每次返回带 `interaction`（`physics_ok` / `result_usable` / `conclusion_allowed` / `blocking_reason`）与机器可读的 `next_required_actions`。"必须澄清 / 必须披露"写在**返回值**里，而非只写在文档里 |
-| **保真度台账** | `tools/tdlas_fidelity.py` 把"效应 ↔ 实现位置 ↔ 是否真生效 ↔ 已知缺口"做成可执行表：**默认生效 11 项 / 需显式开启 6 项 / 未建模 7 项**，未建模项随结果披露 |
-| **可信度分层** | 10 项物理校验与交互合规**分别**计分——"物理坏"不与"话说得不全"混成一个分数 |
-| **可复现 + 离线门禁** | `seed=0` 默认逐位可复现；`contract_check.py`（147 项）与 `tdlas_fidelity.py` 均为 CI 硬门禁，不依赖网络 |
+- **全链路建模**：DAQ 调制 → 激光调谐 → HITRAN 吸收 → PD → ADC → 数字锁相；可选 etalon 条纹、RIN、1/f 漂移、RAM/AM
+- **混合气多组分**：`mixture` 严格按 `α = Σ xᵢ·α_pureᵢ(T,P)` 逐点相加（**不用 x·P 当分压**），并返回各组分归因
+- **AI 交互契约**：返回值携带 `interaction` 与机器可读的 `next_required_actions`——"必须澄清 / 必须披露"由返回值承载
+- **保真度台账**：默认生效 11 项 / 需显式开启 6 项 / **未建模 7 项**，未建模项随结果披露
+- **可信度分层**：10 项物理校验与交互合规**分别**计分
+- **可复现 + 离线门禁**：`seed=0` 逐位可复现；契约自检 147 项与保真度审计均为 CI 硬门禁（不依赖网络）
 
-其他：`tdlas_invert(n_repeats>0)` 给测量不确定度（**仅统计随机分量**）；`return_xy` 透出锁相 X/Y 用于 RAM/AM 诊断；`x_list` 支持多浓度扫描与同图叠加。
+其他：`return_xy` 透出锁相 X/Y 用于 RAM/AM 诊断；`tdlas_invert(n_repeats>0)` 给测量不确定度（仅统计分量）；`x_list` 多浓度同图。细节见 [TECHNICAL.md](./TECHNICAL.md) 与 [docs/VALIDATION.md](./docs/VALIDATION.md)。
 
 ## 📊 效果展示
 
