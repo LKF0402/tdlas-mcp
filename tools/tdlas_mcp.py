@@ -2470,11 +2470,24 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     out["alpha_report"] = _alpha_report_block(m.get("alpha_context"), species, session_id)
     out["fringe_report"] = _fringe_report_block(m.get("fringe"), session_id)
     if _multi:
+        # ★ 多浓度必须共用**同一调制深度**：各浓度的谱形相同（只差一个缩放），最优 m 本应
+        #   一致；但自适应是在逐次扫描里挑峰的，注入噪声后每次可能选出略不同的 m，
+        #   于是"浓度 ×2、2f 却 ×2.07"——幅值对比被调制差异污染，看不出真实线性度。
+        #   故自适应只在基准浓度跑一次，其余浓度复用它的 m（与 measurement_uncertainty
+        #   的"重复工况复用首次 m"同一手法）。用户显式给了 m_opt / mod_amp_V 时不介入。
+        _mod_locked = None
+        _inst_lock = dict(inst)
+        if inst.get("mod_amp_V") is None and str(inst.get("m_opt", "auto")).strip().lower() == "auto":
+            try:
+                _mod_locked = float(r["meta"]["mod_coeff_m"])
+                _inst_lock["m_opt"] = _mod_locked
+            except Exception:                              # noqa: BLE001
+                _mod_locked = None
         _samples = [r] + [
             ts.simulate_wms_instrument(species, wn_center=float(wn_center),
                                        T=float(scene["T"]), P=float(scene["P"]),
                                        x=float(xi), L_cm=float(scene["L_cm"]),
-                                       seed=seed, **inst)
+                                       seed=seed, **_inst_lock)
             for xi in _xs[1:]]
 
         def _wms_metrics(rr):
@@ -2485,6 +2498,16 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                     "sensitivity_k": rr["meta"]["sensitivity_k"]}
         out["multi_conc"] = _build_multi_conc(
             _xs, _samples, ["S2f_norm_peak", "alpha_L_peak", "sensitivity_k"], _wms_metrics)
+        if _mod_locked is not None:
+            out["multi_conc"]["modulation_locked"] = {
+                "m_opt": _mod_locked,
+                "mod_amp_V": float(r["meta"].get("mod_amp_V") or 0.0),
+                "note": "多浓度共用同一调制深度：自适应只在基准浓度算一次，其余浓度复用该 m。"
+                        "（各浓度谱形只差一个缩放，最优 m 本应一致；不锁定时噪声会让每次自适应"
+                        "选出略不同的 m，幅值对比被调制差异污染）"}
+            out["warnings"].append(
+                f"多浓度已锁定调制系数 m={_mod_locked:g}（自适应只在基准浓度跑一次），"
+                f"保证各浓度幅值可比")
         if save_png:                                   # 多浓度同图：叠加归一化 2f/1f（含有效区着色）
             OUT_DIR.mkdir(parents=True, exist_ok=True)
             _ov = OUT_DIR / f"wms_instr_{_safe_name(str(species).upper())}_{float(wn_center):g}cm-1_xlist_overlay.png"

@@ -738,6 +738,15 @@ check("plot_wms_instrument 暴露 multi 入口（多浓度叠加）", "multi=Non
 check("多浓度纵轴按全部浓度统一（_ylim_multi，防低浓度被压平）", "_ylim_multi(" in _pw_src)
 check("MCP 层在 x_list 时把全部样本传给主图",
       "multi=_multi_draw" in inspect.getsource(M.t_wms_instrument))
+# 多浓度必须共用同一调制深度：否则"浓度×2、2f×2.07"——对比被调制差异污染
+_tw_src = inspect.getsource(M.t_wms_instrument)
+check("多浓度锁定调制系数（自适应只在基准浓度跑一次）",
+      '_inst_lock["m_opt"] = _mod_locked' in _tw_src and "_mod_locked" in _tw_src)
+check("只在用户没给 m_opt / mod_amp_V 时才锁定（尊重显式约束）",
+      'inst.get("mod_amp_V") is None' in _tw_src
+      and 'str(inst.get("m_opt", "auto")).strip().lower() == "auto"' in _tw_src)
+check("返回值披露 modulation_locked（调制已锁定）",
+      "modulation_locked" in _tw_src)
 try:
     import numpy as _np
     import matplotlib

@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### 第十一轮：多浓度锁定调制系数
+- **问题**：`x_list` 的每次扫描都各自跑一遍调制自适应，而自适应是靠"扫 m 看 2f 峰"挑点的——注入噪声后各浓度可能选出**略不同的 m**，于是"浓度 ×2、2f 却 ×2.07"，幅值对比被调制差异污染，看不出真实线性度。
+- **修法**：自适应只在基准浓度跑一次，其余浓度复用它的 `m_opt`（与 `measurement_uncertainty` 的"重复工况复用首次 m"同一手法）。用户显式给了 `m_opt` / `mod_amp_V` 时**不介入**（那是实验约束）。
+- **披露**：`multi_conc.modulation_locked`（m_opt / mod_amp_V / 说明）+ `warnings` 一条。
+
 ### 第十轮：背景扣除默认关闭 + 显式披露
 - **默认口径改为"出原始谱"**：`background_subtract` 默认 `True → False`。背景扣除本质是"替用户静默修正基线"，默认关 = 给未经修正的原始谱，由用户自己决定要不要扣。
 - **显式披露（三层，都在返回值里）**：① `normalization.background_subtract_note` 机器可读说明（未扣时写明"原始谱、仅供诊断、定量前须开启"）；② `warnings` 加醒目条目；③ `validation`「归一化方法」判据未扣时记 **warn**；④ AI 交互 `must_disclose` 新增第 ⑨ 项。
