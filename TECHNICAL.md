@@ -168,7 +168,7 @@ $$\alpha = 1-e^{-2\pi f_c/f_s},\qquad y[n]=y[n-1]+\alpha\,(x[n]-y[n-1])$$
 
 $$I_0(t) = 1 + i_0\cos(\omega_m t+\psi_1) + i_2\cos(2\omega_m t+\psi_2)$$
 
-- 参数 `am_i0` / `am_i2` / `am_psi1` / `am_psi2`，**默认 0（纯 FM）**
+- 参数 `am_i0` / `am_i2` / `am_psi1` / `am_psi2`，**默认 `am_i0=0.02`、`am_psi1=π/2`、其余 0**（真实 DFB 固有 RAM：1f 强度调制幅度典型 0.01–0.05，与 FM 近似正交；FEEDBACK-5 修正，此前默认 0=纯 FM 是理想化）
 - 仪器链路的 AM 含 L-I 斜率项（与 FM **同相**）；本组参数额外叠加真实 DFB 的 RAM（可与 FM **异相**）
 - RAM 会显著改变 1f（实测 am_i0=0→0.05，1f 峰从 0.177 升到 0.304），进而影响 2f/1f 归一化
 

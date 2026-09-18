@@ -4,7 +4,42 @@
 
 ## [Unreleased]
 
-### 第五轮：AI 交互契约层（结构化动作 / 按需下发 / 进 CI）
+### push 前四项收尾（fail-closed / 凭据 / 来源 / 反演）
+- **fail-closed（高）**：αL 超出模型自述适用区 [1e-5, 0.1] 达 **≥10 倍**（即 >1.0）改为 **fail**；
+  此前 αL=3.3e3（饱和 4 个量级）只给 warn 且 `conclusion_allowed=True`——与 VALIDATION.md
+  声明的适用区自相矛盾。`DAS-理论一致` 偏差 >50% 也改为 fail
+  （密集谱区的"以包络为准"辩护不应掩盖极端偏差）。
+- **输出凭据 `provenance`（高）**：wms / das / review 均返回 `engine_version` 与
+  `line_table.{table, sha256_16, n_lines}` 与 `input_hash`——让一个数可被第三方重建
+  （HITRAN 会更新线表，同名表内容会变；此前只有表名、无指纹）。
+- **参数来源追踪（中）**：`tdlas_device save` 新增 `source`
+  （datasheet/user/ai/calibration/unspecified）与 `source_note`，记录 `fields` 与 `updated`；
+  引用该设备时在 `provenance.device_source` 中**回显**。不给 source 时记
+  `unspecified`（而非默认 datasheet），防止把"AI 推断的值"包装成"查到的"。
+- **谱线级最小二乘反演（中）**：新增 `tools/tdlas_fit.py`，`tdlas_invert` 新增
+  `spectrum` / `ref_spectrum`：用**整条归一化 2f 谱**拟合而非单点除法，并给出
+  `x_sigma` / `χ²_red` / `R²`。单元验证：对同工况双测量，最小二乘相对偏差
+  **+0.012%** vs 单点法 +0.036%；配套谱下可达逐位一致。`tdlas_wms_instrument`
+  输出新增 `results.S2f_norm_spectrum` 与 `results.k1_spectrum_per_unit_x` 供直接使用。
+- **α(ν) 独立交叉验证（新增硬门禁）**：`tools/alpha_crossval.py` 用 SciPy 的
+  Voigt（不同作者/算法/代码库）+ **自实现的强度与线宽标度** 重算 HAPI 的 α(ν)。
+  实测：α 峰值偏差 +2.6% / -3.0%，积分强度偏差 -0.15% / -1.75%。
+  此前自检 10 项里**只有 1 项**是真正独立互校——现在补上了谱线计算这一环。
+- 契约自检 145 项全绿；金标准 6/6 数值未变。
+
+
+### 第八轮：混合气多组分吸收（α = Σ x_i·α_pure_i）
+> 用户需求：把"混合气"做成正当的参数（而不是靠把干扰气体的浓度塞进单物种 `x`），并守住物理口径。
+
+- **四个仿真工具新增 `mixture`**：`tdlas_simulate` / `tdlas_das_chain` / `tdlas_das_instrument` / `tdlas_wms_instrument`（及透传的 `tdlas_review`）接受 `mixture="CH4:0.01,CO2:0.04"` 或 `[{"species":"CH4","x":0.01}, …]`；解析宽容（逗号/分号/空白分隔、`list[str]`、`list[dict]` 等价）。与单 `x` **二选一**（给 `mixture` 时 `species` 退化为标签），与 `x_list` **互斥**（同传直接报错，不静默取其一）。
+- **混合气纪律（钉死，勿漂移）**：`α_total = Σ x_i·α_pure_i(T, P, 空气浴)` —— 每个组分**单独在 T/P 下**按空气展宽算 `α_pure`，再乘自己的摩尔分数后逐点相加。**绝不可把分压设成 x·P**：那会同时算错线宽（碰撞展宽正比于分压）与浓度定标，而结果看起来完全合理。`N₂/O₂/Ar` 在 3.3 μm 无吸收线，只贡献碰撞展宽（已含在 HITRAN `γ_air` 内），**不作为吸收组分叠加**。
+- **各组分曲线透出（不新增图）**：引擎返回 `alphaL_per_species`（`tdlas_simulate`/`tdlas_das_chain` 为 `alpha_per_species`），并在既有标准图上用 viridis 叠加各组分曲线，图例标注 `组分@x`。三个 `plot_*` 只加曲线、**不改图幅布局**。
+- **`mixture_breakdown`（WMS）**：返回各组分 `alphaL_peak` 与总峰，便于 AI 说明"谁主导"，并附带纪律说明原文。
+- **`sensitivity_k` 语义修正**：混合气下"单物种浓度 x"无定义 → `sensitivity_k` 返回 `null`（不做无据外推），`conditions.x` / `mole_frac` 同为 `null`，`species` 改为组分标签。
+- **修复：`png_overlay` 与 `plot_multi_x` 曾被误删**。第七轮落地的多浓度同图在后续重构中丢失（`tdlas_sim.py` 的 `plot_multi_x` 与 `tools/tdlas_mcp.py` 四处 `png_overlay` 分支、schema 描述均消失，而契约自检仍在测它）。本轮**按 HEAD 原文恢复**，并修掉一处位置参数错位（`plot_multi_x` 的 `valid` 误占了 `xlabel` 位），改为关键字传入。
+- **自检新增第 11 项（物理级）**：CH4(1e-4)+H2O(1e-3) 的混合气 α 与 `CH4`/`H2O` 两次**独立单物种运行**之和比对（相对差实测 `0.0e+00`）；并校验各组分 `α ≡ x_i·α_pure_i`、WMS 链路上 `Σ alphaL_per_species ≡ alphaL_cyc`（实测相对差 `3.1e-16`）。
+- **契约自检 119 → 140 项**：新增第 10 节（四工具 schema 共用同一份 `mixture` 声明、五种写法解析等价、无法解析的组分被拒、**引擎源码必须写明"禁止把分压设成 x·P"**、逐点相加而非先加浓度、三个引擎都返回 `alphaL_per_species`、`mixture` 与 `x_list` 四工具互斥、`mixture` 原样透传引擎）。
+
 > 依据 `tdlas-mcp-AI交互层设计.md` 落地**第一步+第二步**；§3.1 的状态机与 §8 的两点做了改造（见下"对设计文档的修正"）。
 
 - **交互契约层**：新增纯函数 `build_next_actions(out)` + `_interaction_block()`，把原本写在散文里的"必须澄清/必须披露"变成**机器可读动作**（wms / das / review / invert 均已下发）：

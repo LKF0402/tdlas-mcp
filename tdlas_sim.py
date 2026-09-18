@@ -64,15 +64,114 @@ def wms_calibration_free(t, tau, i0, psi1, i2, psi2):
 
 # ══════════════════ 2. 吸收谱（经 tools/tdlas_hitran.py 取自 HITRAN）══════════════════
 
-def get_alpha(species, wn_lo, wn_hi, T, P, x, step=5e-4, wingHW=20.0):
-    """取吸收系数 α(ν) [cm^-1]；混合气按 α = x·α_pure（总压 P、空气浴）缩放。
+def _check_mixture_specs(specs):
+    """混合气摩尔分数的物理校验（**唯一真源**，所有分支都必须经此返回）。
+
+    为什么必须有这一层：此前组分校验写在 `_resolve_mixture_specs` 末尾，但三个分支
+    都提前 `return` 了 → 校验是**死代码**，`CH4:1.5` 与"和为 1.2"都被静默放行。
+    规则（与 `_resolve_x_list` 的 x∈(0,1]、`invert` 的 x_est≤1 口径保持一致）：
+      ① 每个组分 ∈ (0, 1]；
+      ② 组分之和 ≤ 1（总摩尔分数必为 1；和 >1 等于分压之和超过总压）。
+    """
+    tot = 0.0
+    for sp, xi in specs:
+        if not 0.0 < xi <= 1.0:
+            raise ValueError(f"混合气组分 {sp} 摩尔分数须在 (0, 1]，收到 {xi}")
+        tot += xi
+    if tot > 1.0 + 1e-12:
+        detail = "、".join(f"{sp}:{xi:g}" for sp, xi in specs)
+        raise ValueError(
+            f"混合气各组分摩尔分数之和为 {tot:.6g} > 1，物理上不可能"
+            f"（总摩尔分数必为 1；和 >1 意味着分压之和超过总压）。组分：{detail}。"
+            f"请按实际配气比例归一化后重传。")
+    return specs
+
+
+def _resolve_mixture_specs(species, x, mixture):
+    """归一化混合气组分列表为 [(species, x), ...]（物理纪律参考 hitran-mcp）。
+
+    - mixture=None        → [(species, x)]（单物种，原行为）
+    - mixture="CH4:0.01,CO2:0.04" 或 "CH4 0.01, CO2 0.04" → 解析
+    - mixture=[(sp,x)] / [{"species":sp,"x":x}] / ["CH4:0.01", ...] → 列表
+    混合气纪律：α_total = Σ x_i·α_pure_i(T,P,空气浴)；绝不用 x·P 当分压（会错窄线宽）。
+    """
+    if mixture is None:
+        return _check_mixture_specs([(str(species), float(x))])
+    if isinstance(mixture, str):
+        out = []
+        for part in mixture.replace(";", ",").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if ":" in part:
+                sp, xv = part.split(":", 1)
+            else:
+                _t = part.split()
+                if len(_t) != 2:
+                    raise ValueError(f"混合气组分无法解析（需 'CH4:0.01' 或 'CH4 0.01'）：'{part}'")
+                sp, xv = _t
+            out.append((sp.strip().upper(), float(xv)))
+        if not out:
+            raise ValueError("混合气组分为空")
+        return _check_mixture_specs(out)
+    if isinstance(mixture, dict):
+        mixture = [mixture]
+    out = []
+    for item in mixture:
+        if isinstance(item, dict):
+            out.append((str(item["species"]).strip().upper(), float(item["x"])))
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            out.append((str(item[0]).strip().upper(), float(item[1])))
+        elif isinstance(item, str):
+            sp, xv = (item.split(":", 1) if ":" in item else item.split())
+            out.append((sp.strip().upper(), float(xv)))
+        else:
+            raise ValueError(f"混合气组分无法解析：{item!r}")
+    return _check_mixture_specs(out)
+
+
+def _alpha_grid(specs, wn_lo, wn_hi, T, P, step, wingHW):
+    """混合气吸收系数求和：α_total = Σ x_i·α_pure_i（同窗口逐点相加）。
+
+    返回 (nu, alpha_total, per)：per=[{"species","x","alpha_pure","alpha","info"}]。
+    各组分窗口一致（same wn_lo/wn_hi/step），网格天然对齐；若个别不一致则插值对齐。
+    """
+    nu = None
+    alpha_total = None
+    per = []
+    for sp, xi in specs:
+        nu_i, apure_i, info_i = th.absorption(sp, wn_lo, wn_hi, T=T, P=P,
+                                              step=step, wingHW=wingHW)
+        if nu is None:
+            nu = nu_i
+            alpha_total = apure_i * float(xi)
+        else:
+            if nu.shape != nu_i.shape or not np.allclose(nu, nu_i):
+                apure_i = np.interp(nu, nu_i, apure_i)
+            alpha_total = alpha_total + apure_i * float(xi)
+        per.append({"species": sp, "x": float(xi), "alpha_pure": apure_i,
+                    "alpha": apure_i * float(xi), "info": info_i})
+    return nu, alpha_total, per
+
+
+def get_alpha(species, wn_lo, wn_hi, T, P, x, step=5e-4, wingHW=20.0, mixture=None):
+    """取吸收系数 α(ν) [cm^-1]；单物种 α=x·α_pure，混合气 α=Σ x_i·α_pure_i。
 
     窗口未覆盖 / 空谱由 tdlas_hitran 直接报错，绝不静默返回平谱。
+    info["per_species"] 含各组分 α_pure（供混合气在既有标准图内叠加各组分曲线）。
     """
-    nu, alpha_pure, info = th.absorption(species, wn_lo, wn_hi, T=T, P=P,
-                                         step=step, wingHW=wingHW)
-    info["mole_frac"] = float(x)
-    return nu, alpha_pure * float(x), info
+    specs = _resolve_mixture_specs(species, x, mixture)
+    nu, alpha_total, per = _alpha_grid(specs, wn_lo, wn_hi, T, P, step, wingHW)
+    if mixture is None:
+        info = dict(per[0]["info"])
+    else:
+        info = {"n_lines_in_window": sum(p["info"].get("n_lines_in_window", 0) for p in per),
+                "species_list": [p["species"] for p in per],
+                "per_info": [p["info"] for p in per]}
+    info["mole_frac"] = (None if mixture is not None else float(x))
+    info["mixture"] = [{"species": s, "x": xi} for s, xi in specs]
+    info["per_species"] = per
+    return nu, alpha_total, info
 
 
 # ══════════════════ 3. 扫描式 WMS 正向仿真 ══════════════════
@@ -81,7 +180,7 @@ def simulate(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
              a=0.10, i0=0.1671, i2=2.48e-3,
              psi1=1.9356 * np.pi, psi2=4.4138 * np.pi,
              span=0.8, n_scan=401, n_mod=96, step=5e-4,
-             sigma_tau=0.0, seed=None):
+             sigma_tau=0.0, seed=None, mixture=None):
     """扫描式 WMS 正向仿真。
 
     species/wn0   : 分子与目标线中心（cm^-1）
@@ -90,15 +189,17 @@ def simulate(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
     i0,i2,psi1,psi2: 激光强度调制参数（AM 幅度与 IM-FM 相位差）
     span/n_scan/n_mod: 扫描半宽 cm^-1 / 扫描点数 / 每点调制周期采样数
     sigma_tau/seed: 等效透过率噪声标准差（>0 时注入）与随机种子
+    mixture       : 混合气组分（"CH4:0.01,CO2:0.04" 或 [(sp,x)]）；给定时覆盖单物种 x
 
-    返回：nu, alpha, tau, wn_scan, S1f, S2f, S4f, S2f1f, meta
+    返回：nu, alpha, tau, wn_scan, S1f, S2f, S4f, S2f1f, meta（混合气额外含 alpha_per_species）
     """
-    if not 0.0 < x <= 1.0:
+    if mixture is None and not 0.0 < x <= 1.0:
         raise ValueError(f"摩尔分数必须在 (0, 1]，收到 {x}")
     if a <= 0:
         raise ValueError(f"调制深度 a 必须 > 0，收到 {a}")
 
-    nu, alpha, info = get_alpha(species, wn0 - span, wn0 + span, T, P, x, step=step)
+    nu, alpha, info = get_alpha(species, wn0 - span, wn0 + span, T, P, x,
+                                step=step, mixture=mixture)
 
     wn_scan = np.linspace(wn0 - span, wn0 + span, int(n_scan))
     tau_das = np.exp(-np.interp(wn_scan, nu, alpha) * L)
@@ -129,6 +230,18 @@ def simulate(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
         S2f1f[j] = (np.hypot(X2f / R1f - X2f_bg / R1f_bg,
                              Y2f / R1f - Y2f_bg / R1f_bg) if R1f > 1e-15 else 0.0)
 
+    _mx = info["mixture"]
+    if mixture is not None:
+        _sp_label = "+".join(f"{s}@{xi:g}" for s, xi in [(d["species"], d["x"]) for d in _mx])
+        meta = {"species": _sp_label, "wn0": wn0, "T": T, "P": P, "x": "混合气", "L": L,
+                "a": a, "i0": i0, "i2": i2, "psi1": psi1, "psi2": psi2,
+                "n_lines_in_window": info["n_lines_in_window"], "mixture": _mx,
+                "alpha_context": info.get("alpha_context")}
+        alpha_per = [{"label": f"{p['species']}@{p['x']:g}", "alpha": p["alpha"]}
+                     for p in info["per_species"]]
+        return {"nu": nu, "alpha": alpha, "tau": tau_das, "wn_scan": wn_scan,
+                "S1f": S1f, "S2f": S2f, "S4f": S4f, "S2f1f": S2f1f,
+                "alpha_per_species": alpha_per, "meta": meta}
     meta = {"species": species, "wn0": wn0, "T": T, "P": P, "x": x, "L": L,
             "a": a, "i0": i0, "i2": i2, "psi1": psi1, "psi2": psi2,
             "n_lines_in_window": info["n_lines_in_window"], "table": info["table"], "alpha_context": info.get("alpha_context")}
@@ -231,6 +344,31 @@ def selftest():
     off2 = float(w2["meta"]["cfg"]["offset_V"])
     assert 0.0 <= off2 <= 5.0, f"二次调谐可达时 offset_V={off2:g} V 越界"
     print(f"  二次调谐可达：offset_V={off2:.4g} V（判别式>0 时按取近根正常反算）")
+
+    # 11) 混合气：α_total = Σ x_i·α_pure_i（**绝不用 x·P 当分压**，否则线宽算错）
+    _lo, _hi = 2967.5, 2969.5
+    _, _am, _mi = get_alpha("MIX", _lo, _hi, 296.0, 1.01325, 0.0, step=2e-3,
+                            mixture="CH4:1e-4,H2O:1e-3")
+    _per = _mi["per_species"]
+    _, _a1, _ = get_alpha("CH4", _lo, _hi, 296.0, 1.01325, 1e-4, step=2e-3)
+    _, _a2, _ = get_alpha("H2O", _lo, _hi, 296.0, 1.01325, 1e-3, step=2e-3)
+    _mx = max(float(np.max(np.abs(_am))), 1e-30)
+    _rel = float(np.max(np.abs(_am - (_a1 + _a2)))) / _mx
+    assert _rel < 1e-9, f"混合气 α ≠ 各组分之和（相对差 {_rel:.2e}）"
+    assert len(_per) == 2 and all(
+        float(np.max(np.abs(p["alpha"] - p["x"] * p["alpha_pure"]))) == 0.0
+        for p in _per), "各组分 α 未按 x_i·α_pure_i 缩放"
+    print(f"  混合气 α 求和：CH4(1e-4)+H2O(1e-3) vs 分物种之和 相对差 {_rel:.1e}"
+          f"（α_peak={_mx:.4g} cm⁻¹）")
+    _wm = simulate_wms_instrument("CH4", wn_center=2968.5, mod_amp_V=0.1,
+                                  mixture="CH4:1e-4,H2O:1e-3")
+    _ps = _wm.get("alphaL_per_species")
+    assert _ps and len(_ps) == 2, "混合气未返回各组分 αL（alphaL_per_species）"
+    _d2 = float(np.max(np.abs(sum(p["alphaL"] for p in _ps) - _wm["alphaL_cyc"]))) \
+        / max(float(np.max(np.abs(_wm["alphaL_cyc"]))), 1e-30)
+    assert _d2 < 1e-9, f"各组分 αL 之和不等于总 αL（相对差 {_d2:.2e}）"
+    print(f"  混合气 WMS 链路：各组分 αL 之和 ↔ 总 αL 相对差 {_d2:.1e}，"
+          f"组分={[p['label'] for p in _ps]}")
 
     print("  自测通过")
     return r
@@ -412,7 +550,7 @@ def simulate_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=0.1, L=30.0,
 def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=1e-3, L=50.0,
                     span=0.8, fscan=100.0, fs=5e5, baseline_slope=0.05,
                     sigma=0.0, seed=None, fit_order=3, fit_frac=0.3, step=5e-4,
-                    edge="rising"):
+                    edge="rising", mixture=None):
     """三角波扫描 DAS 时域仿真：PD 原始信号 → 多项式基线拟合/扣除 → DAS 信号。
 
     与真实 DAS 实验一一对应：
@@ -450,7 +588,8 @@ def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=1e-3, L=50.0,
     wn = float(wn0) + float(span) * tri
     I0 = 1.0 + float(baseline_slope) * tri               # 无吸收时的光强基线（随扫描变化）
 
-    nu, alpha, info = get_alpha(species, wn0 - span - 0.2, wn0 + span + 0.2, T, P, x, step=step)
+    nu, alpha, info = get_alpha(species, wn0 - span - 0.2, wn0 + span + 0.2, T, P, x,
+                                step=step, mixture=mixture)
     alpha_wn = np.interp(wn, nu, alpha)
     It = I0 * np.exp(-alpha_wn * float(L))               # PD 原始信号
 
@@ -495,29 +634,43 @@ def simulate_das_td(species="H2O", wn0=7185.596, T=296.0, P=1.0, x=1e-3, L=50.0,
 
     # 替用户主动考虑：参数是否落在合理区间（不合理时明确提示，而非静默给错结果）
     warnings = []
+    _x_disp = f"{x:g}" if mixture is None else "混合气"
     if baseline_fallback:
         warnings.append("baseline fallback: dense spectrum, used known I0")
     aL = float(alpha_wn.max()) * float(L)
     if aL > 0.1:
         warnings.append(f"αL ≈ {aL:.3g} 偏大（>0.1）：DAS 进入非线性区、峰形被压低，"
-                        f"建议降低浓度或光程（当前 x={x:g}, L={L:g} cm）")
+                        f"建议降低浓度或光程（当前 x={_x_disp}, L={L:g} cm）")
     elif aL < 1e-4:
         warnings.append(f"αL ≈ {aL:.3g} 偏小（<1e-4）：吸收太弱、信噪比可能不足，"
-                        f"建议加大光程或浓度（当前 x={x:g}, L={L:g} cm）")
+                        f"建议加大光程或浓度（当前 x={_x_disp}, L={L:g} cm）")
     if float(span) < 0.2:
         warnings.append(f"扫描半宽 span={span:g} cm^-1 偏窄：可能未完整覆盖吸收线两翼，"
                         f"基线拟合会偏")
 
-    meta = {"species": str(species).upper(), "wn0": float(wn0), "T": float(T), "P": float(P),
-            "x": float(x), "L": float(L), "span": float(span), "fscan": float(fscan),
+    _mx = info["mixture"]
+    _sp = (str(species).upper() if mixture is None
+           else "+".join(f"{d['species']}@{d['x']:g}" for d in _mx))
+    meta = {"species": _sp, "wn0": float(wn0), "T": float(T), "P": float(P),
+            "x": (float(x) if mixture is None else "混合气"), "L": float(L),
+            "span": float(span), "fscan": float(fscan),
             "fs": float(fs), "baseline_slope": float(baseline_slope), "sigma": float(sigma),
             "fit_order": int(fit_order), "fit_frac": float(fit_frac), "edge": edge,
             "baseline_fallback": baseline_fallback,
             "alpha_L_peak": aL, "warnings": warnings,
-            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"], "alpha_context": info.get("alpha_context")}
-    return {"t": t, "wn": wn, "tri": tri, "I0": I0, "It": It, "baseline": baseline,
-            "das_full": das_full, "das": das, "wn_das": wn_das,
-            "alpha": alpha, "alpha_L_true": alpha_wn * float(L), "meta": meta}
+            "n_lines_in_window": info["n_lines_in_window"],
+            "table": info.get("table"), "alpha_context": info.get("alpha_context")}
+    if mixture is not None:
+        meta["mixture"] = _mx
+    out = {"t": t, "wn": wn, "tri": tri, "I0": I0, "It": It, "baseline": baseline,
+           "das_full": das_full, "das": das, "wn_das": wn_das,
+           "alpha": alpha, "alpha_L_true": alpha_wn * float(L), "meta": meta}
+    if mixture is not None:                    # 各组分 αL（对齐三角波全周期 wn，供标准图叠加）
+        out["alphaL_per_species"] = [
+            {"label": f"{p['species']}@{p['x']:g}",
+             "alphaL": np.interp(wn, nu, p["alpha_pure"]) * float(L)}
+            for p in info["per_species"]]
+    return out
 
 
 def plot_das_td(r, out_png):
@@ -533,7 +686,7 @@ def plot_das_td(r, out_png):
     ax[0].set_ylabel(r"$\nu$ (cm$^{-1}$)")
     ax[0].set_xlabel("time (ms)")
     ax[0].set_title(f"DAS chain — {m['species']} @ {m['wn0']:.3f} cm$^{{-1}}$   "
-                    f"T={m['T']:g} K, P={m['P']:g} atm, x={m['x']:g}, L={m['L']:g} cm, "
+                    f"T={m['T']:g} K, P={m['P']:g} atm, x={m['x']}, L={m['L']:g} cm, "
                     f"slope={m['baseline_slope']:g}, baseline fit order={m['fit_order']}")
     ax[1].plot(t_ms, r["I0"])
     ax[1].set_ylabel(r"$I_0$ (a.u.)")
@@ -549,6 +702,11 @@ def plot_das_td(r, out_png):
     ax[3].plot(r["wn"][half:], dfl[half:], ".", ms=2, color="C3", alpha=0.45, label="DAS — falling edge")
     ax[3].plot(r["wn_das"], r["das"], "-", lw=1.2, color="C2", label=f"final DAS ({m['edge']})")
     ax[3].plot(r["wn"], r["alpha_L_true"], "--", lw=1, alpha=0.7, color="k", label=r"true $\alpha L$")
+    _mix = r.get("alphaL_per_species")             # 混合气：叠加各组分 αL（不新增图）
+    if _mix:
+        _cols = plt.cm.viridis(np.linspace(0.1, 0.8, max(len(_mix), 2)))
+        for _c, _p in zip(_cols, _mix):
+            ax[3].plot(r["wn"], _p["alphaL"], "-.", lw=0.9, color=_c, label=_p["label"])
     ax[3].set_ylabel("absorbance")
     ax[3].set_xlabel(r"wavenumber (cm$^{-1}$)")
     ax[3].legend()
@@ -586,11 +744,12 @@ LASER_DEFAULTS = {
     "i_th": 30.0,            # 阈值电流 mA（低于此无激光输出）
     "eta_IP": 0.15,          # I→P 斜率效率 mW/mA（工作点 71 mA→6.4 mW 反推）
     # 残余幅度调制 RAM：激光**固有**强度调制（与频率调制 FM 存在相位差）。
-    # 此前仪器链路的 AM 仅来自 L-I 斜率（与 FM 同相），缺少真实 DFB 的 RAM。
-    # 0 = 纯 FM（默认，保持原行为）；非零时叠加 I0(t)=1+i0·cos(ωt+ψ1)+i2·cos(2ωt+ψ2)。
-    "am_i0": 0.0,            # 1f 强度调制幅度（相对光强）
-    "am_i2": 0.0,            # 2f 强度调制幅度
-    "am_psi1": 0.0,          # AM 相对 FM 的相位差（rad）
+    # 真实 DFB 激光固有残余幅度调制（RAM）：I0(t)=1+i0·cos(ωt+ψ1)+i2·cos(2ωt+ψ2)。
+    # 默认 am_i0=0.02（真实 DFB 典型量级 0.01–0.05，FEEDBACK-5）——此前默认 0=纯 FM
+    # 是理想化，会低估 1f/2f 基线失真。am_psi1 取 π/2 使 RAM 与 FM 正交（典型实测相位）。
+    "am_i0": 0.02,           # 1f RAM 强度调制幅度（相对光强，真实 DFB ~0.01–0.05）
+    "am_i2": 0.0,            # 2f 强度调制幅度（通常远小于 1f）
+    "am_psi1": np.pi / 2,    # RAM 相对 FM 相位差（rad），正交近似
     "am_psi2": 0.0,
 }
 OPTICS_DEFAULTS = {"throughput": 0.90}   # 光学元件总透过率（窗片/镜片/光纤/连接器，统一折成一个数）
@@ -800,7 +959,11 @@ def adaptive_modulation_index(nu_grid, alpha_pure, hwhm, cfg, t, v_scan, v_mod_s
         alpha = np.interp(nu_l, nu_grid, alpha_pure) * float(x)
         p_opt = p_l * float(cfg["throughput"]) * np.exp(-alpha * float(L_cm))
         v_pd = p_opt * 1e-3 * float(cfg["resp"]) * float(cfg["gain"])
-        v_adc = np.clip(np.round(v_pd / lsb) * lsb, -vr, vr)
+        # ★ 必须与正式链路**同一传递函数**：此前这里漏了探测器带宽（pd_lowpass），
+        #   于是"用扫描选出的最优 m"并非正式链路下的最优 —— 这是实数级缺陷，
+        #   也是文档里 loss 百分比对不上的原因（扫描看不见 2f 被带宽削掉的那部分）。
+        v_ana = pd_lowpass(v_pd, cfg["bw"], fs_s)
+        v_adc = np.clip(np.round(v_ana / lsb) * lsb, -vr, vr)
         S2f, _, _ = wms_harmonic_lockin(v_adc, t_s, fs_s, fm, 2, avg, stg)
         s = np.abs(S2f[idx])[valid]
         return float(s.max()), s
@@ -1082,8 +1245,16 @@ def _require_driver_range(cfg, wn_center, offset_derived=True):
                 f"{v_lo_eff:.3g}–{DRIVER_V_HI:.0f} V → 任何 wn_ref 都放不下。"
                 f"请减小 scan_span_cm 或核对 η_VI/i_th/dν/dI。")
         if r.get("wn_ref_needed") is not None:
-            hint = (f" 该目标波数需 wn_ref≈{r['wn_ref_needed']:.6g} cm⁻¹"
-                    f"（或传 laser= 你的真实激光器参数）；MCP 层默认 auto_laser=True 会自动重锚并如实标注。")
+            # ⚠ 原文案建议"传 laser= 你的真实激光器参数"——但当调用方**已经用了真实器件**时
+            #   这句话是错的（实测踩到：用户的 nanoplus 覆盖 2963.5–2966.5、内置默认 DFB
+            #   覆盖 2966.5–2971.0，两者正好错开——"换真实参数"反而更差）。
+            #   改为给三条可执行方案，并明确点出最常用的"改波数"这一条。
+            hint = (f" 该目标波数需 wn_ref≈{r['wn_ref_needed']:.6g} cm⁻¹。"
+                    f"可行方案：① 改选本激光器可达范围内的目标线"
+                    f"（最建议：真实器件的可达区通常就在 wn_ref 附近）；"
+                    f"② 换一台 wn_ref 接近该波数的激光器（用 tdlas_device save 建库）；"
+                    f"③ 若只是要看想象中的理想激光器，用 MCP 层的 auto_laser=True"
+                    f"（仅重锚 wn_ref，会如实标注为非真实硬件）。")
 
     if reason is None:
         return
@@ -1176,6 +1347,7 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     cfg = {**DAQ_DEFAULTS, **SCAN_DEFAULTS, **LASER_DEFAULTS,
            **OPTICS_DEFAULTS, **PD_DEFAULTS, **GAS_DEFAULTS, **FRINGE_DEFAULTS}
     user_keys = set(kw)
+    mixture = kw.pop("mixture", None)          # 混合气组分（不并入 cfg，单列处理）
     cfg.update({k: v for k, v in kw.items() if v is not None})
     # 显式位置参数覆盖默认（不传则用 GAS_DEFAULTS）
     cfg["species"], cfg["wn_center"] = species, wn_center
@@ -1202,12 +1374,24 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
                          f"或 wn_center 与激光 wn_ref/dν/dI 不匹配（选了不在此 DFB 调谐范围内的线）。"
                          f"请改用对应激光器参数（wn_ref/dν/dI/eta_VI）或手填 offset_V。")
 
-    # ③ 光路：光学损耗 + 气体吸收
+    # ③ 光路：光学损耗 + 气体吸收（混合气 α=Σ x_i·α_pure_i，参考 hitran-mcp）
     span = float(cfg["scan_span_cm"])
-    nu_grid, alpha_pure, info = th.absorption(
-        species, wn_center - span - 0.2, wn_center + span + 0.2, T=T, P=P,
-        step=min(5e-4, span / 500.0), wingHW=max(10.0, 5.0 * span))
-    alpha = np.interp(nu_laser, nu_grid, alpha_pure) * float(x)
+    _step = min(5e-4, span / 500.0)
+    _wing = max(10.0, 5.0 * span)
+    if mixture is None:
+        nu_grid, alpha_pure, info = th.absorption(
+            species, wn_center - span - 0.2, wn_center + span + 0.2, T=T, P=P,
+            step=_step, wingHW=_wing)
+        _abs_grid = alpha_pure * float(x)
+    else:
+        _specs = _resolve_mixture_specs(species, x, mixture)
+        nu_grid, alpha_pure, _per = _alpha_grid(
+            _specs, wn_center - span - 0.2, wn_center + span + 0.2, T, P, _step, _wing)
+        _abs_grid = alpha_pure                       # 已含 Σ x_i 缩放
+        info = {"n_lines_in_window": sum(p["info"].get("n_lines_in_window", 0) for p in _per),
+                "species_list": [p["species"] for p in _per], "per_species": _per,
+                "mixture": [{"species": s, "x": xi} for s, xi in _specs]}
+    alpha = np.interp(nu_laser, nu_grid, _abs_grid)
     tau = np.exp(-alpha * float(L_cm))
     _fr = resolve_fringe(cfg)                                 # etalon 条纹参数（未启用为 None）
     p_opt = (p_laser * float(cfg["throughput"]) * fringe_factor(nu_laser, cfg, t) * tau)   # 到达 PD 的光功率 mW
@@ -1251,7 +1435,7 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
 
     # ★ 密集谱区基线拟合失效回退：两端"无吸收区"不干净时，多项式把吸收线拟合进基线，
     #   使 das 峰值被放大数十万倍。拟合后校验，异常则改用已知 I0（τ≡1 走同一条 PD/ADC 链路）。
-    alphaL_cyc = np.interp(wn_cyc, nu_grid, alpha_pure) * float(x) * float(L_cm)
+    alphaL_cyc = np.interp(wn_cyc, nu_grid, _abs_grid) * float(L_cm)
     baseline_fallback = False
     _bmax = float(np.max(baseline))
     _ratio = (float(np.max(v_cyc)) / _bmax) if _bmax > 0 else 0.0
@@ -1288,10 +1472,11 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     if baseline_fallback:
         warnings.append("baseline fallback: dense spectrum, used known I0")
     _require_driver_range(cfg, wn_center, "offset_V" not in user_keys)
+    _x_disp = f"{x:g}" if mixture is None else "混合气"
     aL_peak = float(alpha.max()) * float(L_cm)
     if aL_peak > 0.1:
         warnings.append(f"αL≈{aL_peak:.3g} 偏大（>0.1）：DAS 进入非线性区、峰形被压低，"
-                        f"建议降低浓度或光程（x={x:g}, L={L_cm:g} cm）")
+                        f"建议降低浓度或光程（x={_x_disp}, L={L_cm:g} cm）")
     elif aL_peak < 1e-4:
         warnings.append(f"αL≈{aL_peak:.3g} 偏小（<1e-4）：吸收太弱、信噪比可能不足")
     if n_sat > 0:
@@ -1305,8 +1490,13 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     warnings.append(f"输出电压噪声 RMS≈{v_noise_rms * 1e3:.3g} mV（散粒 {s_shot * cfg['gain'] * 1e3:.3g} / "
                     f"热 {s_therm * cfg['gain'] * 1e3:.3g} / RIN {s_rin * cfg['gain'] * 1e3:.3g} mV）")
 
-    meta = {"species": str(species).upper(), "wn_center": float(wn_center), "T": float(T),
-            "P": float(P), "x": float(x), "L_cm": float(L_cm), "edge": edge,
+    _mx = info.get("mixture") or [{"species": str(species).upper(), "x": float(x)}]
+    _sp = (str(species).upper() if mixture is None
+           else "+".join(f"{d['species']}@{d['x']:g}" for d in _mx))
+    meta = {"species": _sp, "wn_center": float(wn_center), "T": float(T),
+            "P": float(P), "x": (float(x) if mixture is None else "混合气"),
+            "L_cm": float(L_cm), "edge": edge,
+            "mixture": _mx,
             "span_cm-1": span, "scan_lo": float(nu_laser.min()),
             "scan_hi": float(nu_laser.max()), "alpha_L_peak": aL_peak,
             "baseline_fallback": baseline_fallback,
@@ -1319,11 +1509,18 @@ def simulate_das_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
                         "n": cfg.get("fringe_n"), "d_cm": cfg.get("fringe_d_cm"),
                         "R": cfg.get("fringe_R"), "phase_rad": cfg.get("fringe_phase_rad"),
                         "drift_frac": cfg.get("fringe_drift_frac")} if _fr else {"enabled": False}),
-            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"], "alpha_context": info.get("alpha_context")}
-    return {"t": t, "v_drive": v_drive, "i_laser": i_laser, "nu_laser": nu_laser,
-            "p_laser": p_laser, "p_opt": p_opt, "v_pd": v_pd, "v_adc": v_adc,
-            "nu_das": nu_das, "das": das, "das_full": das_full, "baseline": baseline,
-            "meta": meta}
+            "n_lines_in_window": info["n_lines_in_window"], "table": info.get("table"),
+            "alpha_context": info.get("alpha_context")}
+    out = {"t": t, "v_drive": v_drive, "i_laser": i_laser, "nu_laser": nu_laser,
+           "p_laser": p_laser, "p_opt": p_opt, "v_pd": v_pd, "v_adc": v_adc,
+           "nu_das": nu_das, "das": das, "das_full": das_full, "baseline": baseline,
+           "meta": meta}
+    if mixture is not None:                    # 各组分 αL（对齐 DAS 横轴，供标准图叠加）
+        out["alphaL_per_species"] = [
+            {"label": f"{p['species']}@{p['x']:g}",
+             "alphaL": np.interp(nu_das, nu_grid, p["alpha_pure"]) * p["x"] * float(L_cm)}
+            for p in info["per_species"]]
+    return out
 
 
 def plot_das_instrument(r, out_png, n_show_periods=2):
@@ -1343,7 +1540,7 @@ def plot_das_instrument(r, out_png, n_show_periods=2):
     ax[0].plot(t_ms, r["v_drive"][:n])
     ax[0].set_ylabel("drive V (V)")
     ax[0].set_title(f"instrument chain — {m['species']} @ {m['wn_center']:.3f} cm$^{{-1}}$   "
-                    f"T={m['T']:g} K, P={m['P']:g} atm, x={m['x']:g}, L={m['L_cm']:g} cm, "
+                    f"T={m['T']:g} K, P={m['P']:g} atm, x={m['x']}, L={m['L_cm']:g} cm, "
                     f"edge={m['edge']}")
     ax[1].plot(t_ms, r["nu_laser"][:n])
     ax[1].set_ylabel(r"wavenumber (cm$^{-1}$)")
@@ -1355,6 +1552,11 @@ def plot_das_instrument(r, out_png, n_show_periods=2):
     ax[3].set_ylabel("PD out (mV)")
     ax[3].legend()
     ax[4].plot(r["nu_das"], r["das"], ".", ms=2, label=f"DAS ({m['edge']})")
+    _mix = r.get("alphaL_per_species")             # 混合气：叠加各组分 αL（不新增图）
+    if _mix:
+        _cols = plt.cm.viridis(np.linspace(0.1, 0.8, max(len(_mix), 2)))
+        for _c, _p in zip(_cols, _mix):
+            ax[4].plot(r["nu_das"], _p["alphaL"], "-.", lw=0.9, color=_c, label=_p["label"])
     ax[4].set_ylabel("absorbance")
     ax[4].set_xlabel(r"wavenumber (cm$^{-1}$)")
     ax[4].legend()
@@ -1364,6 +1566,72 @@ def plot_das_instrument(r, out_png, n_show_periods=2):
     fig.tight_layout()
     fig.savefig(out_png, dpi=150)
     return out_png
+
+
+def wms_normalize(X1f_c, Y1f_c, X2f_c, Y2f_c, X1f_bg_c, Y1f_bg_c, X2f_bg_c, Y2f_bg_c,
+                  S1f_cyc, v_cyc, alphaL_cyc, valid, trim_frac, bg_subtracted,
+                  n_sel=None):
+    """第 8 级：**归一化**（纯函数，可单测）—— 2f/1f 与退化 2f/I0。
+
+    为什么单独成函数：这里承载的是整个 WMS 定量链条里最要紧的物理判据，
+    也是本项目唯一一次"阻断级"事故的发生地（`S2f1f_peak` 与 `sensitivity_k`
+    曾分属两套归一化，配对反演偏 249 倍且不报错）。抽成纯函数后可以脱离
+    整条链路单独断言：喂入构造的 X/Y，检查归一化方法选择、背景扣除与
+    退化条件是否都按预期工作。
+
+    输入全部是**逐点数组**（已按所选扫描方向取段）：
+      · 信号支路 X/Y 的 1f、2f 复分量及其幅度（R1f = hypot(X1f, Y1f)）
+      · 无吸收参考谱（τ≡1）的对应分量，用于背景扣除
+      · S1f_cyc / v_cyc / alphaL_cyc / valid：用于失效判据与 I0 估计
+
+    返回 (S2f_1f, S2f_I0, S2f_norm, norm_method, onef_valid, pk_1f, off_1f,
+          onef_min, onef_med, I0_pd, off)。
+    """
+    if valid is None:                         # 允许调用方只给段长，掩膜由本函数置位
+        valid = np.ones(int(n_sel if n_sel is not None else np.size(alphaL_cyc)), dtype=bool)
+    else:
+        valid = np.array(valid, dtype=bool)
+    n_keep = int(round(float(trim_frac) * int(valid.size)))
+    if n_keep > 0:                            # 单方向下两端都紧邻转折点
+        valid[:n_keep] = False
+        valid[-n_keep:] = False
+    off = (alphaL_cyc < 0.02 * float(np.max(alphaL_cyc) + 1e-30)) & valid   # 非吸收区
+    I0_pd = float(np.mean(np.abs(v_cyc[off]))) if off.any() else float(np.mean(np.abs(v_cyc[valid])))
+    # ★ 背景扣除（RAM 基线）：默认以无吸收参考谱复减；关闭仅用于诊断原始基线。
+    #   · 2f/1f：复分量先各除以 1f 幅度、再复减背景（与解析 wms_calibration_free 同式）
+    #   · 2f/I0：复分量直接相减再取模、除 I0（I0 是标量，减法顺序无歧义）
+    R1f_c = np.hypot(X1f_c, Y1f_c); R1f_bg = np.hypot(X1f_bg_c, Y1f_bg_c)
+    _X2f1f = np.divide(X2f_c, R1f_c, out=np.zeros_like(X2f_c), where=R1f_c > 1e-15)
+    _Y2f1f = np.divide(Y2f_c, R1f_c, out=np.zeros_like(Y2f_c), where=R1f_c > 1e-15)
+    _X2f1f_bg = np.divide(X2f_bg_c, R1f_bg, out=np.zeros_like(X2f_bg_c), where=R1f_bg > 1e-15)
+    _Y2f1f_bg = np.divide(Y2f_bg_c, R1f_bg, out=np.zeros_like(Y2f_bg_c), where=R1f_bg > 1e-15)
+    if bg_subtracted:
+        S2f_1f = np.hypot(_X2f1f - _X2f1f_bg, _Y2f1f - _Y2f1f_bg)
+        S2f_I0 = np.hypot(X2f_c - X2f_bg_c, Y2f_c - Y2f_bg_c) / max(I0_pd, 1e-30)
+    else:
+        S2f_1f = np.hypot(_X2f1f, _Y2f1f)
+        S2f_I0 = np.hypot(X2f_c, Y2f_c) / max(I0_pd, 1e-30)
+    # 2f/1f 适用性判据（只在有效区内）：
+    #   真正让 2f/1f 不好用的是"1f 基线随扫描漂移"（AM 即 dP/dV 非线性），
+    #   表现为**真无吸收处** 2f/1f 背景不平（泄漏接近峰值）。
+    #   注意：1f 在共振中心两侧的"过零"是 AM 与吸收 1f 相消的**物理奇点**，
+    #   属正常现象（真实 WMS 亦然），**不构成"1f 失效"**，故不参与判据。
+    pk_1f = float(np.max(np.abs(S2f_1f[valid]))) if valid.any() else 0.0
+    off_1f = float(np.max(np.abs(S2f_1f[off]))) if off.any() else 0.0
+    abs1 = np.abs(S1f_cyc[valid]) if valid.any() else np.array([0.0])
+    onef_min, onef_med = float(np.min(abs1)), float(np.median(abs1))
+    onef_valid = bool(pk_1f > 0 and off_1f <= 0.30 * pk_1f)
+    S2f_norm = S2f_1f if onef_valid else S2f_I0
+    norm_method = "2f/1f" if onef_valid else "2f/I0（PD 非吸收区光强均值）"
+    if not bg_subtracted:
+        norm_method += "（未背景扣除）"
+    # ⚠ 必须把**实际使用的 valid** 一并返回：
+    #   此前只返回数值，而 `valid[:n] = False` 是局部作用域不会传回调用方 →
+    #   调用方的 valid_mask 仍是全 True，**trim_frac 剔除完全未生效**，
+    #   锁相滤波器两端的瞬态被当成真实 2f 峰（实测虚高 2.5 倍、
+    #   峰位被拖到窗口最右端）。这是抽取函数时引入的回归。
+    return (S2f_1f, S2f_I0, S2f_norm, norm_method, onef_valid, pk_1f, off_1f,
+            onef_min, onef_med, I0_pd, off, valid)
 
 
 def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAULTS["wn_center"],
@@ -1383,6 +1651,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     cfg = {**DAQ_DEFAULTS, **SCAN_DEFAULTS, **MOD_DEFAULTS, **LASER_DEFAULTS,
            **OPTICS_DEFAULTS, **PD_DEFAULTS, **GAS_DEFAULTS, **FRINGE_DEFAULTS}
     user_keys = set(kw)
+    mixture = kw.pop("mixture", None)          # 混合气组分（不并入 cfg，单列处理）
     cfg.update({k: v for k, v in kw.items() if v is not None})
     # 显式位置参数覆盖默认（不传则用 GAS_DEFAULTS）
     cfg["species"], cfg["wn_center"] = species, wn_center
@@ -1428,10 +1697,22 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     v_mod_sig = np.cos(2 * np.pi * fm * t + np.deg2rad(float(cfg["mod_phase_deg"])))
 
     span_scan = float(cfg["scan_span_cm"])
-    nu_grid, alpha_pure, info = th.absorption(
-        species, wn_center - span_scan - 0.3, wn_center + span_scan + 0.3, T=T, P=P,
-        step=min(2e-4, span_scan / 2000.0), wingHW=max(10.0, 5.0 * span_scan))
-    alpha_pure_mix = alpha_pure * float(x)
+    _step = min(2e-4, span_scan / 2000.0)
+    _wing = max(10.0, 5.0 * span_scan)
+    if mixture is None:
+        nu_grid, alpha_pure, info = th.absorption(
+            species, wn_center - span_scan - 0.3, wn_center + span_scan + 0.3, T=T, P=P,
+            step=_step, wingHW=_wing)
+        _xscale = float(x)
+    else:
+        _specs = _resolve_mixture_specs(species, x, mixture)
+        nu_grid, alpha_pure, _per = _alpha_grid(
+            _specs, wn_center - span_scan - 0.3, wn_center + span_scan + 0.3, T, P, _step, _wing)
+        _xscale = 1.0                                # alpha_pure 已含 Σ x_i 缩放
+        info = {"n_lines_in_window": sum(p["info"].get("n_lines_in_window", 0) for p in _per),
+                "species_list": [p["species"] for p in _per], "per_species": _per,
+                "mixture": [{"species": s, "x": xi} for s, xi in _specs]}
+    alpha_pure_mix = alpha_pure * _xscale
     auto_mod = cfg["mod_amp_V"] is None
     m_opt_raw = cfg.get("m_opt", 2.2)
     _auto_m = str(m_opt_raw).strip().lower() == "auto"
@@ -1439,7 +1720,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         # 自适应：扫描选最优 m（A 解析 + D 模型 + B 完整链路扫描）
         m_act, a_cm1, hwhm, mod_info = adaptive_modulation_index(
             nu_grid, alpha_pure, estimate_hwhm(nu_grid, alpha_pure),
-            cfg, t, v_scan, v_mod_sig, float(x), float(L_cm),
+            cfg, t, v_scan, v_mod_sig, _xscale, float(L_cm),
             n_lines=info["n_lines_in_window"])
         _dnu_dV = abs(float(cfg["eta_VI"]) * float(cfg["dnu_dI"]))
         mod_amp_V = a_cm1 / _dnu_dV if _dnu_dV > 0 else 0.0
@@ -1489,7 +1770,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         p_laser = p_det
 
     # ③ 光路
-    alpha = np.interp(nu_laser, nu_grid, alpha_pure) * float(x)
+    alpha = np.interp(nu_laser, nu_grid, alpha_pure) * _xscale
     tau = np.exp(-alpha * float(L_cm))
     # etalon 条纹：光路乘性透过率（默认关 → 恒 1.0，不改变原行为）。信号支路含漂移残留。
     _fr = resolve_fringe(cfg)
@@ -1511,6 +1792,12 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         v_noisy = np.array(v_pd, dtype=float)
 
     # ⑥ ADC
+    # ★ v_ana = 注入噪声**之前**的模拟电压（确定性部分，与 seed 无关）。
+    #   它作为接缝暴露给 measurement_uncertainty：后者只需换一个噪声实现，
+    #   不必重跑 α 插值 / 光路 / 带宽低通（实测占单次耗时约一半）。
+    #   注意：这里取的是"无白噪声"的模拟量；flicker 噪声已在更早的 p_laser 上进入，
+    #   故 fast path 仍会重做 p_laser→…→v_pd 这段以保持物理一致（见 _wms_from_bands）。
+    v_ana = np.array(v_pd, dtype=float)
     lsb = 2.0 * float(cfg["v_range"]) / float(2 ** int(cfg["adc_bits"]))
     n_sat = int(np.sum(np.abs(v_noisy) >= float(cfg["v_range"])))
     v_adc = np.clip(np.round(v_noisy / lsb) * lsb, -float(cfg["v_range"]), float(cfg["v_range"]))
@@ -1557,48 +1844,22 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
     X1f_c, Y1f_c, X2f_c, Y2f_c = X1f[idx], Y1f[idx], X2f[idx], Y2f[idx]
     X1f_bg_c, Y1f_bg_c = X1f_bg[idx], Y1f_bg[idx]
     X2f_bg_c, Y2f_bg_c = X2f_bg[idx], Y2f_bg[idx]
-    alphaL_cyc = np.interp(nu_cyc, nu_grid, alpha_pure) * float(x) * float(L_cm)
+    alphaL_cyc = np.interp(nu_cyc, nu_grid, alpha_pure) * _xscale * float(L_cm)
 
     # ⑧ 归一化：优先 2f/1f；若 1f 失效则退化为 PD 非吸收区光强归一化 2f/I0
     #    · 2f/1f 的前提：1f 正比于光强。但 1f 实际正比于 L-I **斜率** dP/dV，随扫描变化，
     #      且扫描转折处 1f→0，相除会把伪影放大成假峰 → 必须检测并弃用。
     #    · 退化方案：I0 = 非吸收区 PD 信号平均，2f/I0 与光强无关且形状稳定（标准 DC 归一化）。
-    n_keep = int(round(float(cfg["trim_frac"]) * n_sel))
-    valid = np.ones(n_sel, dtype=bool)
-    if n_keep > 0:                            # 单方向下两端都紧邻转折点
-        valid[:n_keep] = False
-        valid[-n_keep:] = False
-    off = (alphaL_cyc < 0.02 * float(np.max(alphaL_cyc) + 1e-30)) & valid   # 非吸收区
-    I0_pd = float(np.mean(np.abs(v_cyc[off]))) if off.any() else float(np.mean(np.abs(v_cyc[valid])))
-    # ★ 背景扣除（RAM 基线）：默认以无吸收参考谱复减；关闭仅用于诊断原始基线。
-    #   · 2f/1f：复分量先各除以 1f 幅度、再复减背景（与解析 wms_calibration_free 同式）
-    #   · 2f/I0：复分量直接相减再取模、除 I0（I0 是标量，减法顺序无歧义）
-    R1f_c = np.hypot(X1f_c, Y1f_c); R1f_bg = np.hypot(X1f_bg_c, Y1f_bg_c)
-    _X2f1f = np.divide(X2f_c, R1f_c, out=np.zeros_like(X2f_c), where=R1f_c > 1e-15)
-    _Y2f1f = np.divide(Y2f_c, R1f_c, out=np.zeros_like(Y2f_c), where=R1f_c > 1e-15)
-    _X2f1f_bg = np.divide(X2f_bg_c, R1f_bg, out=np.zeros_like(X2f_bg_c), where=R1f_bg > 1e-15)
-    _Y2f1f_bg = np.divide(Y2f_bg_c, R1f_bg, out=np.zeros_like(Y2f_bg_c), where=R1f_bg > 1e-15)
-    bg_subtracted = bool(cfg.get("background_subtract", True))
-    if bg_subtracted:
-        S2f_1f = np.hypot(_X2f1f - _X2f1f_bg, _Y2f1f - _Y2f1f_bg)
-        S2f_I0 = np.hypot(X2f_c - X2f_bg_c, Y2f_c - Y2f_bg_c) / max(I0_pd, 1e-30)
-    else:
-        S2f_1f = np.hypot(_X2f1f, _Y2f1f)
-        S2f_I0 = np.hypot(X2f_c, Y2f_c) / max(I0_pd, 1e-30)
-    # 2f/1f 适用性判据（只在有效区内）：
-    #   真正让 2f/1f 不好用的是"1f 基线随扫描漂移"（AM 即 dP/dV 非线性），
-    #   表现为**真无吸收处** 2f/1f 背景不平（泄漏接近峰值）。
-    #   注意：1f 在共振中心两侧的"过零"是 AM 与吸收 1f 相消的**物理奇点**，
-    #   属正常现象（真实 WMS 亦然），**不构成"1f 失效"**，故不参与判据。
-    pk_1f = float(np.max(np.abs(S2f_1f[valid]))) if valid.any() else 0.0
-    off_1f = float(np.max(np.abs(S2f_1f[off]))) if off.any() else 0.0
-    abs1 = np.abs(S1f_cyc[valid]) if valid.any() else np.array([0.0])
-    onef_min, onef_med = float(np.min(abs1)), float(np.median(abs1))
-    onef_valid = bool(pk_1f > 0 and off_1f <= 0.30 * pk_1f)
-    S2f_norm = S2f_1f if onef_valid else S2f_I0
-    norm_method = "2f/1f" if onef_valid else "2f/I0（PD 非吸收区光强均值）"
-    if not bg_subtracted:
-        norm_method += "（未背景扣除）"
+    # ⑧ 归一化（抽为纯函数 wms_normalize，可单测）
+    _bg_sub = bool(cfg.get("background_subtract", True))
+    valid = np.ones(n_sel, dtype=bool)      # 有效区掩膜由 wms_normalize 内按 trim_frac 置位
+    n_keep = int(round(float(cfg["trim_frac"]) * n_sel))   # 供 meta 上报剔除点数
+    (S2f_1f, S2f_I0, S2f_norm, norm_method, onef_valid, pk_1f, off_1f,
+     onef_min, onef_med, I0_pd, off, valid) = wms_normalize(
+        X1f_c, Y1f_c, X2f_c, Y2f_c, X1f_bg_c, Y1f_bg_c, X2f_bg_c, Y2f_bg_c,
+        S1f_cyc, v_cyc, alphaL_cyc, valid,
+        float(cfg["trim_frac"]), _bg_sub)
+    bg_subtracted = _bg_sub
     S2f1f = S2f_1f                     # 保留原名以向后兼容（始终输出，供用户自行判断）
 
     # ⑨ DAS 对照：DAS 是**不带调制**的直接吸收技术，所以不能用"对含调制信号做平均"
@@ -1611,7 +1872,7 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         p_das = p_das * (1.0 + drift_frac * np.sin(2 * np.pi * 1.0 * t + 0.3))
     if flicker_frac > 0:
         p_das = p_das * (1.0 + flicker_frac * pink_noise(len(t), fs, rng))
-    alpha_das = np.interp(nu_das, nu_grid, alpha_pure) * float(x)
+    alpha_das = np.interp(nu_das, nu_grid, alpha_pure) * _xscale
     # ★ DAS 基线必须用"无吸收光强 I0"（仿真里可精确给出）。之前的"非吸收区多项式拟合"
     #   在密集谱区（如 C2H6 159 条线，无非吸收区）会失效，导致 DAS 基线错、吸光度失真。
     # ★ I0 也必须过同一条低通 + ADC 量化链路，否则与含吸收的 v_das_all 相位不对齐、
@@ -1698,11 +1959,16 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
 
     # 免标定灵敏度：k = 归一化 2f 峰值 ÷ 浓度（弱吸收下与浓度无关）。
     # 这是**完整链路**的 k，供 tdlas_invert 复用；勿与解析版 simulate() 混用（两路 S2f/1f 差 ~6×）。
+    # 混合气下"单物种浓度"无定义 → k 置 0（不做无据外推）。
     k_sens = (float(np.max(np.abs(S2f_norm[valid]))) / float(x)
-              if (valid.any() and float(x) > 0) else 0.0)
+              if (mixture is None and valid.any() and float(x) > 0) else 0.0)
 
-    meta = {"species": str(species).upper(), "wn_center": float(wn_center), "T": float(T),
-            "P": float(P), "x": float(x), "L_cm": float(L_cm), "fs": fs,
+    _mx = info.get("mixture") or [{"species": str(species).upper(), "x": float(x)}]
+    _sp = (str(species).upper() if mixture is None
+           else "+".join(f"{d['species']}@{d['x']:g}" for d in _mx))
+    meta = {"species": _sp, "wn_center": float(wn_center), "T": float(T),
+            "P": float(P), "x": (float(x) if mixture is None else "混合气"),
+            "L_cm": float(L_cm), "fs": fs, "mixture": _mx,
             "fscan_Hz": fscan, "mod_freq_Hz": fm, "mod_amp_V": mod_amp_V, "auto_mod": auto_mod,
             "mod_coeff_m": m_act, "mod_depth_cm-1": a_cm1, "hwhm_cm-1": hwhm,
             "modulation": mod_info,
@@ -1720,7 +1986,8 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
                         "n": cfg.get("fringe_n"), "d_cm": cfg.get("fringe_d_cm"),
                         "R": cfg.get("fringe_R"), "phase_rad": cfg.get("fringe_phase_rad"),
                         "drift_frac": cfg.get("fringe_drift_frac")} if _fr else {"enabled": False}),
-            "n_lines_in_window": info["n_lines_in_window"], "table": info["table"], "alpha_context": info.get("alpha_context")}
+            "n_lines_in_window": info["n_lines_in_window"], "table": info.get("table"),
+            "alpha_context": info.get("alpha_context")}
     # ★ BUG-D 修复：锁相已算出正交 X/Y 复分量（背景扣除的输入），但此前未返回，
     #   导致用户拿不到 1f/2f 的原始同相/正交分量。默认关（每次返回多 8 条等长数组，
     #   会显著增大 MCP 返回体），按需开 return_xy=True 才透出。
@@ -1729,15 +1996,22 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
         _xy_out = {"X1f_c": X1f_c, "Y1f_c": Y1f_c, "X2f_c": X2f_c, "Y2f_c": Y2f_c,
                    "X1f_bg_c": X1f_bg_c, "Y1f_bg_c": Y1f_bg_c,
                    "X2f_bg_c": X2f_bg_c, "Y2f_bg_c": Y2f_bg_c}
-    return {"t": t, "v_drive": v_drive, "v_scan": v_scan, "v_mod": v_mod_sig * mod_amp_V,
+    _out = {"t": t, "v_drive": v_drive, "v_scan": v_scan, "v_mod": v_mod_sig * mod_amp_V,
             "nu_laser": nu_laser, "p_laser": p_laser, "p_opt": p_opt, "v_pd": v_pd,
             "v_adc": v_adc, "S1f": S1f, "S2f": S2f, "S2f1f": S2f1f,
             "nu_axis": nu_cyc, "S1f_cyc": S1f_cyc, "S2f_cyc": S2f_cyc,
             "S2f1f_cyc": S2f_1f, "S2f_norm_cyc": S2f_norm,
             "v_adc_cyc": v_cyc, "v_drive_cyc": v_drive[idx],
             "alphaL_cyc": alphaL_cyc, "offband_mask": off, "valid_mask": valid,
+            "v_ana": v_ana,                      # 无噪声模拟电压（接缝：供重复测量复用）
             "das_cyc": das_cyc, "v_das_cyc": v_das_cyc,
             "t_cyc": t[idx], "n_per": n_sel, "edge": edge, "meta": meta, **_xy_out}
+    if mixture is not None:                    # 各组分 αL（对齐 nu_axis，供标准图 αL 面板叠加）
+        _out["alphaL_per_species"] = [
+            {"label": f"{p['species']}@{p['x']:g}",
+             "alphaL": np.interp(nu_cyc, nu_grid, p["alpha_pure"]) * p["x"] * float(L_cm)}
+            for p in info["per_species"]]
+    return _out
 
 
 def measurement_uncertainty(species, wn_center, T, P, x, L_cm, seed=0, n_repeats=5,
@@ -1779,9 +2053,24 @@ def measurement_uncertainty(species, wn_center, T, P, x, L_cm, seed=0, n_repeats
     if n < 2:
         raise ValueError("n_repeats 至少 2 才能估计散布")
     peaks = np.empty(n, dtype=float)
+    # ★ 性能：自适应调制深度扫描占单次链路开销的绝大部分（实测 94%），而**本函数的
+    #   每一次重复工况完全相同 → 最优 m 必然相同**，重复扫描是纯浪费。
+    #   故第 1 次照常自适应（保留原选点逻辑），后续重复固定复用第 1 次选出的 m_opt。
+    #   已实测等价：固定 m_opt=<自适应结果> 与自适应重跑在三个 seed 下 peak 与 k **逐位一致**。
+    #   用户显式给了 m_opt 时不介入（那是他的实验约束，必须被尊重）。
+    _m_fixed = None
+    _user_m = kw.get("m_opt", "auto")
     for i in range(n):
+        _kw = dict(kw)
+        if _m_fixed is not None:
+            _kw["m_opt"] = _m_fixed
         r = simulate_wms_instrument(species, wn_center=wn_center, T=T, P=P, x=x,
-                                    L_cm=L_cm, seed=int(seed) + i, **kw)
+                                    L_cm=L_cm, seed=int(seed) + i, **_kw)
+        if _m_fixed is None and _user_m == "auto":
+            try:
+                _m_fixed = float(r["meta"]["mod_coeff_m"])
+            except Exception:                              # noqa: BLE001
+                _m_fixed = None
         peaks[i] = float(np.abs(r["S2f_norm_cyc"])[r["valid_mask"]].max())
 
     mean_p = float(np.mean(peaks))
@@ -1865,6 +2154,72 @@ def rel_uncertainty_for_x(x_value, rel_sigma, ci=0.95):
     return x, abs(x) * rel, abs(x) * rel * z
 
 
+def validate_das_result(r):
+    """对 DAS 仪器链路结果做自动校验（与 WMS 的 validate_wms_result 同位）。
+
+    为什么单独需要：DAS 是定量技术（给测量吸光度与浓度），
+    但此前**没有任何自动校验**：WMS 有 13 项判据，DAS 只有几条
+    场景级 warnings。而 DAS 有自己独有的失败模式（基线拟合把吸收吃掉、
+    理想 I0 回退、持续性偏差），不能照搬 WMS 的判据。
+
+    判据（硬/软分档，与项目现有口径一致）：
+      1. ADC 动态范围   硬—— 饱和点 >0 即 fail（数据已剪幅，吸光度不可用）
+      2. 基线回退         硬—— 触发说明多项式拟合已失效（密集谱区），已改用理想 I0
+      3. 动态范围浪费     软—— 信号 ≪ 量程 时 warn
+      4. 吸收强弱         软—— αL > 0.1 进非线性区；< 1e-5 信噪不足
+      5. I0 与信号同路径   硬—— 校验器依赖的 I0 必须与信号同过 ADC（否则吸光度有系统性偏差）
+    """
+    m = r.get("meta") or {}
+    checks = []
+
+    def add(name, status, detail):
+        checks.append({"check": name, "status": status, "detail": detail})
+
+    n_sat = int(m.get("n_sat", 0))
+    vr = float((m.get("cfg") or {}).get("v_range", 0) or 0)
+    if n_sat > 0:
+        add("ADC 动态范围", "fail",
+            f"{n_sat} 点饱和（量程 ±{vr:g} V）→ 信号已被剪幅，"
+            f"吸光度不可用；请降跨阻增益或光功率")
+    else:
+        add("ADC 动态范围", "pass", "无饱和")
+
+    if m.get("baseline_fallback"):
+        add("基线处理", "warn",
+            "多项式基线已失效→已回退到理想 I0（仿真专属）；"
+            "真实实验需自行背景扣除，精度会低于本结果")
+    else:
+        add("基线处理", "pass", "多项式基线拟合未触发回退")
+
+    vmax = float(m.get("v_pd_mean", 0) or 0)
+    if vr > 0 and vmax < 0.05 * vr:
+        add("信号占满度", "warn",
+            f"平均信号 {vmax:.3g} V 远小于量程 ±{vr:g} V（浪费动态范围）")
+    else:
+        add("信号占满度", "pass", f"平均信号 {vmax:.3g} V")
+
+    aL = float(m.get("alpha_L_peak", 0) or 0)
+    if aL > 0.1:
+        add("吸收强弱", "warn", f"αL={aL:.3g} > 0.1：DAS 已进非线性区，建议降浓度或光程")
+    elif aL < 1e-5:
+        add("吸收强弱", "warn", f"αL={aL:.3g} < 1e-5：吸收太弱，信噪比可能不足")
+    else:
+        add("吸收强弱", "pass", f"αL={aL:.3g} 在可用区")
+
+    has_i0 = any(k in m for k in ("baseline_fallback",)) and ("das" in r or "v_das_cyc" in r)
+    add("I0与信号同路径", "pass" if has_i0 else "warn",
+        "基线 I0 与信号同过低通 + ADC 量化" if has_i0
+        else "未能确认 I0 与信号同路径（请人工复核）")
+
+    status = "fail" if any(c["status"] == "fail" for c in checks) else \
+             ("warn" if any(c["status"] == "warn" for c in checks) else "pass")
+    return {"overall": status, "checks": checks,
+            "summary": f"{status.upper()}: {len(checks)} 项 DAS 校验，" +
+                       f"{sum(c['status']=='pass' for c in checks)} 通过、" +
+                       f"{sum(c['status']=='warn' for c in checks)} 提醒、" +
+                       f"{sum(c['status']=='fail' for c in checks)} 失败"}
+
+
 def validate_wms_result(r):
     """对 WMS 结果做**自动二次审核**，返回结构化校验报告。
 
@@ -1903,8 +2258,16 @@ def validate_wms_result(r):
             add("DAS-理论一致", "pass", f"{_dom} DAS 峰值 {pk_d:.4g} vs 理论 {pk_t:.4g}，偏差 {dev:.1%}{_extra}")
         elif dev < 0.10:
             add("DAS-理论一致", "warn", f"{_dom} DAS 峰值 {pk_d:.4g} vs 理论 {pk_t:.4g}，偏差 {dev:.1%}（>2%）{_extra}")
+        elif dev > 0.5:
+            # ⚠ 密集谱区的"降级为提醒"不得掩盖**极端偏差**：
+            #   实测到 αL=3.3e3 的饱和工况偏差达 99.1% 却仍被归为 warn，
+            #   而同一次返回的 interaction.conclusion_allowed 是 True —— 自相矛盾。
+            #   结论：偏差 > 50% 时"以 DAS 包络为准"的辩护不成立，必须 fail。
+            add("DAS-理论一致", "fail",
+                f"{_dom} DAS 峰值 {pk_d:.4g} vs 理论 {pk_t:.4g}，偏差 {dev:.1%}（>50%："
+                f"超出多线重叠可解释的范围，疑似饱和 / 基线失效 / 窗口错位）{_extra}")
         elif nl_here > 10:
-            # 密集谱区：大偏差可能来自多线叠加与基线拟合受限，不作硬 fail
+            # 密集谱区中等偏差（10%~50%）：可能来自多线叠加与基线拟合受限，不作硬 fail
             # （pass/warn 两档不受谱线密度影响，避免把"好结果"误报为坏消息）
             add("DAS-理论一致", "warn",
                 f"{_dom} DAS 峰值 {pk_d:.4g} vs 理论 {pk_t:.4g}，偏差 {dev:.1%}；"
@@ -1914,14 +2277,53 @@ def validate_wms_result(r):
     else:
         add("DAS-理论一致", "warn", "理论 αL 峰值为 0，无法校验")
 
-    # 3. 弱吸收区 αL
+    # 3. 弱吸收区 αL —— **分级并阻断**
+    #    口径与 docs/VALIDATION.md 声明的适用区间 [1e-5, 0.1] 一致：
+    #    超出该区间即"定量前提已破"，不能只给提醒就放行结论。
+    #    分级：超出 1 个数量级以内 → 非线性但趋势仍有参考价值（warn）；
+    #          超出 ≥10 倍 → 严重饱和，k 与浓度已非物理量（**fail**）。
     aL = m["alpha_L_peak"]
     if 1e-5 <= aL <= 0.1:
         add("弱吸收区", "pass", f"αL={aL:.3g} 在弱吸收线性区 [1e-5, 0.1]")
+    elif aL > 1.0:
+        add("弱吸收区", "fail",
+            f"αL={aL:.3g} 超出弱吸收上限 0.1 达 {aL / 0.1:.0f} 倍：2f 严重饱和，"
+            f"**k 与浓度已非物理量**，不可用于定量结论；"
+            f"请降 x 或 L_cm 一个量级以上")
     elif aL > 0.1:
         add("弱吸收区", "warn", f"αL={aL:.3g} > 0.1：2f 进入非线性，建议降 x 或 L_cm")
     else:
         add("弱吸收区", "warn", f"αL={aL:.3g} < 1e-5：吸收太弱，信噪比可能不足")
+
+    # 3b. 信号与量化噪声的比值 —— **硬判据**（实测踩出的坑）
+    #     背景：实测 CH4@2698 cm⁻¹（弱组合带）、L=100 cm、x=10~30 ppm 时，
+    #     2f 信号仅 0.11~0.26 mV，而 1 LSB = 0.305 mV → **信号埋在量化里**，
+    #     k 在三档浓度间竟差 23 倍（完全不线性）。但 overall 只报 warn、
+    #     conclusion_allowed=True —— 与"能否定量"直接矛盾。
+    #     判据：2f 绝对幅度 < 3 LSB → fail（量化主导，数值不可用）；
+    #           < 10 LSB → warn（可用但余量不足，建议加光程）。
+    #     为何用"绝对幅度/一个 LSB"而不是 SNR：量化噪声与信号成比例，
+    #     SNR 看不出这个失真；而 LSB 是一个硬门槛。
+    try:
+        _cfg3 = m["cfg"]
+        _lsb3 = 2.0 * float(_cfg3["v_range"]) / float(2 ** int(_cfg3["adc_bits"]))
+        _v3 = r["valid_mask"]
+        _i0_3 = float(np.mean(np.abs(r["v_adc_cyc"][_v3]))) if _v3.any() else 0.0
+        _s2f3 = float(np.abs(r["S2f_norm_cyc"])[_v3].max()) if _v3.any() else 0.0
+        _lsb_cnt = (_s2f3 * _i0_3) / _lsb3
+        if _lsb_cnt < 3.0:
+            add("信号/量化", "fail",
+                f"2f 绝对幅度 ≈ {_lsb_cnt:.2f} LSB（< 3）：信号埋在 ADC 量化里，"
+                f"k 与浓度不可用；请**加光程**（多通池）或换强吸收线（加增益无效："
+                f"增益放大的是直流基底，会先撞量程而饱和）")
+        elif _lsb_cnt < 10.0:
+            add("信号/量化", "warn",
+                f"2f 绝对幅度 ≈ {_lsb_cnt:.1f} LSB（< 10）：可用但余量不足，"
+                f"建议加光程以提高信号余量")
+        else:
+            add("信号/量化", "pass", f"2f 绝对幅度 ≈ {_lsb_cnt:.0f} LSB（充分）")
+    except Exception:                                          # noqa: BLE001
+        pass
 
     # 4. 孤立线（标准谐波前提）
     nl = m["n_lines_in_window"]
@@ -2028,9 +2430,14 @@ def use_cjk_font(matplotlib):
     return None
 
 
-def plot_wms_instrument(r, out_png):
-    """TDLAS 仪器链路默认图（3×2 六子图，统一格式）：
-    ① 波长调制 → ② PD 原始信号(DAS 无调制) → DAS αL+理论 → ③ 1f → ④ 2f → ⑤ 归一化 2f。"""
+def plot_wms_instrument(r, out_png, panels="all"):
+    """TDLAS 仪器链路标准图（3×2 六子图，统一格式）：
+    ① 波长调制 → ② PD 原始信号(DAS 无调制) → DAS αL+理论 → ③ 1f → ④ 2f → ⑤ 归一化 2f。
+
+    panels: 默认 "all"（标准 6 图，布局/外观与既有完全一致）；也可传子集标识列表
+    ["drive","das","al","f1","f2","norm"] 只画所需面板（非 6 个时改竖排堆叠）。
+    混合气时在 αL 面板（al）叠加各组分 αL 曲线（不新增图，保持出图规格不变）。
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -2057,66 +2464,81 @@ def plot_wms_instrument(r, out_png):
             pad = 0.08 * (hi - lo) or 1e-12
             a_.set_ylim(lo - pad, hi + pad)
 
-    # 3×2 布局，每子图约 2:1（宽:高）——谱图横轴是波数、横长竖短更利于读线形，
-    # 且贴近黄金矩形，兼顾阅读与美观。
-    fig, ax = plt.subplots(3, 2, figsize=(14, 10))
-    ax = ax.ravel()
+    def _draw(key, a_):
+        if key == "drive":
+            a_.plot(r["t_cyc"] * 1e3, r["v_drive_cyc"], lw=0.6, color="0.2")
+            a_.set_ylabel("驱动电压 (V)")
+            a_.set_xlabel("时间 (ms)")
+            a_.set_title(f"① 波长调制 V(t)   fm={m['mod_freq_Hz'] / 1e3:g} kHz, "
+                         f"fscan={m['fscan_Hz']:g} Hz")
+        elif key == "das":
+            seg(a_, r["v_das_cyc"], "C0", "PD 原始信号")
+            a_.set_ylabel("PD 信号 (V)")
+            a_.set_xlabel(r"波数 (cm$^{-1}$)")
+            a_.set_title("② 直接吸收 DAS（无调制）")
+        elif key == "al":
+            seg(a_, r["das_cyc"], "C0", "DAS αL（实测，-ln 提取）")
+            seg(a_, r["alphaL_cyc"], "C2", "HITRAN 理论 αL（虚线=数据库参考）", lw=1.2, ls="--")
+            mix = r.get("alphaL_per_species")
+            if mix:                                   # 混合气：叠加各组分 αL
+                cols = plt.cm.viridis(np.linspace(0.1, 0.85, max(len(mix), 2)))
+                for _c, _p in zip(cols, mix):
+                    seg(a_, _p["alphaL"], _c, _p["label"], lw=0.9, ls="-.")
+            a_.axhline(0.0, color="k", lw=0.5, alpha=0.4)
+            a_.set_ylabel(r"$\alpha L$")
+            a_.set_xlabel(r"波数 (cm$^{-1}$)")
+            a_.set_title("DAS 吸光度 vs 数据库理论值" + ("（含混合气各组分）" if mix else ""))
+        elif key == "f1":
+            seg(a_, r["S1f_cyc"], "C1", "1f")
+            a_.set_ylabel("1f (V)")
+            a_.set_xlabel(r"波数 (cm$^{-1}$)")
+            a_.set_title("③ 一阶谐波 1f")
+        elif key == "f2":
+            seg(a_, r["S2f_cyc"], "C3", "2f")
+            a_.axhline(0.0, color="k", lw=0.5, alpha=0.4)
+            a_.set_ylabel("2f (V)")
+            a_.set_xlabel(r"波数 (cm$^{-1}$)")
+            a_.set_title("④ 二阶谐波 2f")
+        elif key == "norm":
+            if ok:
+                label = "2f/1f" if m["bg_subtracted"] else "2f/1f（未扣背景）"
+                seg(a_, r["S2f_norm_cyc"], "C2", label, 1.6)
+            else:
+                seg(a_, r["S2f_norm_cyc"], "C2", f"2f/I0（I0={m['I0_pd_V']:.3g} V）", 1.6)
+            a_.axhline(0.0, color="k", lw=0.5, alpha=0.4)
+            a_.set_ylabel("归一化 2f (a.u.)")
+            a_.set_xlabel(r"波数 (cm$^{-1}$)")
+            a_.set_title(f"⑤ 归一化：{m['norm_method']}")
 
-    # ① 驱动电压：三角波 + 正弦调制
-    ax[0].plot(r["t_cyc"] * 1e3, r["v_drive_cyc"], lw=0.6, color="0.2")
-    ax[0].set_ylabel("驱动电压 (V)")
-    ax[0].set_xlabel("时间 (ms)")
-    ax[0].set_title(f"① 波长调制 V(t)   fm={m['mod_freq_Hz'] / 1e3:g} kHz, "
-                    f"fscan={m['fscan_Hz']:g} Hz")
-
-    # ②a PD 原始信号（无调制 DAS 链路，直接吸收）
-    seg(ax[1], r["v_das_cyc"], "C0", "PD 原始信号")
-    ax[1].set_ylabel("PD 信号 (V)")
-    ax[1].set_xlabel(r"波数 (cm$^{-1}$)")
-    ax[1].set_title("② 直接吸收 DAS（无调制）")
-
-    # ②b DAS αL + HITRAN 理论对照（实测=实线，理论=虚线）
-    seg(ax[2], r["das_cyc"], "C0", "DAS αL（实测，-ln 提取）")
-    seg(ax[2], r["alphaL_cyc"], "C2", "HITRAN 理论 αL（虚线=数据库参考）", lw=1.2, ls="--")
-    ax[2].axhline(0.0, color="k", lw=0.5, alpha=0.4)
-    ax[2].set_ylabel(r"$\alpha L$")
-    ax[2].set_xlabel(r"波数 (cm$^{-1}$)")
-    ax[2].set_title("DAS 吸光度 vs 数据库理论值")
-
-    # ③ 1f（单独，幅值独立）
-    seg(ax[3], r["S1f_cyc"], "C1", "1f")
-    ax[3].set_ylabel("1f (V)")
-    ax[3].set_xlabel(r"波数 (cm$^{-1}$)")
-    ax[3].set_title("③ 一阶谐波 1f")
-
-    # ④ 2f（单独，幅值独立）
-    seg(ax[4], r["S2f_cyc"], "C3", "2f")
-    ax[4].axhline(0.0, color="k", lw=0.5, alpha=0.4)
-    ax[4].set_ylabel("2f (V)")
-    ax[4].set_xlabel(r"波数 (cm$^{-1}$)")
-    ax[4].set_title("④ 二阶谐波 2f")
-
-    # ⑤ 归一化 2f（标注方法）
-    if ok:
-        label = "2f/1f" if m["bg_subtracted"] else "2f/1f（未扣背景）"
-        seg(ax[5], r["S2f_norm_cyc"], "C2", label, 1.6)
+    _ALL = ["drive", "das", "al", "f1", "f2", "norm"]
+    _SPECTRAL = {"das", "al", "f1", "f2", "norm"}
+    if panels in (None, "all"):
+        keys = _ALL
+    elif isinstance(panels, str):
+        keys = [p.strip() for p in panels.split(",") if p.strip() in _ALL] or _ALL
     else:
-        seg(ax[5], r["S2f_norm_cyc"], "C2",
-            f"2f/I0（I0={m['I0_pd_V']:.3g} V）", 1.6)
-    ax[5].axhline(0.0, color="k", lw=0.5, alpha=0.4)
-    ax[5].set_ylabel("归一化 2f (a.u.)")
-    ax[5].set_xlabel(r"波数 (cm$^{-1}$)")
-    ax[5].set_title(f"⑤ 归一化：{m['norm_method']}")
+        keys = [p for p in panels if p in _ALL] or _ALL
+    n = len(keys)
+    # 标准 6 图为 3×2（每子图约 2:1，横长竖短利于读线形，贴近黄金矩形）；
+    # 子集时改竖排堆叠，避免留空位。
+    if n == 6:
+        fig, ax = plt.subplots(3, 2, figsize=(14, 10))
+    else:
+        fig, ax = plt.subplots(n, 1, figsize=(9, 3.2 * n))
+    ax = list(np.ravel(ax)) if n > 1 else [ax]
+    for a_, k in zip(ax, keys):
+        _draw(k, a_)
 
-    # 剔除区（三角波转折点）标红 + 灰点线图例说明
+    # 剔除区（三角波转折点）标红 + 灰点线图例说明（仅谱图类面板）
     nd = int(m.get("n_trim", 0))
+    spec_ax = [a_ for a_, k in zip(ax, keys) if k in _SPECTRAL]
     if 0 < nd < r["n_per"]:
         for s_ in (nu[:nd], nu[-nd:]):
             if s_.size:
-                for a_ in ax[1:]:
+                for a_ in spec_ax:
                     a_.axvspan(min(s_.min(), s_.max()), max(s_.min(), s_.max()),
                                color="red", alpha=0.06)
-        for a_ in ax[1:]:
+        for a_ in spec_ax:
             a_.plot([], [], ":", color="0.6", lw=1.5,
                     label="点线=剔除区（转折点，不可信）")
 
@@ -2124,7 +2546,7 @@ def plot_wms_instrument(r, out_png):
         a_.grid(alpha=0.3)
         a_.legend(loc="upper right", fontsize=7)
     fig.suptitle(f"TDLAS 仪器链路 — {m['species']} @ {m['wn_center']:.3f} cm$^{{-1}}$   "
-                 f"x={m['x']:g}, L={m['L_cm']:g} cm, m={m['mod_coeff_m']:.2f}   "
+                 f"x={m['x']}, L={m['L_cm']:g} cm, m={m['mod_coeff_m']:.2f}   "
                  f"归一化 = {m['norm_method']}", fontsize=11)
     fig.tight_layout()
     fig.savefig(out_png, dpi=150)
@@ -2140,10 +2562,16 @@ def plot(r, out_png):
 
     m = r["meta"]
     fig, ax = plt.subplots(3, 1, figsize=(9, 8), sharex=True)
-    ax[0].plot(r["nu"], r["alpha"])
+    ax[0].plot(r["nu"], r["alpha"], label="total α")
+    _mix = r.get("alpha_per_species")              # 混合气：叠加各组分 α（不新增图）
+    if _mix:
+        _cols = plt.cm.viridis(np.linspace(0.1, 0.8, max(len(_mix), 2)))
+        for _c, _p in zip(_cols, _mix):
+            ax[0].plot(r["nu"], _p["alpha"], "-.", lw=0.9, color=_c, label=_p["label"])
+        ax[0].legend(loc="upper right", fontsize=7)
     ax[0].set_ylabel(r"$\alpha$ (cm$^{-1}$)")
     ax[0].set_title(f"{m['species']} @ {m['wn0']:.3f} cm$^{{-1}}$   "
-                    f"T={m['T']:g} K, P={m['P']:g} atm, x={m['x']:g}, L={m['L']:g} cm, "
+                    f"T={m['T']:g} K, P={m['P']:g} atm, x={m['x']}, L={m['L']:g} cm, "
                     f"a={m['a']:g} cm$^{{-1}}$")
     ax[1].plot(r["wn_scan"], r["tau"])
     ax[1].set_ylabel(r"$\tau$ (DAS)")
@@ -2167,6 +2595,9 @@ def plot_multi_x(out_png, ppm, curves, x, xlabel, ylabel, title, valid=None):
     共享横轴 x（波数 / 扫描波数）等长 curves。valid 为可选的有效区掩码列表，
     用于把剔除区画成灰虚线（与 plot_wms_instrument 同源画法）。
     ppm: 摩尔分数 ppm（图例标签）；curves: list[np.ndarray]。
+
+    ⚠ 与「混合气多组分」的区别：本函数按**浓度**叠同一物种的曲线；多组分叠加走
+    `alphaL_per_species`（见各 plot_* 的 per-species 分支），两者不要混用。
     """
     import matplotlib
     matplotlib.use("Agg")
