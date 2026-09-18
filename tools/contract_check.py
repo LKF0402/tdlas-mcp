@@ -844,6 +844,21 @@ try:
 except Exception as e:                                  # noqa: BLE001
     check("多浓度同图可离线实测", False, f"-> {type(e).__name__}: {e}")
 
+# DAS 多浓度叠加图曾用 WMS 的返回键（alphaL_cyc / nu_axis），而 DAS 引擎返回的是
+# das / nu_das → x_list+save_png 时 KeyError，整次调用失败。用真实调用钉住。
+check("DAS 多浓度叠加用对返回键（das / nu_das）",
+      's["das"]' in inspect.getsource(M.t_das_instrument)
+      and "nu_das" in inspect.getsource(M.t_das_instrument))
+try:
+    _das_ov = M.t_das_instrument(species="CH4", wn_center=2968.5,
+                                 x_list=[1e-4, 2e-4], save_png=True)
+    check("DAS 的 x_list+save_png 能出叠加图（不 KeyError）",
+          os.path.exists(str(_das_ov.get("png_overlay") or "")),
+          f"-> {_das_ov.get('png_overlay')}")
+except Exception as e:                                  # noqa: BLE001
+    check("DAS 的 x_list+save_png 能出叠加图（不 KeyError）", False,
+          f"-> {type(e).__name__}: {e}")
+
 # ────────────────── 12. 背景扣除默认关闭 + 必须显式披露 ──────────────────
 # 为什么：背景扣除是"替用户修正基线"的静默处理。默认关 = 出原始谱，由用户决定要不要扣；
 #         但关了就必须让用户看到（否则等于另一种静默）。这里把"默认 False"与

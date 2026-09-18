@@ -2208,8 +2208,10 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
         if save_png:                                   # 多浓度同图：叠加吸收光学厚度 αL
             OUT_DIR.mkdir(parents=True, exist_ok=True)
             _ov = OUT_DIR / f"das_instr_{_safe_name(str(species).upper())}_{float(wn_center):g}cm-1_xlist_overlay.png"
+            # ⚠ DAS 仪器链的返回键是 das / nu_das（不是 WMS 的 alphaL_cyc / nu_axis）：
+            #   此前照抄 WMS 的键 → x_list+save_png 时 KeyError，整次调用失败。
             ts.plot_multi_x(str(_ov), [xi * 1e6 for xi in _xs],
-                            [s["alphaL_cyc"] for s in _samples], _samples[0]["nu_axis"],
+                            [s["das"] for s in _samples], _samples[0]["nu_das"],
                             r"波数 (cm$^{-1}$)", r"吸收光学厚度 $\alpha L$",
                             f"{str(species).upper()} 多浓度吸收谱 (αL vs ν)")
             out["png_overlay"] = str(_ov)
