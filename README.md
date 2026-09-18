@@ -3,22 +3,14 @@
 <h1>tdlas-mcp</h1>
 
 <p><b>TDLAS/WMS 仪器级仿真 MCP 服务器</b><br>
-DAQ → 激光 → 光路 → PD → ADC → 数字锁相 · 自然语言驱动</p>
+DAQ → 激光 → 光路 → PD → ADC → 数字锁相 · 自然语言驱动 · 无需 API key</p>
 
 <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB" alt="Python">
-<img src="https://img.shields.io/badge/MCP-stdio%20HTTP-6B8FD4" alt="MCP">
+<img src="https://img.shields.io/badge/MCP-stdio%20%7C%20HTTP-6B8FD4" alt="MCP">
 <img src="https://img.shields.io/badge/HITRAN-HAPI%201.x-4C8C4A" alt="HITRAN">
 <img src="https://github.com/LKF0402/tdlas-mcp/actions/workflows/ci.yml/badge.svg" alt="CI">
 <img src="https://img.shields.io/badge/release-v0.2.0-blue" alt="Release">
 <img src="https://img.shields.io/badge/license-GPLv3-green" alt="License">
-<img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="Platform">
-<img src="https://img.shields.io/github/stars/LKF0402/tdlas-mcp?style=social" alt="Stars">
-<img src="https://img.shields.io/github/forks/LKF0402/tdlas-mcp?style=social" alt="Forks">
-<img src="https://img.shields.io/github/last-commit/LKF0402/tdlas-mcp" alt="Last commit">
-<img src="https://img.shields.io/github/issues/LKF0402/tdlas-mcp" alt="Issues">
-<img src="https://img.shields.io/github/downloads/LKF0402/tdlas-mcp/total" alt="Downloads">
-<img src="https://img.shields.io/badge/built%20with-NumPy%20%7C%20SciPy-013243" alt="Built with">
-<img src="https://img.shields.io/badge/no%20API%20key%20needed-self--contained-2ea44f" alt="No API key">
 
 </div>
 
@@ -26,144 +18,102 @@ DAQ → 激光 → 光路 → PD → ADC → 数字锁相 · 自然语言驱动<
 
 ## 📖 概述
 
-tdlas-mcp 是基于 MCP（Model Context Protocol）的可调谐二极管激光吸收光谱（TDLAS）仿真服务器，对实验全链路进行仪器系统级建模：
+基于 MCP（Model Context Protocol）的 TDLAS 仿真服务器，对实验**全链路**做仪器级建模（而非只算一条理论 2f 曲线）：
 
 ```
-DAQ 电压(三角波+正弦调制) → 激光器调谐 → HITRAN 气体吸收 → 光电探测 → ADC 量化 → 数字锁相 → 1f、2f、2f/1f 谐波提取
+DAQ 三角波+正弦调制 → 激光调谐(含二次非线性) → HITRAN 气体吸收 → 光电探测 → ADC 量化 → 数字锁相 → 1f / 2f / 2f·1f⁻¹
 ```
 
-服务器自包含 HITRAN 线表获取与吸收谱计算模块（基于 HAPI 1.x，无需 API key），通过 MCP 协议接入 AI 助手，以自然语言完成波长调制光谱（WMS）与直接吸收光谱（DAS）仿真。
+内置 HITRAN 取数与吸收谱计算（HAPI 1.x，**不需要 API key**），由 AI 助手以自然语言驱动 WMS / DAS 仿真。用途：**系统选型、方法验证、排除错误设计**——不替代实测。
 
 ## ✨ 核心特性
 
-- **仪器级全链路建模**：DAQ 三角波 + 正弦调制 → 激光调谐（含二次非线性）→ HITRAN 吸收 → PD 一阶带宽 → ADC 中平量化 → 数字锁相（整数调制周期滑动平均）→ 2f/1f 与 2f/I0 归一化，另可选 etalon 条纹、RIN、1/f 漂移等效应
-- **混合气多组分吸收**：四个仿真工具均支持 `mixture`（`"CH4:0.01,CO2:0.04"` 或 `[{"species","x"}]`），严格按 `α = Σ x_i·α_pure_i(T, P, 空气浴)` 逐点相加——**不用 x·P 当分压**（那会算错窄线宽与浓度定标）。各组分曲线在既有标准图内叠加，随返回给 `alphaL_per_species` 与 `mixture_breakdown`（谁主导），与单 `x` 二选一、与 `x_list` 互斥
-- **AI 交互契约（结构化动作）**：每次返回都带 `interaction`（`stage` / `physics_ok` / `result_usable` / `conclusion_allowed` / `blocking_reason`）与 `next_required_actions`（`id` / `severity` / `action` / `evidence_fields` / `values`）。"必须澄清 / 必须披露"不是写在文档里的建议，而是**随返回值下发、并被契约测试钉住**的机器可读动作
-- **保真度台账（单一真源）**：`tools/tdlas_fidelity.py` 把"效应 ↔ 实现位置 ↔ 是否真生效 ↔ 已知缺口"写成可执行表，并对源码证据与参数可达性做离线审计。当前 **11 项默认生效 / 6 项需显式开启 / 7 项未建模**；未建模项随结果披露，避免把点值当成带误差的结果
-- **测量不确定度（统计分量）**：`tdlas_invert(n_repeats>0)` 给出 run-to-run 散布、σ 的 95% 区间与小样本警告；口径明确为**只含随机分量**，不含 k 标定误差、数据库不确定度、线型近似与 etalon 条纹
-- **可信度分层**：出结果时给出 10 项自动校验（物理判据），与交互合规**分开**计分——"物理坏"和"话说得不全"不会被混成一个分数
-- **可复现**：默认 `seed=0` ⇒ 同参调用逐位可复现；散粒 / 热噪声是物理固有项（默认注入），需严格理想仿真时用 `physical_noise=False`
-- **离线双门禁**：`tools/contract_check.py` 与 `tools/tdlas_fidelity.py` 均为 CI 硬门禁，不依赖网络
+| 特性 | 要点 |
+|---|---|
+| **全链路建模** | 链路每一环都可引入真实效应：可选 etalon 条纹、RIN、1/f 漂移、PD 一阶带宽、ADC 中平量化、RAM/AM |
+| **混合气多组分** | `mixture="CH4:0.01,CO2:0.04"`，严格按 `α = Σ xᵢ·α_pureᵢ(T,P,空气浴)` 逐点相加——**不用 x·P 当分压**（那会算错窄线宽与浓度定标）；返回 `alphaL_per_species` 与 `mixture_breakdown` 说明"谁主导" |
+| **AI 交互契约** | 每次返回带 `interaction`（`physics_ok` / `result_usable` / `conclusion_allowed` / `blocking_reason`）与机器可读的 `next_required_actions`。"必须澄清 / 必须披露"写在**返回值**里，而非只写在文档里 |
+| **保真度台账** | `tools/tdlas_fidelity.py` 把"效应 ↔ 实现位置 ↔ 是否真生效 ↔ 已知缺口"做成可执行表：**默认生效 11 项 / 需显式开启 6 项 / 未建模 7 项**，未建模项随结果披露 |
+| **可信度分层** | 10 项物理校验与交互合规**分别**计分——"物理坏"不与"话说得不全"混成一个分数 |
+| **可复现 + 离线门禁** | `seed=0` 默认逐位可复现；`contract_check.py`（147 项）与 `tdlas_fidelity.py` 均为 CI 硬门禁，不依赖网络 |
 
-## 🔄 交互工作流
-
-自然语言请求如何经 AI 助手 → MCP 服务器 → 仿真内核 → 校验与交付：
-
-![tdlas-mcp 交互工作流](docs/assets/interaction-workflow.png)
-
-> 四泳道流程：① **启动协议**（AI 助手读取 `tdlas_guide` 约定与保真度台账）→ ② **参数与澄清**（四级优先级索取 + 设备库注入 + 结构化追问）→ ③ **仿真执行**（12 工具路由 → 链路仿真 DAQ→锁相）→ ④ **校验与交付**（10 项校验、失败项修复闭环、α / 条纹语境播报、**未建模效应披露**）。
->
-> 硬约束闸门由**返回值**承载，而不是文档：需要澄清时 `next_required_actions` 给出 `clarify_missing`；物理校验 fail、扫描含暗区或反演越界时 `interaction.conclusion_allowed=false` 并给出 `blocking_reason`。
+其他：`tdlas_invert(n_repeats>0)` 给测量不确定度（**仅统计随机分量**）；`return_xy` 透出锁相 X/Y 用于 RAM/AM 诊断；`x_list` 支持多浓度扫描与同图叠加。
 
 ## 📊 效果展示
 
-### WMS 仪器链路输出（CH₄ @ 2968.5 cm⁻¹）
-
 ![WMS demo](docs/assets/wms-ch4-demo.png)
 
-> 3×2 六子图：① 驱动电压（三角波+正弦调制）→ ② DAS 直接吸收 → ③ 一阶谐波 1f → ④ 二阶谐波 2f → ⑤ 2f/1f 归一化（红色区域为电压折返剔除区）
+> CH₄ @ 2968.5 cm⁻¹ 的 3×2 输出：驱动电压 → DAS 吸收 → 1f → 2f → 2f/1f（红色为电压折返剔除区）
 
-### 自然语言交互
+![交互工作流](docs/assets/interaction-workflow.png)
 
-![Chat interaction](docs/assets/chat-interaction-1.png)
+> 四泳道流程：启动协议 → 参数与澄清（四级优先级 + 设备库 + 结构化追问）→ 仿真执行 → 校验与交付（10 项校验、α/条纹语境播报、未建模效应披露）
 
-![Chat interaction 2](docs/assets/chat-interaction-2.png)
+<details>
+<summary>技术适配矩阵（扩展性）</summary>
 
-## 🧭 技术适配矩阵
-
-17 种光谱技术在 tdlas-mcp 四层架构（取数层 / 器件层 / 信号层 / 反演层）上的适配判定：
+17 种光谱技术在本项目四层架构（取数 / 器件 / 信号 / 反演）上的适配判定：🟩 复用 · 🟧 改造 · 🟥 新增
 
 ![技术适配矩阵](docs/assets/technique-matrix.png)
 
-> 🟩 复用（直接沿用） · 🟧 改造（新增模块或改写） · 🟥 新增（需全新物理内核）
+</details>
 
 ## 🚀 快速上手
 
 ```bash
 pip install -r requirements.txt
 
-# 服务器自检（需访问 hitran.org）
-python tools/tdlas_mcp.py --selftest
-
-# 离线契约自检（不需要网络，CI 硬门禁）
-python tools/contract_check.py
-
-# 离线保真度审计：能力台账 ↔ 源码证据 ↔ 参数可达性（CI 硬门禁）
-python tools/tdlas_fidelity.py
-
-# 离线 α(ν) 独立交叉验证：SciPy Voigt 自实现标度 vs HAPI（CI 硬门禁）
-python tools/alpha_crossval.py
-
-# 接入 MCP 客户端（stdio）
-# 将 mcp.config.example.json 中 args 路径改为实际安装路径即可
+python tools/tdlas_mcp.py --selftest      # 服务器自检（需访问 hitran.org）
+python tools/contract_check.py            # 离线契约自检（CI 硬门禁）
+python tools/tdlas_fidelity.py            # 离线保真度审计（CI 硬门禁）
+python tools/alpha_crossval.py            # α(ν) 独立交叉校验（与 HAPI 互校）
 ```
 
-> 💡 **一键配置**：将以下内容复制粘贴给你的 AI 助手，即可自动完成 MCP 接入：
->
-> ```
-> 请帮我配置 tdlas-mcp MCP 服务器，本地路径 <你的 tdlas-mcp 安装路径>，
-> Python 解释器路径 <你的 python.exe 路径>，
-> 入口文件 tools/tdlas_mcp.py。
-> 并把本项目的 SKILL.md 安装为 Skill。
-> ```
+接入 MCP 客户端：把 `mcp.config.example.json` 里的路径改为本机路径即可。
 
-## ⚠️ 必须同时安装 Skill（不是可选）
+> 💡 **一键配置**：复制下面这段话给你的 AI 助手 ——
+> "请帮我配置 tdlas-mcp MCP 服务器，本地路径 `<安装路径>`，Python 解释器 `<python.exe 路径>`，入口文件 `tools/tdlas_mcp.py`；并把本项目 `SKILL.md` 安装为 Skill。"
 
-`SKILL.md` **不是文档，是 AI 的行为规范**——它规定 AI 在拿到工具返回后**必须怎么做**：
+## ⚠️ Skill 不是可选项
 
-| 只有 MCP | MCP + Skill |
-|---|---|
-| AI 能看到 `next_required_actions`，但不一定照做 | Skill 规定"按 `next_required_actions` 逐条照做" |
-| AI 可能把默认值当实测值报出 | Skill 规定"保留默认值必须显式标注" |
-| AI 可能编造器件参数 | Skill 规定 **`source` 必须如实填**（推断=ai，不得冒充 datasheet） |
-| AI 可能给设备起 `a1`/`test` 这种名字 | Skill 规定命名必须含型号/波长 |
+`SKILL.md` 不是文档，而是 **AI 的行为规范**：服务器只能保证 AI「看到」`next_required_actions`，Skill 才规定 AI「照做」——保留默认值必须显式标注、器件参数来源（`source`）必须如实填写、设备命名须含型号/波长。
 
-**服务器只能保证 AI「看到」，Skill 才能规定 AI「照做」。** 用户只需上传素材（器件型号/规格书），建库、命名、打包、披露都由 AI 按 Skill 执行。
-
-安装方式（任选其一）：
-
-- 把 `SKILL.md` 放到你的 AI 客户端的 Skill 目录（如 `.claude/skills/`、`.codebuddy/skills/` 等）；
-- 或直接让 AI 读取本文件：`请阅读 <路径>/SKILL.md 并作为本次任务的行为规范`。
+安装（任选其一）：放进客户端的 Skill 目录；或让 AI 直接读取该文件作为行为规范。
 
 ## 🔧 工具列表
 
 | 工具 | 功能 |
-|------|------|
+|---|---|
 | ⭐ **tdlas_wms_instrument** | **WMS 仪器级仿真首选**：全链路建模，输出标准 3×2 六子图 |
 | tdlas_das_instrument | 仪器级 DAS 仿真（DAQ→激光→光路→PD→ADC） |
 | tdlas_simulate | 解析模型正向计算：DAS 透过率、1f、2f 峰高 |
-| tdlas_das_chain | 三角波 DAS 链路：PD 原始信号 → 多项式基线拟合 → 吸光度 |
-| tdlas_review | 结果自动校验（10 项检查，不绘图）；随返回下发交互契约与保真度声明 |
-| tdlas_invert | 免标定浓度反演：2f/1f 峰高 → 摩尔分数；`n_repeats>0` 额外给测量不确定度（仅统计分量） |
-| tdlas_detection_limit | 噪声等效浓度（NEC）与检测限（LOD）计算 |
-| tdlas_detection_limit_scan | LOD 随光程与参考浓度的二维扫描（系统选型） |
+| tdlas_das_chain | 三角波 DAS 链路：PD 原始信号 → 基线拟合 → 吸光度 |
+| tdlas_review | 结果自动校验（10 项，不绘图）+ 交互契约与保真度声明 |
+| tdlas_invert | 免标定浓度反演（2f/1f → 摩尔分数）；`n_repeats>0` 给出不确定度 |
+| tdlas_detection_limit | 噪声等效浓度（NEC）与检测限（LOD） |
+| tdlas_detection_limit_scan | LOD 随光程 / 参考浓度的二维扫描（选型） |
 | tdlas_session | 跨会话工况参数持久化 |
-| tdlas_device | 硬件参数库管理（激光器/探测器/DAQ/光学） |
-| tdlas_guide | AI 交互协议、术语表与保真度台账（`fidelity`） |
+| tdlas_device | 硬件参数库（激光器 / 探测器 / DAQ / 光学） |
+| tdlas_guide | AI 交互协议、术语表与保真度台账 |
 | tdlas_selftest | 全链路自检 |
 
-> 四个仿真工具（`tdlas_wms_instrument` / `tdlas_das_instrument` / `tdlas_simulate` / `tdlas_das_chain`，及透传的 `tdlas_review`）共用一对可选项：`mixture`（混合气多组分，见上）与 `x_list`（单物种多浓度扫描，`save_png=true` 时另出多浓度同图 `png_overlay`）。两者**互斥**，与单 `x` **二选一**。
+> 四个仿真工具（及透传的 `tdlas_review`）共用一对可选项：`mixture`（混合气）与 `x_list`（单物种多浓度扫描，`save_png=true` 时另出 `png_overlay`）。两者**互斥**，且与单 `x` **二选一**。
 
 ## 🌐 远程部署
 
 ```bash
-# HTTP 模式
 python tools/tdlas_mcp.py --http --host 0.0.0.0 --port 8000 --token <鉴权密钥>
-
-# 公网隧道（cloudflared）
-python tools/remote_link.py
+python tools/remote_link.py   # 公网隧道（cloudflared）
 ```
 
-配置示例见 [mcp.config.example.json](./mcp.config.example.json)。
-
-## 📚 相关文档
+## 📚 文档
 
 | 文档 | 内容 |
-|------|------|
+|---|---|
 | [TECHNICAL.md](./TECHNICAL.md) | 物理原理、算法实现、参数表、已知近似 |
 | [docs/VALIDATION.md](./docs/VALIDATION.md) | 可信度分层、校验判据口径、已知局限 |
-| [SKILL.md](./SKILL.md) | AI 交互规范与工具使用协议（含"按 `next_required_actions` 执行"） |
-| [tools/tdlas_fidelity.py](./tools/tdlas_fidelity.py) | 保真度能力登记表：单一真源 + 离线审计 |
+| [SKILL.md](./SKILL.md) | AI 交互规范与工具使用协议 |
+| [tools/tdlas_fidelity.py](./tools/tdlas_fidelity.py) | 保真度登记表：单一真源 + 离线审计 |
 | [CHANGELOG.md](./CHANGELOG.md) | 版本更新记录 |
 
 ## 📝 引用
@@ -173,27 +123,15 @@ The TDLAS/WMS instrument-level simulations were performed using tdlas-mcp
 (https://github.com/LKF0402/tdlas-mcp, GPLv3).
 ```
 
-底层数据：HAPI (Kochanov et al., JQSRT 2016, DOI: 10.1016/j.jqsrt.2016.03.005) · HITRAN2024 (Gordon et al., JQSRT 2026, DOI: 10.1016/j.jqsrt.2026.109807)
+底层数据：HAPI (Kochanov et al., JQSRT 2016, [10.1016/j.jqsrt.2016.03.005](https://doi.org/10.1016/j.jqsrt.2016.03.005)) · HITRAN2024 (Gordon et al., JQSRT 2026, [10.1016/j.jqsrt.2026.109807](https://doi.org/10.1016/j.jqsrt.2026.109807))
 
 ## ⚠️ 声明
 
-### 学术诚信
+**学术诚信**：输出为**理论仿真**，仅用于研究参考、方法验证与系统选型。严禁将仿真结果冒充实验测量写入论文或用于产品认证；论文中使用须标注"理论仿真"并按上节致谢。
 
-本工具输出为理论仿真结果，**仅用于研究参考、方法验证与系统选型**。严禁将仿真数据冒充实验测量数据写入学术论文，或隐瞒仿真性质误导审稿人与读者。论文中使用本工具时须明确标注"理论仿真"，并按下方引用格式致谢。
+**版权**：个人独立原创，GPLv3 开源。✅ 个人/学术/教学/二次开发、商业内部研究评估；❌ 闭源出售、去除版权声明后换壳抄袭、把仿真结果当实验数据宣传。衍生作品须同样开源并保留原始版权声明。
 
-### 版权与使用
-
-本项目为**个人独立原创**，以 GPLv3 许可证开源发布：
-
-- ✅ **允许**：个人使用、学术研究、教学、自由修改与二次开发
-- ✅ **允许**：商业场景下的内部研究与评估
-- ❌ **禁止**：将本项目源码或衍生代码闭源后作为专有软件出售
-- ❌ **禁止**：去除版权声明后抄袭、换壳、或冒充原创作品发布
-- ❌ **禁止**：直接将仿真结果作为实验数据用于产品认证或商业宣传
-
-GPLv3 的 Copyleft 条款确保任何衍生作品必须同样开源。如果你使用本项目发表成果或将其集成到更大的系统中，请保留原始版权声明并附上本文档链接。
-
-**支持作者**：如果本项目对你有帮助，欢迎 Star、转发、或在论文中引用。这是对个人开发者最直接的支持。
+**支持作者**：Star、转发或引用，是对个人开发者最直接的支持。
 
 ## 📄 许可证
 
