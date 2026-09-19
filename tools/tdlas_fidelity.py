@@ -261,6 +261,7 @@ def audit_parameters():
             lockin_avg=SENT, lockin_stages=SENT, drift_frac=SENT, flicker_frac=SENT,
             background_subtract=False, trim_frac=SENT, edge="rising", am_i0=SENT,
             am_i2=SENT, am_psi1=SENT, am_psi2=SENT, norm_lock="2f/I0",
+            lock_kind="boxcar", zero_phase=False,
             physical_noise=False, allow_partial_dark=True)),
         ("tdlas_das_instrument", "simulate_das_instrument", dict(
             species="CH4", wn_center=2968.5, edge="rising", fit_order=3, fit_frac=0.3,

@@ -2241,7 +2241,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
 _WMS_ONLY_KEYS = ("mod_freq_Hz", "mod_amp_V", "mod_phase_deg", "m_opt", "lockin_avg",
                   "lockin_stages", "drift_frac", "flicker_frac", "background_subtract",
                   "edge", "trim_frac", "am_i0", "am_i2", "am_psi1", "am_psi2",
-                  "norm_lock")
+                  "norm_lock", "lock_kind", "zero_phase")
 _INSTR_KEYS_WMS = _INSTR_KEYS + _WMS_ONLY_KEYS
 
 
@@ -3042,6 +3042,14 @@ TOOLS = [
                          "norm_lock": {"type": "string", "enum": ["2f/1f", "2f/I0"],
                                        "description": "强制归一化方法（跳过自动判定）：'2f/1f' 或 '2f/I0'。"
                                                       "多浓度扫描时工具会自动锁成基准浓度的方法，用户显式给则尊重其选择"},
+                         "lock_kind": {"type": "string", "enum": ["boxcar", "butter"],
+                                       "description": "锁相低通实现：'boxcar'（默认，矩形窗滑动平均，零点精确落在 fm 整数倍 → 2fm/4fm 数值零泄漏）"
+                                                      "或 'butter'（scipy Butterworth，阶数=lockin_stages、建议 4，截止=cutoff_ratio·fm、建议 0.25=fm/4）。"
+                                                      "硬件若只有 Butterworth，传 lock_kind='butter' 即可在仿真里复现你的器件"},
+                         "zero_phase": {"type": "boolean",
+                                       "description": "零相位锁相（filtfilt 正滤+倒滤）。对 butter：消除 lfilter 群延迟、峰位对齐真值；"
+                                                      "对 boxcar：np.convolve(mode='same') 对称核本就零相位，故只把频响平方（零点更深）而不改峰位。"
+                                                      "**仅离线可用（非因果，需整段记录）**，默认 False"},
                          "edge": {"type": "string",
                                   "description": "扫描方向 rising/falling/both，默认 rising（避免往返重叠）"},
                          "amp_V": {"type": "number", "description": "三角波幅值 V（**通常无需手填**：由 wn_center+scan_span_cm 自动反算）"},

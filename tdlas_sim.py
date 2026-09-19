@@ -495,28 +495,49 @@ def plot_detection_limit_scan(res, out_png):
 
 # ══════════════════ 6. 数字锁相（时域交叉验证）══════════════════
 
-def wms_harmonic_lockin(S, t, fs, fm, n, n_cycle_avg=1, n_stages=2):
-    """数字锁相：正交解调 + 整数调制周期滑动平均。
+def wms_harmonic_lockin(S, t, fs, fm, n, n_cycle_avg=1, n_stages=2,
+                        lock_kind="boxcar", cutoff_ratio=0.25, zero_phase=False):
+    """数字锁相：正交解调 + 低通。
 
-    低通用"一个调制周期窗口的滑动平均"实现 —— 在 fc/fs 极低（扫描/调制频率比很大）
-    时比 Butterworth 数值更稳健（后者在归一化截止 ~1e-3 时会出现病态），
-    对无噪 / 低噪仿真足够。
+    低通实现可选择：
+      · lock_kind="boxcar"（默认）：一个调制周期窗口的滑动平均（矩形窗 FIR）。
+        频响 sinc，零点精确落在 fm 的整数倍 → 混频后的 2fm/4fm 数值零泄漏；
+        级联 n_stages 级 = sinc^n_stages（旁瓣 -13N dB）。在 fc/fs 极低（扫描/调制
+        频率比很大）时比 Butterworth 数值更稳健。此为与既有行为**完全一致**的默认。
+      · lock_kind="butter"：scipy Butterworth 低通，阶数 = n_stages（建议 4），
+        截止 fc = cutoff_ratio·fm（建议 0.25 = fm/4）。无精确零点，靠单调衰减压 2fm；
+        n_stages=2 时 2fm 处仅 -36 dB，泄漏≈信号的 130%（见滤波器横向对比）→ 不够，
+        至少 4 阶 @ fm/4（2fm 处 -72 dB，泄漏≈2%）。
 
-    S : 时域探测器信号；fs / fm : 采样率 / 调制频率 (Hz)
-    n : 谐波阶数；n_cycle_avg : 平均的调制周期数（越大带宽越窄、越平滑）
+    zero_phase=True：用 filtfilt（正滤+倒滤）实现零相位。
+        · 对 lock_kind="butter"：消除 lfilter 的群延迟、峰位对齐到真值（因果版峰位后移）。
+        · 对 lock_kind="boxcar"：np.convolve(mode='same') 对对称核本身即零相位，故 zero_phase
+          不改变峰位、只把频响平方（sinc→sinc²，零点更深、旁瓣更压）。
+        注意：零相位 filtfilt 需整段记录、非因果 → **仅离线可用**，默认 False。
     """
     w = 2.0 * np.pi * fm
     S = np.asarray(S, dtype=float)
-    win = max(1, int(round(n_cycle_avg * fs / fm)))
-    ker = np.ones(win) / win
     X = S * np.cos(n * w * t)
     Y = S * np.sin(n * w * t)
-    # 级联 n_stages 级滑动平均：单级矩形窗频响是 sinc（旁瓣仅 -13 dB），
-    # 级联后为 sinc^N（-13N dB），对残留 2fm/4fm 的抑制显著改善。
-    # 实测 1→2 级把非吸收区残留从 4.1% 降到 1.6%；再往上收益很小。
-    for _ in range(max(1, int(n_stages))):
-        X = np.convolve(X, ker, mode="same")
-        Y = np.convolve(Y, ker, mode="same")
+    if str(lock_kind).lower() == "butter":
+        from scipy.signal import butter as _butter, filtfilt as _ff, lfilter as _lf
+        b, a = _butter(int(n_stages), cutoff_ratio * fm / (0.5 * float(fs)), btype="low")
+        if zero_phase:
+            X, Y = _ff(b, a, X), _ff(b, a, Y)
+        else:
+            X, Y = _lf(b, a, X), _lf(b, a, Y)
+        return np.sqrt(X ** 2 + Y ** 2), X, Y
+    # boxcar（默认）：整数调制周期滑动平均
+    win = max(1, int(round(n_cycle_avg * fs / fm)))
+    ker = np.ones(win) / win
+    if zero_phase:
+        from scipy.signal import filtfilt as _ff
+        for _ in range(max(1, int(n_stages))):
+            X, Y = _ff(ker, [1.0], X), _ff(ker, [1.0], Y)
+    else:
+        for _ in range(max(1, int(n_stages))):
+            X = np.convolve(X, ker, mode="same")
+            Y = np.convolve(Y, ker, mode="same")
     return np.sqrt(X ** 2 + Y ** 2), X, Y
 
 
@@ -1820,8 +1841,12 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
 
     # ⑦ 数字锁相 → 1f / 2f（正交解调，保留 X/Y 复分量用于背景扣除）
     avg, stg = int(cfg["lockin_avg"]), int(cfg["lockin_stages"])
-    S1f, X1f, Y1f = wms_harmonic_lockin(v_adc, t, fs, fm, 1, avg, stg)
-    S2f, X2f, Y2f = wms_harmonic_lockin(v_adc, t, fs, fm, 2, avg, stg)
+    _lk = str(cfg.get("lock_kind", "boxcar")).lower()
+    _zp = bool(cfg.get("zero_phase", False))
+    S1f, X1f, Y1f = wms_harmonic_lockin(v_adc, t, fs, fm, 1, avg, stg,
+                                       lock_kind=_lk, zero_phase=_zp)
+    S2f, X2f, Y2f = wms_harmonic_lockin(v_adc, t, fs, fm, 2, avg, stg,
+                                       lock_kind=_lk, zero_phase=_zp)
     # 背景参考谱：τ≡1 走同一条链路（含相同 RAM/AM + 慢漂移，**无**白/粉红噪声）。
     # 2f 在非吸收区的基线主要来自 L-I 二阶非线性（RAM），是物理背景，
     # 只能靠"无吸收参考谱"扣除——降噪 / 提采样率都压不掉。
@@ -1830,8 +1855,10 @@ def simulate_wms_instrument(species=GAS_DEFAULTS["species"], wn_center=GAS_DEFAU
             * 1e-3 * float(cfg["resp"]))
     v_bg = pd_lowpass(i_bg * float(cfg["gain"]), cfg["bw"], fs)
     v_bg_adc = np.clip(np.round(v_bg / lsb) * lsb, -float(cfg["v_range"]), float(cfg["v_range"]))
-    _, X1f_bg, Y1f_bg = wms_harmonic_lockin(v_bg_adc, t, fs, fm, 1, avg, stg)
-    _, X2f_bg, Y2f_bg = wms_harmonic_lockin(v_bg_adc, t, fs, fm, 2, avg, stg)
+    _, X1f_bg, Y1f_bg = wms_harmonic_lockin(v_bg_adc, t, fs, fm, 1, avg, stg,
+                                          lock_kind=_lk, zero_phase=_zp)
+    _, X2f_bg, Y2f_bg = wms_harmonic_lockin(v_bg_adc, t, fs, fm, 2, avg, stg,
+                                          lock_kind=_lk, zero_phase=_zp)
 
     # 取一个扫描方向（默认上升沿）：三角波往返会让同一波数出现两次、方向相反，
     # 叠加后无法判读；实验中也按"单次扫描"取一条。edge=both 可取完整周期。

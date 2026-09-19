@@ -879,5 +879,55 @@ check("未做背景扣除时 warnings 有醒目条目",
 check("must_disclose 含第 ⑨ 项（背景扣除口径）",
       "⑨" in _wms_mcp_src and "background_subtracted" in _wms_mcp_src)
 
+# ────────────────── 13. lock-in 低通可配置（boxcar/butter + 零相位）──────────────────
+# 为什么：用户硬件只有 Butterworth 二阶低通，要在仿真里复现其器件、并验证"零相位 filtfilt
+# 把 butter 群延迟消掉"这一最优方案，lock-in 低通必须可选。这里钉死：① 默认仍是 boxcar
+# （行为不变）；② lock_kind/zero_phase 进透传白名单；③ butter 零相位实测无群延迟、因果版
+# 峰位后移；④ boxcar 默认(mode='same')本就零相位；⑤ butter 可运行且输出有限。
+print("\n=== 13. lock-in 低通可配置（boxcar/butter + 零相位）===")
+_wl_src = inspect.getsource(ts.wms_harmonic_lockin)
+check("wms_harmonic_lockin 暴露 lock_kind / zero_phase 选项",
+      "lock_kind" in _wl_src and "zero_phase" in _wl_src)
+check("默认 lock_kind='boxcar' 且 zero_phase=False（保持既有行为）",
+      'lock_kind="boxcar"' in _wl_src and "zero_phase=False" in _wl_src)
+check("lock_kind / zero_phase 进了透传白名单（否则 schema 接不上）",
+      "lock_kind" in M._WMS_ONLY_KEYS and "zero_phase" in M._WMS_ONLY_KEYS)
+try:
+    import numpy as _np
+    _fs, _fm = 240000.0, 30000.0
+    _N = 1000
+    _t = _np.arange(_N) / _fs
+    _k = 500
+    _env = _np.exp(-((_np.arange(_N) - _k) ** 2) / (2 * 30 ** 2))
+    _S = _env * _np.cos(2 * _np.pi * _fm * _t)
+    # boxcar：mode='same' 对称核本就零相位 → 因果/零相位峰位都≈真值
+    _bx_c, _, _ = ts.wms_harmonic_lockin(_S, _t, _fs, _fm, 1, 1, 2,
+                                     lock_kind="boxcar", zero_phase=False)
+    _bx_z, _, _ = ts.wms_harmonic_lockin(_S, _t, _fs, _fm, 1, 1, 2,
+                                     lock_kind="boxcar", zero_phase=True)
+    _pc_bx = int(_np.argmax(_bx_c))
+    _pz_bx = int(_np.argmax(_bx_z))
+    check("boxcar 默认(mode='same')本就零相位（峰位≈真值）",
+          abs(_pc_bx - _k) <= 3, f"-> peak={_pc_bx}, true={_k}")
+    check("boxcar zero_phase 与默认峰位一致（只平方频响）",
+          abs(_pz_bx - _pc_bx) <= 1, f"-> zp={_pz_bx}, causal={_pc_bx}")
+    # butter：因果(lfilter)有群延迟、零相位(filtfilt)对齐真值
+    _bt_c, _, _ = ts.wms_harmonic_lockin(_S, _t, _fs, _fm, 1, 1, 4,
+                                     lock_kind="butter", cutoff_ratio=0.25,
+                                     zero_phase=False)
+    _bt_z, _, _ = ts.wms_harmonic_lockin(_S, _t, _fs, _fm, 1, 1, 4,
+                                     lock_kind="butter", cutoff_ratio=0.25,
+                                     zero_phase=True)
+    _pc_bt = int(_np.argmax(_bt_c))
+    _pz_bt = int(_np.argmax(_bt_z))
+    check("butter 零相位 filtfilt 对齐峰位（≈真值）",
+          abs(_pz_bt - _k) <= 4, f"-> peak_zp={_pz_bt}, true={_k}")
+    check("butter 因果(lfilter)峰位后移（群延迟）",
+          _pc_bt - _pz_bt >= 4, f"-> causal={_pc_bt}, zp={_pz_bt}")
+    check("lock_kind='butter' 可运行且输出有限",
+          _np.all(_np.isfinite(_bt_z)) and float(_np.max(_bt_z)) > 0)
+except Exception as e:  # noqa: BLE001
+    check("lock-in 可配置可离线实测", False, f"-> {type(e).__name__}: {e}")
+
 print(f"\n===== 契约自检：{_OK} 通过 / {_BAD} 失败" + (f" / {_SKIPPED} 跳过（环境不支持）" if _SKIPPED else "") + " =====")
 raise SystemExit(1 if _BAD else 0)

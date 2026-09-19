@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### 第十三轮：lock-in 低通实现可配置（boxcar / butter + 零相位）
+- **动机**：用户硬件只有 Butterworth 二阶低通，需在仿真里复现其器件、并验证"零相位 filtfilt 把群延迟消掉"这一最优方案。`wms_harmonic_lockin` 原来只支持整数调制周期滑动平均（boxcar）。
+- **新增**：`lock_kind`（"boxcar" 默认 / "butter"）+ `cutoff_ratio`（默认 0.25=fm/4）+ `zero_phase`（bool，默认 False）。
+  - boxcar：矩形窗 FIR，零点精确落在 fm 整数倍 → 2fm/4fm 数值零泄漏；`np.convolve(mode='same')` 对称核本就**零相位**（无群延迟）。`zero_phase=True` 用 filtfilt 把频响平方（sinc→sinc²，零点更深）。
+  - butter：scipy Butterworth，阶数 = `n_stages`（建议 4）、截止 fc = `cutoff_ratio·fm`（建议 fm/4）；2 阶 @ fm/4 对 2fm 仅 -36 dB（泄漏≈信号 130%）不够，须 ≥4 阶（2fm 处 -72 dB，泄漏≈2%）。`zero_phase=True` 消掉 lfilter 群延迟、峰位对齐真值。
+  - 注意：filtfilt 需整段记录、非因果 → **仅离线可用**；默认 False = 行为不变（与既有 boxcar 完全一致）。
+- **透传**：`lock_kind` / `zero_phase` 进 `_WMS_ONLY_KEYS` 白名单 + inputSchema（enum / boolean），MCP 多浓度自动随 inst 复用。
+- **契约**：新增第 13 节——默认 boxcar/False 不变、进白名单、butter 零相位实测无群延迟且因果版峰位后移、boxcar 默认已零相位、butter 可运行且输出有限。`audit_parameters` 用例补两键防误报死参数。
+
 ### 第十二轮补：修复 DAS 多浓度叠加图取错返回键
 - **BUG**：`t_das_instrument` 的 `x_list` + `save_png` 分支照抄 WMS 的键（`alphaL_cyc` / `nu_axis`），而 DAS 引擎返回的是 `das` / `nu_das` → **KeyError，整次调用失败**（此前无测试覆盖这条路径）。
 - **修法**：改回 DAS 自己的键；契约自检新增两项：源码用对键 + **真实调用**（`x_list` + `save_png`）必须产出 `png_overlay`。
