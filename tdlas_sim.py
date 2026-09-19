@@ -509,10 +509,10 @@ def wms_harmonic_lockin(S, t, fs, fm, n, n_cycle_avg=1, n_stages=2,
         n_stages=2 时 2fm 处仅 -36 dB，泄漏≈信号的 130%（见滤波器横向对比）→ 不够，
         至少 4 阶 @ fm/4（2fm 处 -72 dB，泄漏≈2%）。
 
-    zero_phase=True：用 filtfilt（正滤+倒滤）实现零相位。
+    zero_phase=True：用 filtfilt（正滤+倒滤）实现零相位；filtfilt 每级 = 2 次滤波，故开启后等效衰减翻倍（与「因果版」阶数/级数相同，但正滤+倒滤一遍）。
         · 对 lock_kind="butter"：消除 lfilter 的群延迟、峰位对齐到真值（因果版峰位后移）。
-        · 对 lock_kind="boxcar"：np.convolve(mode='same') 对对称核本身即零相位，故 zero_phase
-          不改变峰位、只把频响平方（sinc→sinc²，零点更深、旁瓣更压）。
+        · 对 lock_kind="boxcar"：默认（mode='same'）已零相位，**无需开启**；开启后每级改走
+          filtfilt（每级 2 次卷积），n_stages=2 时总 4 次 = sinc^4（比默认 2 次=sinc^2 零点更深）、峰位仍不变；仅在你想要更狠的低通时才开。
         注意：零相位 filtfilt 需整段记录、非因果 → **仅离线可用**，默认 False。
     """
     w = 2.0 * np.pi * fm

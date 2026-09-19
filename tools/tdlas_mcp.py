@@ -3047,8 +3047,8 @@ TOOLS = [
                                                       "或 'butter'（scipy Butterworth，阶数=lockin_stages、建议 4，截止=cutoff_ratio·fm、建议 0.25=fm/4）。"
                                                       "硬件若只有 Butterworth，传 lock_kind='butter' 即可在仿真里复现你的器件"},
                          "zero_phase": {"type": "boolean",
-                                       "description": "零相位锁相（filtfilt 正滤+倒滤）。对 butter：消除 lfilter 群延迟、峰位对齐真值；"
-                                                      "对 boxcar：np.convolve(mode='same') 对称核本就零相位，故只把频响平方（零点更深）而不改峰位。"
+                                       "description": "零相位锁相（filtfilt 正滤+倒滤，每级=2次滤波、等效衰减翻倍）。对 butter：消除 lfilter 群延迟、峰位对齐真值（n_stages=2→约4阶，|H(2fm)|≈-72dB）；"
+                                                      "对 boxcar：默认(mode='same')已零相位、无需开；开启后每级走 filtfilt、n_stages=2 即 4 次卷积=sinc^4（比默认 2 次=sinc^2 零点更深）、峰位不变。"
                                                       "**仅离线可用（非因果，需整段记录）**，默认 False"},
                          "edge": {"type": "string",
                                   "description": "扫描方向 rising/falling/both，默认 rising（避免往返重叠）"},
