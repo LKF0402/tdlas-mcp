@@ -1706,6 +1706,78 @@ def t_detection_limit(species="H2O", wn0=7185.596, T=None, P=None, L=None,
             "needs_confirm": bool(assumed), "log": _sanitize_paths(g.getvalue()).splitlines()}
 
 
+
+def t_calibration_curve(species="CH4", wn0=2968.5, T=296.0, P=1.01325,
+                        L=10.0, x_list=None, save_png=False):
+    """标定曲线：扫多个浓度，看 2f 峰高与浓度的线性关系。
+
+    x_list: 浓度列表（默认 5 个：0.5x, 1x, 2x, 5x, 10x）
+    返回：各浓度 2f 峰高 + 线性拟合 k/R² + 可选出图
+    """
+    import numpy as np
+
+    # 默认浓度列表
+    if x_list is None:
+        x_typ = 50e-6
+        x_list = [x_typ*0.5, x_typ, x_typ*2, x_typ*5, x_typ*10]
+
+    peaks = []
+    for x in x_list:
+        r = ts.simulate_wms_instrument(species=species, wn_center=wn0,
+                                      T=T, P=P, x=x, L_cm=L)
+        # 取有效区 2f 峰
+        s2f = np.abs(r["S2f_cyc"])
+        peaks.append(float(s2f.max()))
+
+    # 线性拟合
+    x_arr = np.array(x_list)
+    y_arr = np.array(peaks)
+    k, b = np.polyfit(x_arr, y_arr, 1)
+    y_fit = k * x_arr + b
+    ss_res = np.sum((y_arr - y_fit)**2)
+    ss_tot = np.sum((y_arr - y_arr.mean())**2)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+
+    out = {
+        "species": species, "wn0_cm-1": wn0,
+        "concentrations": x_list,
+        "s2f_peaks": peaks,
+        "linear_fit": {"slope_k": float(k), "intercept_b": float(b), "R2": float(r2)},
+        "linearity_note": "R² > 0.99 为优秀线性区间；R² < 0.95 说明已进入非线性区"
+    }
+
+    if save_png:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib import font_manager
+        for f in ["Microsoft YaHei", "SimHei"]:
+            try:
+                font_manager.findfont(f, fallback_to_default=False)
+                plt.rcParams["font.family"] = f
+                break
+            except Exception:
+                pass
+        plt.rcParams["axes.unicode_minus"] = False
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(x_arr*1e6, y_arr, "o", ms=8, color="#1f77b4", label="仿真数据")
+        ax.plot(x_arr*1e6, y_fit, "--", color="#d62728",
+                label=f"线性拟合: y={k:.2e}x+{b:.2e}\nR²={r2:.4f}")
+        ax.set_xlabel("浓度 x (ppm)")
+        ax.set_ylabel("|S2f| 峰")
+        ax.set_title(f"{species} @ {wn0} cm⁻¹ 标定曲线")
+        ax.legend()
+        ax.grid(alpha=0.3)
+
+        out_path = str(OUT_DIR / "calibration_curve.png")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        out["png"] = _sanitize_paths(out_path)
+
+    return out
+
+
 def t_detection_limit_scan(species="CH4", wn0=2968.5, T=296.0, P=1.01325, a=0.10,
                            L_list=None, x_list=None, sigma_tau=1e-5, n_trials=10,
                            n_sigma=3.0, seed=0, save_png=False):
@@ -3044,6 +3116,7 @@ DISPATCH = {"tdlas_simulate": t_simulate,
             "tdlas_invert": t_invert,
             "tdlas_detection_limit": t_detection_limit,
             "tdlas_detection_limit_scan": t_detection_limit_scan,
+            "tdlas_calibration_curve": t_calibration_curve,
             "tdlas_export": t_export,
             "tdlas_allan": t_allan,
             "tdlas_selftest": t_selftest}
@@ -3494,6 +3567,15 @@ TOOLS = [
                          "n_sigma": {"type": "number"}, "seed": {"type": "integer"},
                          "save_png": {"type": "boolean", "description": "是否出图，默认 False"}},
                      "required": []}},
+    {"name": "tdlas_calibration_curve",
+     "description": "标定曲线：扫多个浓度，看 2f 峰高与浓度的线性关系，返回 R²。",
+     "inputSchema": {"type": "object", "properties": {
+         "species": {"type": "string", "description": "气体分子"},
+         "wn0": {"type": "number", "description": "中心波数 cm⁻¹"},
+         "L": {"type": "number", "description": "光程 cm"},
+         "x_list": {"type": "array", "items": {"type": "number"}, "description": "浓度列表（默认 5 个）"},
+         "save_png": {"type": "boolean", "description": "是否出图"}
+     }, "required": ["species", "wn0"]}},
     {"name": "tdlas_export",
      "description": "导出仿真结果到文件（CSV 或 JSON），方便后处理或导入 Origin/Excel。",
      "inputSchema": {"type": "object", "properties": {
