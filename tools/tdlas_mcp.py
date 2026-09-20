@@ -870,6 +870,65 @@ CLARIFY_QUESTIONS = {
 }
 
 
+def generate_next_suggestions(results, conditions):
+    """根据仿真结果生成下一步优化建议（小白友好）。
+
+    results: 仿真结果字典（含 S2f_norm_peak, noise_breakdown_mV, sensitivity_k）
+    conditions: 工况（T, P, x, L_cm）
+    """
+    suggestions = []
+
+    s2f_peak = results.get("S2f_norm_peak")
+    noise = results.get("noise_breakdown_mV", {})
+    L = conditions.get("L_cm", 10)
+    x = conditions.get("x", 1e-4)
+
+    if s2f_peak is not None:
+        # 1. 信号太小 → 建议加光程
+        if s2f_peak < 1e-4:
+            suggestions.append({
+                "action": "increase_path_length",
+                "message": f"2f 信号较小（{s2f_peak:.2e}），建议加长光程 L。当前 L={L} cm，加到 {L*10:.0f} cm 可提升信号 10 倍。",
+                "expected_gain": "信号 ×10，LOD ÷10"
+            })
+
+        # 2. 信号饱和 → 建议减浓度
+        if s2f_peak > 0.1:
+            suggestions.append({
+                "action": "decrease_concentration",
+                "message": f"2f 信号过大（{s2f_peak:.2e}），可能已饱和。建议降低浓度。当前 x={x:.2e}，可降到 {x/10:.2e}。",
+                "expected_gain": "避免非线性失真"
+            })
+
+    # 3. 噪声分解建议
+    if noise:
+        max_noise = max(noise.values()) if noise else 0
+        if max_noise > 0:
+            dominant = max(noise, key=noise.get)
+            if dominant == "rin_white":
+                suggestions.append({
+                    "action": "use_2f_over_1f_normalization",
+                    "message": f"主要噪声是 RIN 白噪声（{max_noise:.3f} mV）。建议做 2f/1f 归一化，可抵消光强波动。",
+                    "expected_gain": "RIN 噪声被归一化抵消"
+                })
+            elif dominant == "shot":
+                suggestions.append({
+                    "action": "increase_power",
+                    "message": f"主要噪声是散粒噪声（{max_noise:.3f} mV）。增加激光功率可提升 SNR。",
+                    "expected_gain": "SNR ∝ √功率"
+                })
+
+    # 4. 默认建议（如果上面都没触发）
+    if not suggestions:
+        suggestions.append({
+            "action": "try_other_concentrations",
+            "message": f"当前工况正常。可以试试不同浓度，看线性区间（建议 5 个浓度点）。",
+            "expected_gain": "得到标定曲线 R²"
+        })
+
+    return suggestions
+
+
 def build_clarify_questions(species, wn_center, assumed, used_values, beginner_mode=True):
     """把缺省参数转成结构化澄清问题（含选项），供 AI 主动向用户提问。
 
@@ -2185,7 +2244,13 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                        "noise_breakdown_mV": {"shot": m["sigma_shot"] * 1e3,
                                               "thermal": m["sigma_thermal"] * 1e3,
                                               "rin": m["sigma_rin"] * 1e3},
-                       "n_lines_in_window": m["n_lines_in_window"], "table": m["table"]},
+                       "n_lines_in_window": m["n_lines_in_window"], "table": m["table"],
+                       "next_suggestions": generate_next_suggestions(
+                           {"S2f_norm_peak": float(np.abs(r["S2f_norm_cyc"])[valid_i].max()) if valid_i.any() else None,
+                            "noise_breakdown_mV": {"shot": float(m["sigma_shot"]) * 1e3,
+                                                   "thermal": float(m["sigma_thermal"]) * 1e3,
+                                                   "rin_white": float(m["sigma_rin"]) * 1e3}},
+                           {"L_cm": float(cfg["L_cm"]), "x": float(cfg["x"])})},
            "conditions": {"T_K": float(cfg["T"]), "P_atm": float(cfg["P"]),
                           "x": (None if mixture is not None else float(cfg["x"])),
                           "L_cm": float(cfg["L_cm"])},
@@ -2432,7 +2497,13 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                     "flicker_frac": m["flicker_frac"]},
                        "noise_disclosure": "默认未加噪声（理想仿真）。如需注入：rin=相对强度噪声，"
                                            "drift_frac=1/f 慢漂移，flicker_frac=1/f 粉红。散粒/热为物理固有（极小）。",
-                       "n_lines_in_window": m["n_lines_in_window"], "table": m["table"]},
+                       "n_lines_in_window": m["n_lines_in_window"], "table": m["table"],
+                       "next_suggestions": generate_next_suggestions(
+                           {"S2f_norm_peak": float(np.abs(r["S2f_norm_cyc"])[valid_i].max()) if valid_i.any() else None,
+                            "noise_breakdown_mV": {"shot": float(m["sigma_shot"]) * 1e3,
+                                                   "thermal": float(m["sigma_thermal"]) * 1e3,
+                                                   "rin_white": float(m["sigma_rin"]) * 1e3}},
+                           {"L_cm": float(cfg["L_cm"]), "x": float(cfg["x"])})},
            "validation": ts.validate_wms_result(r),
            # 实际生效的工况：assumptions 只说"哪些用了默认"，数值必须一起回显，
            # 否则 AI 只能写"用了默认值"却报不出数值（= 拿不到数据）
