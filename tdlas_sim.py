@@ -2568,8 +2568,27 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
         elif key == "das":
             if multi:
                 _multi_seg(a_, multi, "v_das_cyc")
+                # DAS 原始信号：纵轴不从 0 开始，按有效区中位数放大，让吸收凹陷看得见
+                _all_vd = []
+                for _p, _rr in multi:
+                    _y = _rr["v_das_cyc"]
+                    _vm = _rr["valid_mask"]
+                    _all_vd.append(_y[_vm])
+                if _all_vd:
+                    _av = np.concatenate(_all_vd)
+                    _med = float(np.median(_av))
+                    _spread = float(_av.max() - _av.min()) or 1e-9
+                    _pad = 0.3 * _spread  # 放大 3 倍，让吸收凹陷清晰可见
+                    a_.set_ylim(_med - _pad, _med + _pad)
             else:
                 seg(a_, r["v_das_cyc"], "C0", "PD 原始信号")
+                # 单浓度：同样放大纵轴
+                _y = r["v_das_cyc"][vd]
+                if _y.size:
+                    _med = float(np.median(_y))
+                    _spread = float(_y.max() - _y.min()) or 1e-9
+                    _pad = 0.3 * _spread
+                    a_.set_ylim(_med - _pad, _med + _pad)
             a_.set_ylabel("PD 信号 (V)")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
             a_.set_title("② 直接吸收 DAS（无调制）" + _mtag)
@@ -2743,6 +2762,15 @@ def plot_multi_x(out_png, ppm, curves, x, xlabel, ylabel, title, valid=None):
     ax.set_title(title)
     ax.legend(title="摩尔分数 x", fontsize=9, loc="best")
     ax.grid(alpha=0.3)
+    # 纵轴只按有效区数据定，剔除区（瞬态）不撑大坐标
+    if valid is not None:
+        _all_v = []
+        for i, c in enumerate(curves):
+            if i < len(valid) and valid[i] is not None:
+                _all_v.append(np.asarray(c)[np.asarray(valid[i], dtype=bool)])
+        if _all_v:
+            _av = np.concatenate(_all_v)
+            ax.set_ylim(_av.min() * 0.9, _av.max() * 1.1)
     fig.tight_layout()
     fig.savefig(out_png, dpi=140)
     plt.close(fig)
