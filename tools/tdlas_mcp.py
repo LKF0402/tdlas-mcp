@@ -870,28 +870,52 @@ CLARIFY_QUESTIONS = {
 }
 
 
-def build_clarify_questions(species, wn_center, assumed, used_values):
-    """把缺省参数转成结构化澄清问题（含选项），供 AI 主动向用户提问。"""
+def build_clarify_questions(species, wn_center, assumed, used_values, beginner_mode=True):
+    """把缺省参数转成结构化澄清问题（含选项），供 AI 主动向用户提问。
+
+    beginner_mode=True 时只返回最关键的 3-5 个问题（小白友好），
+    其他参数用默认值即可，不打扰用户。
+    """
     questions = []
     # 波段澄清（优先问，因为影响后续一切）
     prof = SPECIES_PROFILES.get(str(species).strip().upper(), {})
     if prof.get("bands"):
         q = {"param": "波段", "question": f"{species} 要测哪个波段？",
              "options": [f"{nm}（{wn} cm⁻¹）" for nm, wn in prof["bands"]],
-             "why": "不同波段线强/线密度不同", "current": wn_center}
+             "why": "不同波段线强/线密度不同", "current": wn_center,
+             "level": "core"}
         questions.append(q)
+
+    # 核心参数（必问，小白模式下只问这些）
+    core_params = {"x", "L"}  # 浓度、光程
+    # 重要参数（可选问）
+    important_params = {"T", "P", "a"}  # 温度、压力、调制深度
+
     for k in assumed:
         tpl = CLARIFY_QUESTIONS.get(k)
+        if k in core_params:
+            level = "core"
+        elif k in important_params:
+            level = "important"
+        else:
+            level = "advanced"
+
         if tpl:
-            questions.append({"param": k, "question": tpl["question"],
-                              "options": tpl["options"], "why": tpl["why"],
-                              "current_default": used_values.get(k)})
+            q = {"param": k, "question": tpl["question"],
+                 "options": tpl["options"], "why": tpl["why"],
+                 "current_default": used_values.get(k), "level": level}
         else:
             cn, unit, why = PARAM_ACQ_GUIDE.get(k, (k, "—", ""))
-            questions.append({"param": k, "中文名": cn, "单位": unit,
-                              "question": f"请确认 {cn}（{unit}），当前用默认 {used_values.get(k)}",
-                              "options": [], "why": why,
-                              "current_default": used_values.get(k)})
+            q = {"param": k, "中文名": cn, "单位": unit,
+                 "question": f"请确认 {cn}（{unit}），当前用默认 {used_values.get(k)}",
+                 "options": [], "why": why,
+                 "current_default": used_values.get(k), "level": level}
+        questions.append(q)
+
+    # 小白模式：只返回核心 + 重要，隐藏高级
+    if beginner_mode:
+        questions = [q for q in questions if q.get("level") in ("core", "important")]
+
     return questions
 
 
