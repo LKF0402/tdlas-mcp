@@ -2816,6 +2816,121 @@ def t_guide(topic=None):
     return out
 
 
+
+
+def t_export(data, filename, format="csv"):
+    """导出仿真结果到文件（CSV 或 JSON）。
+
+    data     : 要导出的数据（dict 或 list of dict）
+    filename : 输出文件名（不含路径，自动存到 tmp/mcp_out/）
+    format   : "csv" 或 "json"
+    """
+    import json
+    import csv
+
+    out_dir = OUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 清洗文件名（防路径注入）
+    safe_name = "".join(c for c in filename if c.isalnum() or c in "._-")
+    if not safe_name.endswith(f".{format}"):
+        safe_name += f".{format}"
+
+    out_path = out_dir / safe_name
+
+    if format == "json":
+        with open(out_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+    elif format == "csv":
+        if isinstance(data, dict):
+            # 单个 dict → 一行
+            with open(out_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow(data.keys())
+                writer.writerow(data.values())
+        elif isinstance(data, list):
+            # list of dict → 多行
+            keys = data[0].keys() if data else []
+            with open(out_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=keys)
+                writer.writeheader()
+                writer.writerows(data)
+        else:
+            raise ValueError("data 必须是 dict 或 list of dict")
+    else:
+        raise ValueError(f"不支持的格式：{format}（只支持 csv/json）")
+
+    return {"file": str(out_path), "format": format, "rows": len(data) if isinstance(data, list) else 1}
+
+
+def t_allan(signal, fs, max_tau=None, tau_points=100, save_png=False):
+    """Allan 方差分析（重叠版 OA-VAR）：给定时序信号，求最优平均时间与噪声类型诊断。"""
+    from allan import overlapping_allan, allan_noise_diag
+    import numpy as np
+
+    s = np.asarray(signal, dtype=float)
+    result = overlapping_allan(s, fs=float(fs), max_tau=max_tau, tau_points=int(tau_points))
+    diag = allan_noise_diag(result)
+
+    out = {
+        "N": result["N"], "fs_Hz": result["fs"], "dt_s": result["dt"],
+        "tau_opt_s": result["tau_opt"],
+        "adev_opt": result["adev_opt"],
+        "noise_diagnosis": diag,
+        "method": "overlapping Allan deviation (OA-VAR)",
+        "reference": "Werle et al. 1993, 2011 (Allan-Werle method)",
+    }
+
+    if save_png:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib import font_manager
+        for f in ["Microsoft YaHei", "SimHei"]:
+            try:
+                font_manager.findfont(f, fallback_to_default=False)
+                plt.rcParams["font.family"] = f
+                break
+            except Exception:
+                pass
+        plt.rcParams["axes.unicode_minus"] = False
+
+        t_axis = np.arange(result["N"]) * result["dt"]
+        fig, axes = plt.subplots(2, 1, figsize=(11, 7.5))
+        fig.subplots_adjust(hspace=0.38)
+
+        axes[0].plot(t_axis, s, lw=0.8, color="#1f77b4")
+        axes[0].set_title(f"时序信号（N={result['N']}, fs={result['fs']} Hz）")
+        axes[0].set_xlabel("时间 t (s)")
+        axes[0].set_ylabel("信号")
+        axes[0].grid(alpha=0.2)
+
+        axes[1].loglog(result["taus"], result["adev"], "o-", ms=4, lw=1.2,
+                       color="#d62728", label="重叠 Allan 偏差 σ(τ)")
+        t0 = result["taus"][1]
+        s0 = result["adev"][1]
+        axes[1].loglog(result["taus"], s0 * (result["taus"] / t0) ** (-0.5),
+                       "--", color="gray", lw=0.8, label="白噪声 斜率 -1/2")
+        axes[1].axvline(result["tau_opt"], color="green", ls="--", lw=1.2)
+        axes[1].scatter([result["tau_opt"]], [result["adev_opt"]], s=80, color="green", zorder=5)
+        axes[1].text(result["tau_opt"], result["adev_opt"] * 1.4,
+                     f"τ_opt={result['tau_opt']:.1f}s\nσ={result['adev_opt']:.1e}",
+                     color="green", fontsize=9)
+        axes[1].set_title("Allan 偏差（OA-VAR）")
+        axes[1].set_xlabel("平均时间 τ (s)")
+        axes[1].set_ylabel("Allan 偏差 σ(τ)")
+        axes[1].legend(fontsize=9)
+        axes[1].grid(alpha=0.2, which="both")
+
+        fig.suptitle("Allan-Werle 稳定性分析", fontsize=12)
+        out_path = str(OUT_DIR / "allan_analysis.png")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        out["png"] = _sanitize_paths(out_path)
+
+    return out
+
+
 def t_selftest():
     """全链路自检（有线 / 2f 形状 / 弱场线性 / 反演闭环 / 检测限 / 时域交叉验证 / DAS 链路）。"""
     with _quiet() as g:
@@ -2834,6 +2949,8 @@ DISPATCH = {"tdlas_simulate": t_simulate,
             "tdlas_invert": t_invert,
             "tdlas_detection_limit": t_detection_limit,
             "tdlas_detection_limit_scan": t_detection_limit_scan,
+            "tdlas_export": t_export,
+            "tdlas_allan": t_allan,
             "tdlas_selftest": t_selftest}
 
 # 混合气多组分声明。四个仿真工具共用同一份定义，避免各写一遍后漂移
@@ -3282,6 +3399,22 @@ TOOLS = [
                          "n_sigma": {"type": "number"}, "seed": {"type": "integer"},
                          "save_png": {"type": "boolean", "description": "是否出图，默认 False"}},
                      "required": []}},
+    {"name": "tdlas_export",
+     "description": "导出仿真结果到文件（CSV 或 JSON），方便后处理或导入 Origin/Excel。",
+     "inputSchema": {"type": "object", "properties": {
+         "data": {"description": "要导出的数据（dict 或 list of dict）"},
+         "filename": {"type": "string", "description": "输出文件名（自动存到 tmp/mcp_out/）"},
+         "format": {"type": "string", "enum": ["csv", "json"], "description": "导出格式（默认 csv）"}
+     }, "required": ["data", "filename"]}},
+    {"name": "tdlas_allan",
+     "description": "Allan 方差分析（重叠版 OA-VAR）：给定时序信号，求最优平均时间与噪声类型诊断（白噪声/1/f/漂移）。",
+     "inputSchema": {"type": "object", "properties": {
+         "signal": {"type": "array", "items": {"type": "number"}, "description": "一维时序信号（2f 峰高/浓度/电压）"},
+         "fs": {"type": "number", "description": "采样率 (Hz)"},
+         "max_tau": {"type": "number", "description": "最长平均时间 (s)，默认总时长一半"},
+         "tau_points": {"type": "integer", "description": "τ 轴采样点数（对数均匀，默认 100）"},
+         "save_png": {"type": "boolean", "description": "是否出图"}
+     }, "required": ["signal", "fs"]}},
     {"name": "tdlas_selftest",
      "description": "全链路自检（有线 / 2f 形状 / 弱场线性 / 反演闭环 / 检测限 / 时域交叉验证）。",
      "inputSchema": {"type": "object", "properties": {}}},
