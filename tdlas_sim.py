@@ -2566,32 +2566,36 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
             a_.set_title(f"① 波长调制 V(t)   fm={m['mod_freq_Hz'] / 1e3:g} kHz, "
                          f"fscan={m['fscan_Hz']:g} Hz")
         elif key == "das":
+            # DAS 面板：画归一化透过率（除以无吸收参考），去掉 L-I 基线斜率
+            # 这样吸收凹陷就清晰可见，而不是淹没在斜线上
             if multi:
-                _multi_seg(a_, multi, "v_das_cyc")
-                # DAS 原始信号：纵轴不从 0 开始，按有效区中位数放大，让吸收凹陷看得见
+                for i, (_p, _rr) in enumerate(multi):
+                    _y = _rr["v_das_cyc"]
+                    _vm = _rr["valid_mask"]
+                    # 归一化：除以有效区中位数（无吸收处的功率）
+                    _y_norm = _y / float(np.median(_y[_vm]))
+                    _col = plt.cm.viridis(np.linspace(0.08, 0.92, len(multi))[i])
+                    _ppm = f"{_p*1e6:.2g} ppm" if _p < 1e-3 else f"{_p:g} ppm"
+                    a_.plot(_rr["nu_axis"][_vm], _y_norm[_vm], color=_col, lw=1.2, label=_ppm)
+                    if (~_vm).any():
+                        a_.plot(_rr["nu_axis"][~_vm], _y_norm[~_vm], ":", color="0.6", lw=1.0)
+                # 纵轴：只看有效区，范围 0.98-1.02
                 _all_vd = []
                 for _p, _rr in multi:
                     _y = _rr["v_das_cyc"]
                     _vm = _rr["valid_mask"]
-                    _all_vd.append(_y[_vm])
+                    _y_norm = _y / float(np.median(_y[_vm]))
+                    _all_vd.append(_y_norm[_vm])
                 if _all_vd:
                     _av = np.concatenate(_all_vd)
-                    _med = float(np.median(_av))
-                    _spread = float(_av.max() - _av.min()) or 1e-9
-                    _pad = 0.3 * _spread  # 放大 3 倍，让吸收凹陷清晰可见
-                    a_.set_ylim(_med - _pad, _med + _pad)
+                    a_.set_ylim(_av.min()*0.995, _av.max()*1.005)
             else:
-                seg(a_, r["v_das_cyc"], "C0", "PD 原始信号")
-                # 单浓度：同样放大纵轴
-                _y = r["v_das_cyc"][vd]
-                if _y.size:
-                    _med = float(np.median(_y))
-                    _spread = float(_y.max() - _y.min()) or 1e-9
-                    _pad = 0.3 * _spread
-                    a_.set_ylim(_med - _pad, _med + _pad)
-            a_.set_ylabel("PD 信号 (V)")
+                _y = r["v_das_cyc"]
+                _y_norm = _y / float(np.median(_y[vd]))
+                seg(a_, _y_norm, "C0", "归一化透过率 T/T0")
+            a_.set_ylabel("归一化透过率 T/T0")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
-            a_.set_title("② 直接吸收 DAS（无调制）" + _mtag)
+            a_.set_title("② 直接吸收 DAS（无调制，归一化）" + _mtag)
         elif key == "al":
             mix = r.get("alphaL_per_species")
             if multi:
@@ -2613,7 +2617,7 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
             a_.axhline(0.0, color="k", lw=0.5, alpha=0.4)
             a_.set_ylabel(r"$\alpha L$")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
-            a_.set_title("DAS 吸光度 vs 数据库理论值" + (_mtag if multi else
+            a_.set_title("③ DAS 吸光度 vs 数据库理论值" + (_mtag if multi else
                                                       ("（含混合气各组分）" if mix else "")))
         elif key == "f1":
             if multi:
@@ -2622,7 +2626,7 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
                 seg(a_, r["S1f_cyc"], "C1", "1f")
             a_.set_ylabel("1f (V)")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
-            a_.set_title("③ 一阶谐波 1f" + _mtag)
+            a_.set_title("④ 一阶谐波 1f" + _mtag)
         elif key == "f2":
             if multi:
                 _multi_seg(a_, multi, "S2f_cyc")
@@ -2631,7 +2635,7 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
             a_.axhline(0.0, color="k", lw=0.5, alpha=0.4)
             a_.set_ylabel("2f (V)")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
-            a_.set_title("④ 二阶谐波 2f" + _mtag)
+            a_.set_title("⑤ 二阶谐波 2f" + _mtag)
         elif key == "norm":
             if multi:
                 _multi_seg(a_, multi, "S2f_norm_cyc")
@@ -2643,7 +2647,7 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
             a_.axhline(0.0, color="k", lw=0.5, alpha=0.4)
             a_.set_ylabel("归一化 2f (a.u.)")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
-            a_.set_title(f"⑤ 归一化：{m['norm_method']}" + _mtag)
+            a_.set_title(f"⑥ 归一化：{m['norm_method']}" + _mtag)
 
     _ALL = ["drive", "das", "al", "f1", "f2", "norm"]
     _SPECTRAL = {"das", "al", "f1", "f2", "norm"}
