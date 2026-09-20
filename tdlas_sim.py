@@ -2662,7 +2662,7 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
         a_.grid(alpha=0.3)
         a_.legend(loc="upper right", fontsize=6 if multi else 7)
     _x_tag = ("/".join(_ppm_label(_p) for _p, _rr in multi) if multi
-              else f"{m['x']:g}")
+              else str(m['x']))
     fig.suptitle(f"TDLAS 仪器链路 — {m['species']} @ {m['wn_center']:.3f} cm$^{{-1}}$   "
                  f"x={_x_tag}, L={m['L_cm']:g} cm, m={m['mod_coeff_m']:.2f}   "
                  f"归一化 = {m['norm_method']}", fontsize=11)
