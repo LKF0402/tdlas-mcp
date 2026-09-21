@@ -55,3 +55,12 @@ cloudflared
 # Runtime logs (may contain ephemeral token, never commit)
 _link*.log
 .python/
+
+# 本地留存文档（不推远端）
+USAGE.md
+
+# 临时测试脚本（不推远端）
+_fix_*.py
+_test_*.py
+_debug_*.py
+_*.py

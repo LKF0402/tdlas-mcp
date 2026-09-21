@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """TDLAS/WMS 仿真 MCP 服务器（stdio JSON-RPC 2024-11-05）。
 
@@ -269,8 +269,26 @@ def _packing_state(out=None):
     setups = dev.get("setup") or {}
     dflt = dev.get("default") or {}
     if sum(counts.values()) == 0:
-        return {"should_prompt": False, "reason": "device_library_empty",
-                "note": "设备库为空：用户还没给过任何硬件信息，此时不主动追问。"}
+        # 设备库为空：当前结果全部来自演示默认值，必须引导用户建自己的设备库
+        return {"should_prompt": True, "reason": "device_library_empty",
+                "note": "设备库为空：当前结果全部来自演示默认参数。",
+                "missing_devices": [
+                    {"device_type": "laser", "cn": "DFB 激光器",
+                     "fields": [{"key": "center_wn", "cn": "中心波数", "unit": "cm⁻¹"},
+                                {"key": "tuning_coeff", "cn": "调谐系数 dν/dI", "unit": "cm⁻¹/mA"}]},
+                    {"device_type": "pd", "cn": "光电探测器",
+                     "fields": [{"key": "responsivity", "cn": "响应度", "unit": "A/W"},
+                                {"key": "bandwidth", "cn": "带宽", "unit": "MHz"}]},
+                    {"device_type": "daq", "cn": "数据采集卡",
+                     "fields": [{"key": "sample_rate", "cn": "采样率", "unit": "kHz"},
+                                {"key": "resolution", "cn": "分辨率", "unit": "bit"}]},
+                    {"device_type": "optics", "cn": "光学系统",
+                     "fields": [{"key": "path_length", "cn": "光程", "unit": "cm"}]}
+                ],
+                "ask_user": ("⚠️ 当前结果全部来自演示默认参数（不是你的真实设备）。"
+                             "建议建立你自己的设备库——只需告诉我你的激光器、探测器、采集卡、光学系统的型号，"
+                             "我会自动查规格书并录入。之后每次仿真都会用你的真实硬件参数，结果才准确。"),
+                "how": "告诉我你的设备型号（如 NI USB-6211、Thorlabs PDA10D2），我帮你建库"}
     missing = [k for k, v in counts.items() if v == 0]
     # 对 AI 与用户都只认中文名：直接输出 'pd' 不利于转述，也不利于用户理解缺什么。
     missing_cn = [{"device_type": k, "cn": _DEVICE_TYPE_CN[k],
@@ -433,6 +451,80 @@ def _action_sig(action):
                "evidence_fields": action.get("evidence_fields")}
     return hashlib.md5(json.dumps(payload, sort_keys=True, ensure_ascii=False,
                                   default=str).encode("utf-8")).hexdigest()[:10]
+
+
+def _figure_check(png_path, r, multi=None):
+    """出图自检：机器检查图片质量，AI 不用读图也能知道有没有问题。
+
+    检查项：
+    - file_exists: png 文件存在
+    - file_size_kb: 文件大小（<10KB 可能是空图）
+    - das_peak_visible: DAS 吸收峰可见（alphaL_cyc 峰值 > 阈值）
+    - y_axis_sane: 有效区数据范围占总范围 > 50%（剔除区不撑大纵轴）
+    """
+    import os
+    import numpy as np
+    checks = {}
+    warnings = []
+
+    # 1. 文件完整性
+    checks["file_exists"] = os.path.exists(png_path)
+    if checks["file_exists"]:
+        size_kb = os.path.getsize(png_path) / 1024
+        checks["file_size_kb"] = round(size_kb, 1)
+        if size_kb < 10:
+            warnings.append(f"图片文件过小（{size_kb:.1f} KB），可能是空图")
+    else:
+        warnings.append("图片文件不存在")
+
+    # 2. DAS 吸收峰可见性（用 alphaL_cyc）
+    try:
+        if "alphaL_cyc" in r:
+            alpha = np.asarray(r["alphaL_cyc"], dtype=float)
+            alpha_peak = float(np.max(alpha))
+            checks["alpha_L_peak"] = round(alpha_peak, 6)
+            # 阈值：alphaL > 0.001（约 0.1% 透过率凹陷）才算可见
+            if alpha_peak < 0.001:
+                warnings.append(
+                    f"DAS 吸收峰极弱（αL={alpha_peak:.2e}），图上可能看不见——"
+                    f"建议加大光程或换更强的线")
+    except Exception:
+        pass
+
+    # 3. 纵轴合理性（用 S2f_norm_cyc + valid_mask）
+    try:
+        if "S2f_norm_cyc" in r and "valid_mask" in r:
+            s2f = np.asarray(r["S2f_norm_cyc"], dtype=float)
+            valid = np.asarray(r["valid_mask"], dtype=bool)
+            if len(s2f) > 0 and np.any(valid):
+                vmin_total, vmax_total = float(np.min(s2f)), float(np.max(s2f))
+                total_range = vmax_total - vmin_total
+                if total_range > 0:
+                    valid_data = s2f[valid]
+                    vmin_valid, vmax_valid = float(np.min(valid_data)), float(np.max(valid_data))
+                    valid_range = vmax_valid - vmin_valid
+                    ratio = valid_range / total_range
+                    checks["valid_range_ratio"] = round(ratio, 3)
+                    if ratio < 0.5:
+                        warnings.append(
+                            f"有效区数据范围仅占总范围 {ratio*100:.1f}%，"
+                            f"剔除区可能撑大了纵轴")
+    except Exception:
+        pass
+
+    # 判定 overall
+    if not checks.get("file_exists", False):
+        overall = "fail"
+    elif len(warnings) > 0:
+        overall = "warn"
+    else:
+        overall = "pass"
+
+    return {
+        "overall": overall,
+        "checks": checks,
+        "warnings": warnings
+    }
 
 
 def _interaction_block(out, tool, session_id="default"):
@@ -2318,7 +2410,7 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                               "rin": m["sigma_rin"] * 1e3},
                        "n_lines_in_window": m["n_lines_in_window"], "table": m["table"],
                        "next_suggestions": generate_next_suggestions(
-                           {"S2f_norm_peak": float(np.abs(r["S2f_norm_cyc"])[valid_i].max()) if valid_i.any() else None,
+                           {"alpha_L_peak": float(m["alpha_L_peak"]),
                             "noise_breakdown_mV": {"shot": float(m["sigma_shot"]) * 1e3,
                                                    "thermal": float(m["sigma_thermal"]) * 1e3,
                                                    "rin_white": float(m["sigma_rin"]) * 1e3}},
@@ -2571,7 +2663,7 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
                                            "drift_frac=1/f 慢漂移，flicker_frac=1/f 粉红。散粒/热为物理固有（极小）。",
                        "n_lines_in_window": m["n_lines_in_window"], "table": m["table"],
                        "next_suggestions": generate_next_suggestions(
-                           {"S2f_norm_peak": float(np.abs(r["S2f_norm_cyc"])[valid_i].max()) if valid_i.any() else None,
+                           {"alpha_L_peak": float(m["alpha_L_peak"]),
                             "noise_breakdown_mV": {"shot": float(m["sigma_shot"]) * 1e3,
                                                    "thermal": float(m["sigma_thermal"]) * 1e3,
                                                    "rin_white": float(m["sigma_rin"]) * 1e3}},
@@ -2724,6 +2816,8 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
         with _quiet():
             ts.plot_wms_instrument(r, png, multi=_multi_draw)
         out["png"] = str(png)
+        # 出图自检：机器检查图片质量，AI 不用读图也能知道有没有问题
+        out["figure_check"] = _figure_check(png, r, _multi_draw)
     if return_xy and "X1f_c" in r:                  # BUG-D 修复：透出锁相正交 X/Y 分量
         # ⚠ 必须转 list：这些是 numpy ndarray，直接入返回体会在 JSON-RPC
         #   序列化时抛 TypeError（整次调用失败）—— Python 直接调用不会暴露，
@@ -3140,7 +3234,7 @@ _MIXTURE_PROP = {
 
 TOOLS = [
     {"name": "tdlas_simulate",
-     "description": "【数值计算，不是画图工具】TDLAS/WMS 简化解析模型：返回 DAS 透过率、1f、2f 峰高等数值。"
+     "description": "【快速算数值】TDLAS/WMS 解析模型：返回 DAS 透过率、1f/2f 峰高。要画图请用 tdlas_wms_instrument。"
                     "save_png=True 仅出 3 子图简图（DAS/2f/2f/1f），无仪器链路。"
                     "⚠️ 用户要画 WMS 图、要看 2f/1f 曲线、要仪器级仿真时，必须改用 tdlas_wms_instrument（标准6子图）。"
                     "本工具仅用于快速算峰高数值或解析对照。",
@@ -3170,7 +3264,7 @@ TOOLS = [
                          "save_png": {"type": "boolean", "description": "是否出图，默认 False"}},
                      "required": ["species", "wn0"]}},
     {"name": "tdlas_das_chain",
-     "description": "三角波扫描 DAS 全链路仿真：PD 原始信号 It(t) → 多项式基线拟合扣除 → DAS 吸光度信号。"
+     "description": "DAS 时域链路：PD 原始信号 → 基线拟合 → 吸光度。"
                     "对应真实 DAS 实验处理流程。默认工况：1000 ppm / 0.5 m 光程 / 296 K / 1 atm / "
                     "上升沿；未给出的参数会列入返回的 assumptions，需先向用户复核。"
                     "技术知识：真实实验中三角波上升沿与下降沿常不重合（激光调谐非线性、扫描期热漂移、"
@@ -3206,7 +3300,7 @@ TOOLS = [
                                       "description": "是否出四层链路图（含上升/下降沿对照）"}},
                      "required": ["species", "wn0"]}},
     {"name": "tdlas_das_instrument",
-     "description": "仪器系统级 DAS 仿真：DAQ 输出电压 → 激光器调谐（V→I→波数/功率）→ 光路损耗与吸收 "
+     "description": "DAS 仪器级仿真：DAQ 电压 → 激光 → 光路 → PD → ADC。"
                     "→ PD 光电转换（响应度/跨阻增益/带宽/噪声）→ ADC 量化（位数/量程/饱和）→ 基线扣除。"
                     "默认器件：常见 16-bit DAQ + 典型中红外 DFB（V→I 24 mA/V、dν/dI −0.088 cm⁻¹/mA、"
                     "中心 2964.7 cm⁻¹）+ CH4 @2968.5 cm⁻¹。"
@@ -3289,7 +3383,7 @@ TOOLS = [
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                          "required": ["species", "wn_center"]}},
                          {"name": "tdlas_wms_instrument",
-     "description": "【默认首选：画 WMS 图就用这个】WMS 仪器级全链路：三角波+正弦调制→激光→光路→PD→ADC→数字锁相，输出标准6子图（V(t)/PD原始/DAS+理论/DAS吸光度/1f/2f/2f/1f归一化）。**用户说画WMS图/2f曲线/波长调制时默认调本工具，不要调 tdlas_simulate**。调制幅值按 m≈2.2 自动优化，fm=30kHz，fscan=100Hz。采样率自动适配硬件（常见 16-bit DAQ 上限 250 kS/s）。缺省参数列入 param_requests，AI 须主动澄清工况。",
+     "description": "【核心】WMS 仪器级仿真：扫描+调制 → 锁相 → 1f/2f/归一化（六子图）。",
      "inputSchema": {"type": "object",
                      "properties": {
                          "species": {"type": "string", "description": "分子式，默认 CH4"},
@@ -3388,7 +3482,7 @@ TOOLS = [
                          "save_png": {"type": "boolean", "description": "是否出五层链路图"}},
                          "required": ["species", "wn_center"]}},
                          {"name": "tdlas_review",
-     "description": "二次审核/多轮核对：跑一遍 WMS 并返回自动校验报告（validation），不画图。"
+     "description": "二次审核：自动校验报告（9 项，不画图）。"
                     "用于在给出最终结论前对结果做独立复核；非专业用户据此判断结果是否可信。"
                     "overall=pass/warn/fail，逐项 checks 标注 DAS-理论一致性、2f 峰位、αL 弱吸收、"
                     "是否孤立线、调制系数、采样率、ADC 动态范围、归一化方法、噪声等。"
@@ -3427,7 +3521,7 @@ TOOLS = [
                          "daq": {"type": "string", "description": "采集卡设备名（tdlas_device 保存）→ 自动套用 fs/n_samples/adc_bits/v_range"},
                          "optics": {"type": "string"}}}},
     {"name": "tdlas_session",
-     "description": "对话状态机（跨会话记忆）：记住用户已确认的工况参数，MCP 重启/换会话仍保留。"
+     "description": "对话状态机：跨会话记住已确认参数。"
                     "action=view 查看；set 记录（键值）；reset 清空。"
                     "已确认参数会在后续 tdlas_wms_instrument 中自动复用，实现多轮补全、少重复问。",
      "inputSchema": {"type": "object",
@@ -3439,7 +3533,7 @@ TOOLS = [
                          "x": {"type": "number"}, "L_cm": {"type": "number"},
                          "species": {"type": "string"}, "wn_center": {"type": "number"}}}},
     {"name": "tdlas_device",
-     "description": "设备库统一管理：把固定的仪器（激光器/探测器/采集卡/光学）命名保存，"
+     "description": "设备库管理：激光器/探测器/DAQ/光学器件的存查。"
                     "仿真工具里用 setup= / laser= / pd= / daq= / optics= 直接引用，省去每次手填硬件参数。"
                     "action：list 列出全部；save 保存设备（device_type+name+参数）；view 查看；"
                     "delete 删除；set_default 设默认设备；save_setup 打包整机配置。"
@@ -3478,7 +3572,7 @@ TOOLS = [
                          "n_samples": {"type": "integer"}, "adc_bits": {"type": "integer"},
                          "v_range": {"type": "number"}, "throughput": {"type": "number"}}}},
     {"name": "tdlas_guide",
-     "description": "返回 AI 主动指导协议（面向实验新手）：参数索取优先级（实测值 → 器件型号检索 → "
+     "description": "AI 指导协议（SOP/参数指南/术语表）。"
                     "现场标定 → 内置默认并标注）、交互流程四步、专业术语表、全部参数索取指南。"
                     "**在开始任何 TDLAS 任务前应先调用本工具**，据此主动引导用户。",
      "inputSchema": {"type": "object",
@@ -3486,7 +3580,7 @@ TOOLS = [
                          "topic": {"type": "string",
                                    "description": "可选：查询特定术语（如 m / RIN / 2f/1f / LOD）"}}}},
     {"name": "tdlas_invert",
-     "description": "免标定浓度反演：给定测得的归一化 2f 峰高，返回摩尔分数（x = peak / k）。"
+     "description": "免标定浓度反演：2f/1f 峰高 → 摩尔分数。"
                     "优先用 k（来自 tdlas_wms_instrument 返回的 results.sensitivity_k）；"
                     "未给 k 时内部跑完整仪器链路在 x_ref 下重算，保证与测量同模型。"
                     "仅适用弱吸收（αL≪1），强吸收时结果偏高。"
@@ -3531,7 +3625,7 @@ TOOLS = [
                                        "description": "测量不确定度：同工况重复仿真次数（默认 0=不算）。建议 ≥10 才可引用；耗时 ≈ n_repeats × 单次链路。只含统计（随机）分量，系统项未计入"}},
                      "required": ["peak_2f1f", "species", "wn0"]}},
     {"name": "tdlas_detection_limit",
-     "description": "检测极限 LOD：给定等效透过率噪声 σ_τ，蒙特卡洛给出噪声等效浓度 NEC 与 LOD(nσ)。",
+     "description": "检测限：噪声 → NEC / LOD。",
      "inputSchema": {"type": "object",
                      "properties": {
                          "species": {"type": "string"}, "wn0": {"type": "number"},
@@ -3550,7 +3644,7 @@ TOOLS = [
                          "seed": {"type": "integer"}},
                          "required": ["species", "wn0"]}},
                          {"name": "tdlas_detection_limit_scan",
-     "description": "检测极限 LOD 随光程 L / 参考浓度 x 的扫描（系统选型：加光程能降多少 LOD）。"
+     "description": "检测限扫描：LOD 随光程/浓度的网格（选型用）。"
                     "弱吸收下 LOD∝1/L，且与参考浓度基本无关；返回 LOD 网格（行=浓度 x，列=光程 L）。",
      "inputSchema": {"type": "object",
                      "properties": {
@@ -3568,7 +3662,7 @@ TOOLS = [
                          "save_png": {"type": "boolean", "description": "是否出图，默认 False"}},
                      "required": []}},
     {"name": "tdlas_calibration_curve",
-     "description": "标定曲线：扫多个浓度，看 2f 峰高与浓度的线性关系，返回 R²。",
+     "description": "标定曲线：浓度 vs 2f/1f 峰高（线性/非线性拟合）。",
      "inputSchema": {"type": "object", "properties": {
          "species": {"type": "string", "description": "气体分子"},
          "wn0": {"type": "number", "description": "中心波数 cm⁻¹"},
@@ -3577,14 +3671,14 @@ TOOLS = [
          "save_png": {"type": "boolean", "description": "是否出图"}
      }, "required": ["species", "wn0"]}},
     {"name": "tdlas_export",
-     "description": "导出仿真结果到文件（CSV 或 JSON），方便后处理或导入 Origin/Excel。",
+     "description": "导出结果为 CSV/JSON。",
      "inputSchema": {"type": "object", "properties": {
          "data": {"description": "要导出的数据（dict 或 list of dict）"},
          "filename": {"type": "string", "description": "输出文件名（自动存到 tmp/mcp_out/）"},
          "format": {"type": "string", "enum": ["csv", "json"], "description": "导出格式（默认 csv）"}
      }, "required": ["data", "filename"]}},
     {"name": "tdlas_allan",
-     "description": "Allan 方差分析（重叠版 OA-VAR）：给定时序信号，求最优平均时间与噪声类型诊断（白噪声/1/f/漂移）。",
+     "description": "Allan 方差：评估系统稳定性与最优积分时间。",
      "inputSchema": {"type": "object", "properties": {
          "signal": {"type": "array", "items": {"type": "number"}, "description": "一维时序信号（2f 峰高/浓度/电压）"},
          "fs": {"type": "number", "description": "采样率 (Hz)"},
@@ -3593,7 +3687,7 @@ TOOLS = [
          "save_png": {"type": "boolean", "description": "是否出图"}
      }, "required": ["signal", "fs"]}},
     {"name": "tdlas_selftest",
-     "description": "全链路自检（有线 / 2f 形状 / 弱场线性 / 反演闭环 / 检测限 / 时域交叉验证）。",
+     "description": "全链路自检。",
      "inputSchema": {"type": "object", "properties": {}}},
 ]
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """TDLAS/WMS 仿真核心（最小可跑原型）。
 
@@ -2510,25 +2510,26 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
         multi = None
     _mtag = "（多浓度叠加）" if multi else ""
 
-    def seg(a_, y, color, label, lw=1.2, ls="-", _nu=None, _vd=None, _ylim=True):
-        """有效区实线 + 剔除区灰点线；y 轴范围只看有效区，避免剔除区伪影压扁曲线。
-
-        注意：曲线本身可能有上万点，而画布只有几百像素，逐点连线会互相穿插成
-        "乱麻"（绘图混叠）。这里做等间隔抽取，保证每像素至多 ~1 个点。
-
-        _nu/_vd：多浓度叠加时传该浓度自己的波数轴与有效区掩码（缺省用基准 r 的）；
-        _ylim=False：叠加时不逐条定幅，统一交给 `_ylim_multi`。
+    def seg(a_, y, color, label, lw=1.2, ls="-", _nu=None, _vd=None, _ylim=True, _trim=True):
+        """_trim=True：画有效区实线 + 剔除区灰点线（WMS 锁相信号用）；
+        _trim=False：整个区间都画实线，不画剔除区（DAS 无锁相瞬态，不需要剔除）。
         """
         nu_ = nu if _nu is None else _nu
         vd_ = vd if _vd is None else _vd
         stride = max(1, int(round(nu_.size / 1200)))
         sl = slice(None, None, stride)
-        a_.plot(nu_[vd_][sl], y[vd_][sl], ls, color=color, lw=lw, label=label)
-        if (~vd_).any():
-            a_.plot(nu_[~vd_][sl], y[~vd_][sl], ":", color="0.6", lw=1.0)
-        yv = y[vd_]
+        if _trim:
+            # WMS：有效区实线 + 剔除区灰点线
+            a_.plot(nu_[vd_][sl], y[vd_][sl], ls, color=color, lw=lw, label=label)
+            if (~vd_).any():
+                a_.plot(nu_[~vd_][sl], y[~vd_][sl], ":", color="0.6", lw=1.0)
+            yv = y[vd_]
+        else:
+            # DAS：整个区间都画实线
+            a_.plot(nu_[sl], y[sl], ls, color=color, lw=lw, label=label)
+            yv = y
         if _ylim and yv.size:
-            lo, hi = min(float(np.min(yv)), 0.0), max(float(np.max(yv)), 0.0)
+            lo, hi = float(np.min(yv)), float(np.max(yv))
             pad = 0.08 * (hi - lo) or 1e-12
             a_.set_ylim(lo - pad, hi + pad)
 
@@ -2589,17 +2590,25 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
                 if _all_vd:
                     _av = np.concatenate(_all_vd)
                     a_.set_ylim(_av.min()*0.995, _av.max()*1.005)
+                a_.set_ylabel("归一化透过率 T/T0")
+                a_.set_title("② 直接吸收 DAS（无调制，归一化透过率）" + _mtag)
             else:
+                # DAS 原始信号：探测器采集到什么样就是什么样（斜的 L-I 曲线）
+                # 不扣基线，但纵轴只按有效区数据定，让吸收凹陷可见
                 _y = r["v_das_cyc"]
-                _y_norm = _y / float(np.median(_y[vd]))
-                seg(a_, _y_norm, "C0", "归一化透过率 T/T0")
-            a_.set_ylabel("归一化透过率 T/T0")
-            a_.set_xlabel(r"波数 (cm$^{-1}$)")
-            a_.set_title("② 直接吸收 DAS（无调制，归一化）" + _mtag)
+                seg(a_, _y, "C0", "DAS 原始 PD 信号", _ylim=False)
+                # 纵轴：只按有效区定，不从 0 开始
+                _yv = _y[vd]
+                if _yv.size:
+                    _lo, _hi = float(_yv.min()), float(_yv.max())
+                    _pad = 0.05 * (_hi - _lo) or 1e-9
+                    a_.set_ylim(_lo - _pad, _hi + _pad)
+                a_.set_ylabel("PD 电压 (V)")
+                a_.set_title("② 直接吸收 DAS（无调制，原始 PD 信号）" + _mtag)
         elif key == "al":
             mix = r.get("alphaL_per_species")
             if multi:
-                _multi_seg(a_, multi, "das_cyc")
+                _multi_seg(a_, multi, "alphaL_cyc")
                 # 理论 αL 只画基准浓度一条作参考（各浓度理论值同形只差缩放，全画会糊）
                 _p0, _r0 = multi[0]
                 seg(a_, _r0["alphaL_cyc"], "0.35",
@@ -2609,11 +2618,20 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
                                  for y in (_rr["das_cyc"], _rr["alphaL_cyc"])])
             else:
                 seg(a_, r["das_cyc"], "C0", "DAS αL（实测，-ln 提取）")
-                seg(a_, r["alphaL_cyc"], "C2", "HITRAN 理论 αL（虚线=数据库参考）", lw=1.2, ls="--")
-                if mix:                               # 混合气：叠加各组分 αL
-                    cols = plt.cm.viridis(np.linspace(0.1, 0.85, max(len(mix), 2)))
-                    for _c, _p in zip(cols, mix):
-                        seg(a_, _p["alphaL"], _c, _p["label"], lw=0.9, ls="-.")
+                seg(a_, r["alphaL_cyc"], "C2", "HITRAN 理论 αL（虚线=数据库参考）", lw=1.2, ls="--", _ylim=False)
+                if mix:                               # 混合气：只画主要组分（>1% 总贡献）
+                    _total_peak = float(np.max(r["alphaL_cyc"][vd]))
+                    _major = [_p for _p in mix
+                              if float(np.max(_p["alphaL"])) > 0.01 * _total_peak]
+                    cols = plt.cm.viridis(np.linspace(0.1, 0.85, max(len(_major), 2)))
+                    for _c, _p in zip(cols, _major):
+                        seg(a_, _p["alphaL"], _c, _p["label"], lw=0.9, ls="-.", _ylim=False, _trim=False)
+                # 纵轴：按总吸光度（实测）整个区间定（DAS 无剔除区）
+                _yv = r["das_cyc"]
+                if _yv.size:
+                    _lo, _hi = float(_yv.min()), float(_yv.max())
+                    _pad = 0.1 * (_hi - _lo) or 1e-9
+                    a_.set_ylim(_lo - _pad, _hi + _pad)
             a_.axhline(0.0, color="k", lw=0.5, alpha=0.4)
             a_.set_ylabel(r"$\alpha L$")
             a_.set_xlabel(r"波数 (cm$^{-1}$)")
@@ -2650,7 +2668,7 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
             a_.set_title(f"⑥ 归一化：{m['norm_method']}" + _mtag)
 
     _ALL = ["drive", "das", "al", "f1", "f2", "norm"]
-    _SPECTRAL = {"das", "al", "f1", "f2", "norm"}
+    _SPECTRAL = {"f1", "f2", "norm"}
     if panels in (None, "all"):
         keys = _ALL
     elif isinstance(panels, str):
@@ -2681,9 +2699,10 @@ def plot_wms_instrument(r, out_png, panels="all", multi=None):
             a_.plot([], [], ":", color="0.6", lw=1.5,
                     label="点线=剔除区（转折点，不可信）")
 
-    for a_ in ax:
+    for a_, k_ in zip(ax, keys):
         a_.grid(alpha=0.3)
-        a_.legend(loc="upper right", fontsize=6 if multi else 7)
+        if k_ != "drive":  # 驱动电压面板无 legend
+            a_.legend(loc="upper right", fontsize=6 if multi else 7)
     _x_tag = ("/".join(_ppm_label(_p) for _p, _rr in multi) if multi
               else str(m['x']))
     fig.suptitle(f"TDLAS 仪器链路 — {m['species']} @ {m['wn_center']:.3f} cm$^{{-1}}$   "
