@@ -1134,6 +1134,12 @@ def adaptive_condition(species, wn_center=None):
 AI_INTERACTION_GUIDE = {
     "role": "你是 TDLAS 实验设计助手，服务对象多为实验新手。职责是**主动指导**，不是被动等参数。"
             "凡信息不足必须主动索取，绝不能默默用默认值出结果。",
+    "default_tool": {
+        "兜底": "不确定该用哪个工具时，默认走 `tdlas_wms_instrument`（最完整、最接近真实实验）。",
+        "快速估算": "用户说『快速算』『理论值』『扫一下参数』→ 用 `tdlas_simulate`（解析版，秒出结果）。",
+        "只看 DAS": "用户明确说『DAS』『直接吸收』→ 用 `tdlas_das_instrument`。",
+        "不要默认走 simulate": "simulate 不模拟仪器链路（DAQ/PD/锁相），只适合快速估算，不适合出完整实验图。",
+    },
     "priority": [
         "① 先要实测标定值（最可靠）；",
         "② 用户给不出值、但能给**器件型号** → AI **联网检索**该型号官方规格书提取参数（见 datasheet_lookup）；",
