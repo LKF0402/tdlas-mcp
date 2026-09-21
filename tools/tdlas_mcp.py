@@ -3139,13 +3139,20 @@ def t_allan(signal, fs, max_tau=None, tau_points=100, save_png=False):
     result = overlapping_allan(s, fs=float(fs), max_tau=max_tau, tau_points=int(tau_points))
     diag = allan_noise_diag(result)
 
+    # τ=1s 时的噪声水平（白噪声底）
+    idx_1s = int(np.argmin(np.abs(result["taus"] - 1.0)))
+    sigma_1s = float(result["adev"][idx_1s])
+
     out = {
-        "N": result["N"], "fs_Hz": result["fs"], "dt_s": result["dt"],
-        "tau_opt_s": result["tau_opt"],
-        "adev_opt": result["adev_opt"],
+        "method": "OA-VAR (overlapping)",
+        "N": int(result["N"]),
+        "fs_Hz": float(result["fs"]),
+        "tau_opt_s": float(result["tau_opt"]),
+        "sigma_opt": float(result["adev_opt"]),        # 1σ at optimal averaging
+        "LOD_3sigma": float(3.0 * result["adev_opt"]),  # 3σ detection limit
+        "sigma_1s": sigma_1s,                           # 1σ at τ=1s (white noise floor)
         "noise_diagnosis": diag,
-        "method": "overlapping Allan deviation (OA-VAR)",
-        "reference": "Werle et al. 1993, 2011 (Allan-Werle method)",
+        "reference": "Werle et al. 1993, 2011",
     }
 
     if save_png:
