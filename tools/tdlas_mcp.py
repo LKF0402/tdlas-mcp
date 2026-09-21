@@ -684,6 +684,9 @@ def _resolve_devices(setup=None, laser=None, pd=None, daq=None, optics=None):
     返回的参数字典在调用方用 setdefault 合并（本次显式给的具体参数仍最优先）。
     """
     dev = _load_devices()
+    # ★ 不传 setup 时自动用默认 setup
+    if setup is None:
+        setup = dev.get("default", {}).get("setup")
     pick = {"laser": laser, "pd": pd, "daq": daq, "optics": optics}
     if setup:
         st = dev.get("setup", {}).get(str(setup))
@@ -741,6 +744,9 @@ def _resolve_devices(setup=None, laser=None, pd=None, daq=None, optics=None):
                {"warning": "本条目建立于来源追踪之前，未记录 source；"
                            "建议重存以补上（如规格书则 source=datasheet）"}),
         }
+    # ★ 从 setup 取出工况参数
+    if setup and st.get("conditions"):
+        resolved["__conditions__"] = dict(st["conditions"])
     return resolved
 
 
@@ -2358,6 +2364,12 @@ def t_das_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     dev_params = _resolve_devices(setup, laser, pd, daq, optics)
     for k, v in dev_params.items():
         inst.setdefault(k, v)
+    # ★ 从 setup 取出工况参数合并（显式参数优先）
+    _conds = dev_params.pop("__conditions__", None)
+    if _conds:
+        for k, v in _conds.items():
+            inst.setdefault(k, v)
+        assumed.append(f"工况参数来自 setup={setup!r}：{list(_conds.keys())}")
     assumed += [k for k, v in given_inst.items()
                 if v is None and k not in _NO_CONFIRM and k not in inst
                 and (k not in _FRINGE_KEYS or inst.get("fringe"))]
@@ -2549,6 +2561,12 @@ def t_wms_instrument(species="CH4", wn_center=2968.5, T=None, P=None, x=None, L_
     dev_params = _resolve_devices(setup, laser, pd, daq, optics)
     for k, v in dev_params.items():
         inst.setdefault(k, v)
+    # ★ 从 setup 取出工况参数合并（显式参数优先）
+    _conds = dev_params.pop("__conditions__", None)
+    if _conds:
+        for k, v in _conds.items():
+            inst.setdefault(k, v)
+        assumed.append(f"工况参数来自 setup={setup!r}：{list(_conds.keys())}")
     assumed += [k for k, v in given_inst.items()
                 if v is None and k not in _NO_CONFIRM and k not in inst
                 and (k not in _FRINGE_KEYS or inst.get("fringe"))]
@@ -2925,12 +2943,42 @@ def t_device(action="list", device_type=None, name=None,
     dev = _load_devices()
 
     if action == "list":
-        return {"devices": {k: {n: dict(v) for n, v in dev.get(k, {}).items()}
-                            for k in ("laser", "pd", "daq", "optics")},
-                "setups": dict(dev.get("setup", {})),
-                "default": dict(dev.get("default", {})),
-                "hint": "在 tdlas_wms_instrument / tdlas_das_instrument 里用 setup= 或 "
-                        "laser= / pd= / daq= / optics= 引用"}
+        def _brief(k, v):
+            keys_map = {"laser": ["wn_ref", "eta_VI", "dnu_dI", "i_th"],
+                        "pd": ["resp", "gain", "bw"],
+                        "daq": ["fs", "adc_bits", "v_range"],
+                        "optics": ["throughput"]}
+            keys = keys_map.get(k, [])
+            return {kk: v[kk] for kk in keys if kk in v}
+
+        devices_brief = {}
+        for k in ("laser", "pd", "daq", "optics"):
+            devices_brief[k] = {n: _brief(k, v) for n, v in dev.get(k, {}).items()}
+
+        setups_brief = {}
+        for n, st in dev.get("setup", {}).items():
+            setups_brief[n] = {
+                "laser": st.get("laser"),
+                "pd": st.get("pd"),
+                "daq": st.get("daq"),
+                "optics": st.get("optics"),
+                "conditions": st.get("conditions", {}),
+            }
+
+        return {
+            "summary": {
+                "n_laser": len(dev.get("laser", {})),
+                "n_pd": len(dev.get("pd", {})),
+                "n_daq": len(dev.get("daq", {})),
+                "n_optics": len(dev.get("optics", {})),
+                "n_setup": len(dev.get("setup", {})),
+                "default_setup": dev.get("default", {}).get("setup"),
+            },
+            "devices": devices_brief,
+            "setups": setups_brief,
+            "default": dict(dev.get("default", {})),
+            "hint": "用 view_setup name=xxx 看完整工况参数；用 set_default_setup name=xxx 设默认",
+        }
 
     if action == "view":
         dt, nm = str(device_type), str(name)
@@ -3014,6 +3062,31 @@ def t_device(action="list", device_type=None, name=None,
         _save_devices(dev)
         return {"default": dict(dev["default"])}
 
+    if action == "set_default_setup":
+        """设默认 setup：不传 setup= 时自动用这个"""
+        nm = str(name or "").strip()
+        if not nm:
+            dev["default"].pop("setup", None)
+            _save_devices(dev)
+            return {"default_setup": None, "hint": "已清除默认 setup"}
+        if nm not in dev.get("setup", {}):
+            _exist = sorted((dev.get("setup") or {}).keys())
+            return {"error": f"setup {nm!r} 不存在",
+                    "available": _exist,
+                    "hint": "请先 save_setup 打包"}
+        dev.setdefault("default", {})["setup"] = nm
+        _save_devices(dev)
+        return {"default_setup": nm, "hint": f"以后不传 setup= 时自动用 {nm!r}"}
+
+    if action == "view_setup":
+        """查看某个 setup 的完整内容（设备 + 工况）"""
+        nm = str(name or "").strip()
+        st = dev.get("setup", {}).get(nm)
+        if not st:
+            _exist = sorted((dev.get("setup") or {}).keys())
+            return {"error": f"setup {nm!r} 不存在", "available": _exist}
+        return {"setup": nm, "content": st}
+
     if action == "save_setup":
         st = {k: v for k, v in {"laser": laser, "pd": pd, "daq": daq, "optics": optics}.items() if v}
         # ① 缺设备：不只报错，而是告诉 AI **该向用户问什么**
@@ -3043,9 +3116,18 @@ def t_device(action="list", device_type=None, name=None,
                     "hint": "请换一个显著且不同的名字，或先用 action=view 查看已有配置"}
         full = {"laser": st.get("laser"), "pd": st.get("pd"),
                 "daq": st.get("daq"), "optics": st.get("optics")}
+        # ★ 工况参数打包
+        _COND_PARAMS = ("T", "P", "L_cm", "wn_center", "mod_freq_Hz", "freq_Hz",
+                        "drift_frac", "flicker_frac", "scan_span_cm", "am_i0")
+        cond = {k: params.get(k) for k in _COND_PARAMS if params.get(k) is not None}
+        if cond:
+            full["conditions"] = cond
         dev.setdefault("setup", {})[nm] = full
         _save_devices(dev)
         out = {"saved_setup": nm, "setup": full, "hint": f"引用：setup={nm!r}"}
+        if cond:
+            out["conditions_saved"] = list(cond.keys())
+            out["conditions_hint"] = "工况参数已打包进整机配置，加载 setup 时自动套用（显式传参仍优先）"
         if auto_named:
             out["name_auto_generated"] = True
             out["name_note"] = ("未给合适整机名，已按设备名自动拼接。"
@@ -3549,7 +3631,7 @@ TOOLS = [
      "description": "设备库管理：激光器/探测器/DAQ/光学器件的存查。"
                     "仿真工具里用 setup= / laser= / pd= / daq= / optics= 直接引用，省去每次手填硬件参数。"
                     "action：list 列出全部；save 保存设备（device_type+name+参数）；view 查看；"
-                    "delete 删除；set_default 设默认设备；save_setup 打包整机配置。"
+                    "delete 删除；set_default 设默认设备；save_setup 打包整机；set_default_setup 设默认整机；view_setup 看整机详情。"
                     "save 会校验：设备名非空、参数为有限数值且在物理合法域内"
                     "（gain/bw/fs/v_range/eta_* 须 >0，adc_bits 须为 4–32 的整数，"
                     "throughput ∈ (0,1]，dnu_dI ≠ 0），非法即拒绝保存并说明原因；"
